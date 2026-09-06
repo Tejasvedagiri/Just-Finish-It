@@ -31,7 +31,13 @@ PLAN_FORMAT_RULES = """
 """
 
 
-def get_system_message(phase: str, plan_path: str = "plan.md") -> str:
+# Default plan location: inside the .JFI session folder. The manager overrides this
+# with its own resolved path (see SimpleSessionManager.plan_path); it is only used as a
+# fallback when callers do not pass an explicit plan_path.
+DEFAULT_PLAN_PATH = ".JFI/plan.md"
+
+
+def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH) -> str:
     rules = PLAN_FORMAT_RULES.format(plan_path=plan_path)
 
     if phase == "planner":
@@ -127,7 +133,7 @@ def get_system_message(phase: str, plan_path: str = "plan.md") -> str:
     return ""
 
 
-def get_phase_trigger(phase: str, goal: str = "", plan_path: str = "plan.md", iteration: int = 1) -> str:
+def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_PATH, iteration: int = 1) -> str:
     """The opening human turn that kicks off a phase."""
     if phase == "planner":
         if iteration > 1:
@@ -248,13 +254,12 @@ def _elide_payloads(block) -> None:
 
 class SimpleSessionManager:
     def __init__(self, console: AbstractManager, session_id: str):
-        self.plan_content = ""
         self.console: AbstractManager = console
         self.session_id = session_id.lower().replace(" ", "_")
 
         # Path logic handled entirely inside the manager
         os_session_path = os.environ.get("SESSION_PATH", ".")
-        self.session_path = Path(os_session_path) / ".just_finish_it" / self.session_id
+        self.session_path = Path(os_session_path) / ".JFI" / self.session_id
         self.session_pickle_path = self.session_path / "history.pkl"
 
         # New: Metadata tracking path
@@ -272,19 +277,27 @@ class SimpleSessionManager:
     # ------------------------------------------------------------ plan file
 
     def _resolve_plan_path(self) -> str:
+        """
+        Single source of truth for the plan location: it always lives inside this
+        session's .JFI folder. The path is made cwd-relative when possible so it
+        works with the file tools (which are sandboxed to the working directory).
+        """
         plan = (self.session_path / "plan.md").resolve()
         cwd = Path.cwd().resolve()
         if plan.is_relative_to(cwd):
             return str(plan.relative_to(cwd))
-        # Session dir lives outside the tool sandbox; keep the plan reachable.
+        # Session dir lives outside the tool sandbox; express it relative to cwd
+        # so the plan still lands in .JFI/<session>/plan.md.
         self.console.display_system(
-            f"Session path is outside the working directory — keeping the plan at ./plan.md"
+            "Session path is outside the working directory — keeping the plan inside the "
+            ".JFI session folder."
         )
-        return "plan.md"
+        return f".JFI/{self.session_id}/plan.md"
 
     @property
     def plan_file(self) -> Path:
-        return Path.cwd() / self.plan_path
+        """Absolute location of the plan file (always inside this session's .JFI folder)."""
+        return (self.session_path / "plan.md").resolve()
 
     def plan_progress(self):
         """(ticked, total) task-list checkboxes in the plan file."""
@@ -298,9 +311,9 @@ class SimpleSessionManager:
 
     def ensure_plan_file(self) -> bool:
         """
-        The planner is supposed to write the plan itself. Only when it clearly
-        didn't do we fall back to scraping the transcript, so a real plan file
-        is never clobbered with the model's chat prose.
+        The planner writes the plan itself via the file tools; this only tracks a
+        plan that already exists so progress shows up in the status bar. A missing
+        or empty plan is never scraped from the transcript into markdown anymore.
         """
         if self.plan_file.exists() and self.plan_file.stat().st_size:
             self.track_file(self.plan_path)
@@ -313,28 +326,8 @@ class SimpleSessionManager:
             self.console.display_system(
                 f"Warning: {self.plan_path} exists but has no '- [ ]' items to track."
             )
-            return False
-
-        # Fallback: the planner never wrote the file.
-        for message in reversed(self.history):
-            if message.get("role") == "assistant" and message.get("content"):
-                self.plan_content = message["content"]
-                break
-
-        if not self.plan_content:
-            self.console.display_system("Warning: No plan found in history to save.")
-            return False
-
-        cleaned = re.sub(r"^\s*PLANNER_COMPLETE\s*$", "", self.plan_content, flags=re.M).strip()
-        try:
-            self.plan_file.parent.mkdir(parents=True, exist_ok=True)
-            self.plan_file.write_text(cleaned + "\n", encoding="utf-8")
-            self.console.display_system(
-                f"Planner did not write a file; saved its transcript to {self.plan_path} instead."
-            )
-            self.track_file(self.plan_path)
-        except IOError as e:
-            self.console.display_system(f"Failed to save plan markdown: {e}")
+        else:
+            self.console.display_system(f"No plan file found at {self.plan_path}.")
         return False
 
     # ------------------------------------------------------------- metadata

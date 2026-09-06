@@ -40,7 +40,6 @@ while True:
     if is_approved:
         console.display_system("Plan approved! Moving to execution...")
         ssm.add_message("user", user_input)  # Add their final confirmation to history
-        ssm.generate_plan_markdown()
         break  # Exit the loop
 
     # 2. If NOT approved, proceed with planning
