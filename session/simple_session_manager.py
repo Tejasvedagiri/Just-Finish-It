@@ -1,81 +1,249 @@
-import os
+import copy
 import json
+import os
 import pickle
+import re
 from pathlib import Path
 
 from manager.abstract_manager import AbstractManager
 
+# --- context budget ---------------------------------------------------------
+# Read lazily (not at import time) so load_dotenv() ordering doesn't matter.
+DEFAULT_CONTEXT_SIZE = 32768
+DEFAULT_CONTEXT_RATIO = 0.7  # headroom left for the model's own reply
 
-def get_system_message(phase: str) -> str:
+# History structure kept verbatim no matter how tight the budget gets.
+KEEP_RECENT_BLOCKS = 6
+TOOL_RESULT_HEAD = 600
+TOOL_RESULT_TAIL = 400
+
+PLAN_FORMAT_RULES = """
+    PLAN FILE FORMAT (mandatory, no exceptions):
+    - The plan file is exactly: {plan_path}
+    - Every actionable item MUST be a GitHub task-list line and nothing else:
+          - [ ] 1.1 Short description of the step
+      Not started is "- [ ] ", finished is "- [x] ".
+      NEVER use any other marker for progress: no U+2610 ballot boxes, no emoji
+      ticks, no tables of checkboxes. Only "- [ ]" and "- [x]".
+    - Numbering: sections are 1, 2, 3 ...; steps inside them are 1.1, 1.2 ...
+    - Item text must stay byte-identical when you tick it: change only the
+      space inside the brackets to an x, so a targeted replace can find it.
+"""
+
+
+def get_system_message(phase: str, plan_path: str = "plan.md") -> str:
+    rules = PLAN_FORMAT_RULES.format(plan_path=plan_path)
+
     if phase == "planner":
-        return """
-            You are a master Planner Agent. Your job is to generate a .md file containing a detailed, step-by-step plan to achieve the user's goal.
-            The plan must be generic enough to support any task (writing, coding, research, data processing, etc.).
-            All the plans must be numbered as 1 and sub plan must be 1.1 1.2 and so on. Each sub plan must have progress checkbox which can be check if completed by AI.
+        return f"""
+            You are a master Planner Agent. You own the plan file and nothing else.
+            The plan must work for any kind of goal: writing, coding, research, data processing.
+            {rules}
 
-            The plan should contain:
-            1. Title of the Project
-            2. Required Context/Prerequisites
-            3. Step-by-Step Execution Plan (Tabular format with checkboxes for progress)
-            4. Final Validation/Review Step
+            Your job:
+            1. If {plan_path} does not exist yet, create it with write_file. If the plan is long,
+               write it in several append_to_file calls rather than one oversized write_file.
+               Use this structure:
+                   # <Project Title>
+                   ## Context and Prerequisites
+                   ## Implementation
+                   - [ ] 1.1 ...
+                   - [ ] 1.2 ...
+                   ## Testing
+                   - [ ] 2.1 ...
+            2. If {plan_path} ALREADY EXISTS, read_file it first. Every "- [x]" line is work that
+               is already finished: leave those lines exactly as they are. Add new "- [ ]" items
+               for the new request, continuing the existing numbering.
+            3. Do NOT implement anything in this phase. Write the plan file only.
+            4. Never ask the user a question and never wait for approval.
 
-            When you have finished outputting the plan, you must output the exact phrase: "PLANNER_COMPLETE".
+            When the plan file is saved, output the exact phrase on its own line: PLANNER_COMPLETE
         """
 
     elif phase == "imp":
-        return """
-            You are an expert Implementation Agent. Your job is to build, draft, or code the core deliverables specified in the markdown plan.
+        return f"""
+            You are an expert Implementation Agent. You build the deliverables and you keep the
+            plan file honest as you go.
+            {rules}
 
-            Guidelines:
-                1. Work step-by-step through the 'Implementation' portion of the plan.
-                2. CRITICAL: Before calling ANY tool for a step, you MUST first output a text message explicitly stating which step you are working on, using exactly this format: 
-                **[CURRENT TASK: Phase X - Step Y]**
-                3. Use tools to create files, write code, or execute setup commands (use append_to_file for large documents).
-                4. Evaluate tool results. If a file creation or command fails, attempt to fix it before moving on
-                5. CRITICAL PROGRESS CHECKPOINT: Once all implementation steps are fully executed and verified, you MUST use the file tools to open your plan file (e.g., plan.md), update the progress checkboxes from empty [ ] to completed [x], and save it back out so progress is checkpointed.
+            Work ONE step at a time, in this exact loop:
+            1. read_file {plan_path} and take the FIRST unchecked "- [ ]" item under Implementation.
+            2. State which item you are on, in exactly this format:
+               **[CURRENT TASK: 1.1]**
+            3. Do the work with the tools (write_file, append_to_file, replace_in_file,
+               execute_command).
+            4. IMMEDIATELY tick that one item, using replace_in_file on {plan_path}:
+                   old_string: "- [ ] 1.1 Short description of the step"
+                   new_string: "- [x] 1.1 Short description of the step"
+               Tick exactly one box per step, right after finishing that step. Do NOT batch the
+               ticks until the end, and do NOT rewrite the whole plan file just to tick a box.
+            5. Repeat from step 1 until no unchecked Implementation items are left.
 
-                When the implementation and plan file updates are fully completed, you must output the exact phrase: "IMP_COMPLETE".
-                """
+            If a tool or command returns an error, fix the cause and retry it before moving on.
+            Leave the Testing items alone; that is the next phase's job.
+            Never ask the user a question and never wait for approval.
+
+            When every Implementation item reads "- [x]", output the exact phrase on its own
+            line: IMP_COMPLETE
+        """
 
     elif phase == "testing":
-        return """
-            You are an expert Testing Agent. Your job is to verify that the implementation works correctly and meets the goals of the plan.
+        return f"""
+            You are an expert Testing Agent. You verify the work and keep the plan file honest.
+            {rules}
 
-            Guidelines:
-            1. CRITICAL: Before testing a new section, explicitly state what you are testing using this format:
-               **[CURRENT TEST: Section/Step Name]**
-            2. Use tools to run tests, execute the code, or read the generated files to check for errors/line counts.
-            3. If you find bugs, errors, or missing pieces, use the tools to fix them immediately and re-test.
+            Work ONE step at a time, in this exact loop:
+            1. read_file {plan_path} and take the FIRST unchecked "- [ ]" item under Testing.
+            2. State what you are testing, in exactly this format:
+               **[CURRENT TEST: 2.1]**
+            3. Run it with execute_command, or read the produced files to verify them.
+            4. If it fails, fix the implementation with the file tools and re-run until it passes.
+            5. IMMEDIATELY tick that one item with replace_in_file on {plan_path}, exactly as the
+               Implementation agent does. One box per step, right after it passes.
+            6. Repeat from step 1 until no unchecked Testing items are left.
 
-            When all testing is successful and no further fixes are needed, you must output the exact phrase: "TESTING_COMPLETE".
+            Never ask the user a question and never wait for approval.
+
+            When every Testing item reads "- [x]", output the exact phrase on its own
+            line: TESTING_COMPLETE
         """
 
     elif phase == "reviewer":
-        return """
-            You are an expert Reviewer Agent. Your job is to perform a final audit of the entire project.
+        return f"""
+            You are an expert Reviewer Agent. You report on the finished work.
+            You do NOT gate anything: you never ask for approval, never ask the user a question,
+            and never wait for a reply.
+            {rules}
 
-            Guidelines:
-            1. Use tools to quickly inspect the final state of the files and outputs.
-            2. Check for edge cases, missing requirements, or overall quality.
-            3. Provide a final, polished summary report to the user detailing what was built and tested.
+            1. read_file {plan_path} and inspect the files that were produced.
+            2. Write a short, concrete report: what was built, what was verified, and anything
+               that is still incomplete or looks wrong.
+            3. If an item is still "- [ ]" but is genuinely finished, tick it with replace_in_file.
+               If it is genuinely unfinished, just say so plainly in your report.
 
-            When your review report is finished, you must output the exact phrase: "REVIEWER_COMPLETE".
+            When the report is written, output the exact phrase on its own line: REVIEWER_COMPLETE
         """
 
     return ""
 
 
-def get_phase_trigger(phase: str, goal: str = "") -> str:
-    """Provides the initial human prompt to kick off a specific phase."""
+def get_phase_trigger(phase: str, goal: str = "", plan_path: str = "plan.md", iteration: int = 1) -> str:
+    """The opening human turn that kicks off a phase."""
     if phase == "planner":
-        return f"My goal is: {goal}\n\nPlease generate the detailed step-by-step markdown plan."
-    elif phase == "imp":
-        return "The plan is approved. Please begin the implementation phase step-by-step. Use tools to create the required files and build the project."
-    elif phase == "testing":
-        return "Implementation is complete. Please begin the testing phase. Run the necessary commands or scripts to verify everything works, and fix any bugs you find."
-    elif phase == "reviewer":
-        return "Testing is complete. Please review the final output against the original plan to ensure the goal was met. Provide a final summary report."
+        if iteration > 1:
+            return (
+                f"Update the plan at {plan_path} so it covers the request above.\n"
+                f"Read it first, keep every '- [x]' line untouched, and append new '- [ ]' items "
+                f"for the new work, continuing the numbering."
+            )
+        return (
+            f"My goal is: {goal}\n\n"
+            f"Write the step-by-step plan to {plan_path} now, using the mandated '- [ ]' format."
+        )
+
+    if phase == "imp":
+        return (
+            f"Begin implementation. Work through the unchecked '- [ ]' Implementation items in "
+            f"{plan_path} one at a time, ticking each one with replace_in_file the moment you "
+            f"finish it."
+        )
+
+    if phase == "testing":
+        return (
+            f"Implementation is done. Work through the unchecked '- [ ]' Testing items in "
+            f"{plan_path} one at a time, fixing anything that fails and ticking each item as it "
+            f"passes."
+        )
+
+    if phase == "reviewer":
+        return (
+            f"Testing is done. Review the final state against {plan_path} and write your report. "
+            f"Do not ask for approval."
+        )
+
     return "Please continue."
+
+
+# --- context compression helpers -------------------------------------------
+
+def _estimate_tokens(messages) -> int:
+    """Cheap character-based estimate; good enough to drive a budget."""
+    total = 0
+    for message in messages:
+        total += len(str(message.get("content") or "")) + 8
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            total += len(str(function.get("name") or ""))
+            total += len(str(function.get("arguments") or ""))
+    return total // 4
+
+
+def _is_nudge(message) -> bool:
+    return (
+        message.get("role") == "user"
+        and "when you are entirely finished with this phase" in str(message.get("content") or "")
+    )
+
+
+def _blocks(history):
+    """
+    Groups the history so that an assistant message carrying tool_calls stays
+    glued to its tool results. Splitting those apart is rejected by the API.
+    """
+    grouped, current = [], []
+    for message in history:
+        if message.get("role") == "tool" and current:
+            current.append(message)
+            continue
+        if current:
+            grouped.append(current)
+        current = [message]
+    if current:
+        grouped.append(current)
+    return grouped
+
+
+def _elide(text: str, head: int, tail: int) -> str:
+    if len(text) <= head + tail:
+        return text
+    dropped = len(text) - head - tail
+    return f"{text[:head]}\n… [{dropped} characters elided] …\n{text[-tail:]}"
+
+
+DIGEST_MARKER = "[EARLIER HISTORY COMPRESSED TO SAVE CONTEXT]"
+
+
+def _is_digest(block) -> bool:
+    return any(DIGEST_MARKER in str(m.get("content") or "") for m in block)
+
+
+def _trim_tool_results(block) -> None:
+    for message in block:
+        if message.get("role") == "tool":
+            message["content"] = _elide(
+                str(message.get("content") or ""), TOOL_RESULT_HEAD, TOOL_RESULT_TAIL
+            )
+
+
+def _elide_payloads(block) -> None:
+    """Strips write_file/append_to_file bodies; the bytes are already on disk."""
+    for message in block:
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            if function.get("name") not in ("write_file", "append_to_file"):
+                continue
+            try:
+                args = json.loads(function.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                continue
+            content = str(args.get("content") or "")
+            if len(content) <= TOOL_RESULT_HEAD:
+                continue
+            args["content"] = (
+                f"<{len(content)} characters already written to "
+                f"{args.get('file_path', 'the file')}; read_file it if you need them>"
+            )
+            function["arguments"] = json.dumps(args)
 
 
 class SimpleSessionManager:
@@ -97,6 +265,79 @@ class SimpleSessionManager:
 
         self.history = self.load_history()
         self.metadata = self.load_metadata()
+
+        # Path the agent passes to the file tools (they are sandboxed to cwd).
+        self.plan_path = self._resolve_plan_path()
+
+    # ------------------------------------------------------------ plan file
+
+    def _resolve_plan_path(self) -> str:
+        plan = (self.session_path / "plan.md").resolve()
+        cwd = Path.cwd().resolve()
+        if plan.is_relative_to(cwd):
+            return str(plan.relative_to(cwd))
+        # Session dir lives outside the tool sandbox; keep the plan reachable.
+        self.console.display_system(
+            f"Session path is outside the working directory — keeping the plan at ./plan.md"
+        )
+        return "plan.md"
+
+    @property
+    def plan_file(self) -> Path:
+        return Path.cwd() / self.plan_path
+
+    def plan_progress(self):
+        """(ticked, total) task-list checkboxes in the plan file."""
+        try:
+            text = self.plan_file.read_text(encoding="utf-8")
+        except Exception:
+            return 0, 0
+        done = len(re.findall(r"^[ \t]*[-*][ \t]*\[[xX]\]", text, re.M))
+        todo = len(re.findall(r"^[ \t]*[-*][ \t]*\[[ ]\]", text, re.M))
+        return done, done + todo
+
+    def ensure_plan_file(self) -> bool:
+        """
+        The planner is supposed to write the plan itself. Only when it clearly
+        didn't do we fall back to scraping the transcript, so a real plan file
+        is never clobbered with the model's chat prose.
+        """
+        if self.plan_file.exists() and self.plan_file.stat().st_size:
+            self.track_file(self.plan_path)
+            done, total = self.plan_progress()
+            if total:
+                self.console.display_system(
+                    f"Plan ready at {self.plan_path} — {done}/{total} items ticked."
+                )
+                return True
+            self.console.display_system(
+                f"Warning: {self.plan_path} exists but has no '- [ ]' items to track."
+            )
+            return False
+
+        # Fallback: the planner never wrote the file.
+        for message in reversed(self.history):
+            if message.get("role") == "assistant" and message.get("content"):
+                self.plan_content = message["content"]
+                break
+
+        if not self.plan_content:
+            self.console.display_system("Warning: No plan found in history to save.")
+            return False
+
+        cleaned = re.sub(r"^\s*PLANNER_COMPLETE\s*$", "", self.plan_content, flags=re.M).strip()
+        try:
+            self.plan_file.parent.mkdir(parents=True, exist_ok=True)
+            self.plan_file.write_text(cleaned + "\n", encoding="utf-8")
+            self.console.display_system(
+                f"Planner did not write a file; saved its transcript to {self.plan_path} instead."
+            )
+            self.track_file(self.plan_path)
+        except IOError as e:
+            self.console.display_system(f"Failed to save plan markdown: {e}")
+        return False
+
+    # ------------------------------------------------------------- metadata
 
     def load_metadata(self):
         """Loads project metadata like tracked files."""
@@ -128,8 +369,14 @@ class SimpleSessionManager:
         summary = "CURRENT PROJECT FILES:\n"
         for f in files:
             summary += f"- {f}\n"
-        summary += "\n(Tip for AI: If you need to change anything, use the read_file tool to inspect these files first, then use write_file or append_to_file to modify them.)"
+        summary += (
+            "\n(Tip for AI: If you need to change anything, use the read_file tool to inspect "
+            "these files first, then use replace_in_file for small edits, or write_file / "
+            "append_to_file to rewrite them.)"
+        )
         return summary
+
+    # -------------------------------------------------------------- history
 
     def load_history(self):
         # Ensure the session folder exists
@@ -168,33 +415,140 @@ class SimpleSessionManager:
         self.save_history()
 
     def get_messages(self, phase: str):
-        message = [{"role": "system", "content": get_system_message(phase)}]
-        message.extend(self.history)
+        message = [{"role": "system", "content": get_system_message(phase, self.plan_path)}]
+        message.extend(self.compress_history(reserve=len(get_system_message(phase, self.plan_path)) // 4))
         return message
 
-    def generate_plan_markdown(self):
-        # 1. Search backward through history to find the last assistant message
-        for message in reversed(self.history):
-            if message["role"] == "assistant" and message.get("content"):
-                self.plan_content = message["content"]
-                break
+    # ---------------------------------------------------------- compression
 
-        if not self.plan_content:
-            self.console.display_system("Warning: No plan found in history to save.")
-            return
-
-        # 2. Define the markdown file path using the session path and ID
-        plan_file_path = self.session_path / "plan.md"
-
-        # 3. Write the content to the file
+    def context_budget(self) -> int:
         try:
-            with open(plan_file_path, "w", encoding="utf-8") as f:
-                f.write(self.plan_content)
-            self.console.display_system(f"Plan successfully saved to: {plan_file_path}")
-            # Also track the plan file!
-            self.track_file(str(plan_file_path))
-        except IOError as e:
-            self.console.display_system(f"Failed to save plan markdown: {e}")
+            size = int(os.environ.get("CONTEXT_SIZE", DEFAULT_CONTEXT_SIZE))
+        except ValueError:
+            size = DEFAULT_CONTEXT_SIZE
+        try:
+            ratio = float(os.environ.get("CONTEXT_COMPRESSION_RATIO", DEFAULT_CONTEXT_RATIO))
+        except ValueError:
+            ratio = DEFAULT_CONTEXT_RATIO
+        return max(1024, int(size * ratio))
+
+    def compress_history(self, reserve: int = 0):
+        """
+        Returns a view of the history that fits the context budget.
+
+        The full transcript always stays on disk; only what we hand to the model
+        shrinks. Compression runs in tiers, cheapest loss first, and stops as
+        soon as the estimate fits. An assistant message carrying tool_calls is
+        never separated from its results, at any tier.
+        """
+        budget = max(512, self.context_budget() - reserve)
+        if _estimate_tokens(self.history) <= budget:
+            return self.history
+
+        original = _estimate_tokens(self.history)
+        blocks = _blocks(copy.deepcopy(self.history))
+
+        def flat():
+            return [m for block in blocks for m in block]
+
+        def over():
+            return _estimate_tokens(flat()) > budget
+
+        def middle(keep_tail=KEEP_RECENT_BLOCKS):
+            """Blocks we may edit: never the opening goal, never the live tail."""
+            return blocks[1:-keep_tail] if len(blocks) > keep_tail + 1 else []
+
+        # Tier 1: drop the stall-prevention nudges. Pure filler, repeated often.
+        for block in middle():
+            block[:] = [m for m in block if not _is_nudge(m)]
+
+        # Tier 2: trim long tool results (file dumps, command output).
+        if over():
+            for block in middle():
+                _trim_tool_results(block)
+
+        # Tier 3: elide file payloads already written to disk — they are
+        # recoverable with read_file, so the bytes need not sit in context.
+        if over():
+            for block in middle():
+                _elide_payloads(block)
+
+        # Tier 4: collapse the remaining middle into a factual digest.
+        blocks = [block for block in blocks if block]
+        if over() and len(blocks) > KEEP_RECENT_BLOCKS + 1:
+            # The digest is a fixed-size summary whatever it covers, so there is
+            # nothing to gain by digesting only part of the middle.
+            head, tail = blocks[:1], blocks[-KEEP_RECENT_BLOCKS:]
+            blocks = head + [[self._digest(blocks[1:-KEEP_RECENT_BLOCKS])]] + tail
+
+        # Tier 5: the protected tail alone can outgrow the budget. Trim it too,
+        # leaving the most recent block untouched so the live turn stays exact.
+        if over():
+            for block in blocks[1:-1]:
+                _trim_tool_results(block)
+                _elide_payloads(block)
+
+        # Tier 6: last resort — shed whole blocks from the front. Dropping a
+        # block at a time keeps every tool_calls/tool pair together.
+        while over() and len(blocks) > 2:
+            # Keep the digest: it is the only trace of everything already shed.
+            index = 2 if _is_digest(blocks[1]) else 1
+            if index >= len(blocks) - 1:
+                break
+            del blocks[index]
+
+        # Nothing left to give up but the newest turn's own bulk.
+        if over() and blocks:
+            _trim_tool_results(blocks[-1])
+            _elide_payloads(blocks[-1])
+
+        result = flat()
+        compressed = _estimate_tokens(result)
+        note = f"~{original} → ~{compressed} tokens (budget {budget})"
+        if compressed > budget:
+            self.console.display_system(
+                f"🗜  Context compressed to its floor: {note}. The newest turn alone exceeds "
+                f"CONTEXT_SIZE — raise it if the model starts truncating."
+            )
+        else:
+            self.console.display_system(f"🗜  Context compressed: {note}.")
+        return result
+
+    @staticmethod
+    def _digest(blocks) -> dict:
+        """Collapses old blocks into one factual note about what happened."""
+        tools, files, commands = [], [], []
+        for block in blocks:
+            for message in block:
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function") or {}
+                    name = function.get("name") or "?"
+                    tools.append(name)
+                    try:
+                        args = json.loads(function.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        continue
+                    if args.get("file_path"):
+                        files.append(args["file_path"])
+                    if name == "execute_command" and args.get("command"):
+                        commands.append(args["command"])
+
+        lines = [
+            DIGEST_MARKER,
+            "This is a factual digest of turns that were removed. The files below are on disk; "
+            "use read_file to inspect any of them, and the plan file remains the source of truth "
+            "for what is done and what is left.",
+        ]
+        if files:
+            lines.append("Files touched: " + ", ".join(dict.fromkeys(files)))
+        if commands:
+            lines.append("Commands run: " + "; ".join(dict.fromkeys(commands))[:600])
+        if tools:
+            counts = {name: tools.count(name) for name in dict.fromkeys(tools)}
+            lines.append("Tool calls: " + ", ".join(f"{k}×{v}" for k, v in counts.items()))
+        return {"role": "user", "content": "\n".join(lines)}
+
+    # --------------------------------------------------------------- phases
 
     def get_remaining_phases(self, all_phases: list[str]) -> list[str]:
         """
@@ -204,9 +558,8 @@ class SimpleSessionManager:
         completed_phases = set()
         for msg in self.history:
             if msg.get("role") == "assistant" and msg.get("content"):
-                content = msg["content"]
                 for phase in all_phases:
-                    if f"{phase.upper()}_COMPLETE" in content:
+                    if phase_completed(msg["content"], phase):
                         completed_phases.add(phase)
 
         # Find the first phase in sequence that hasn't completed yet
@@ -216,3 +569,19 @@ class SimpleSessionManager:
 
         # If all phases are already marked complete, return empty list
         return []
+
+
+def phase_completed(content: str, phase: str) -> bool:
+    """
+    True when the model signed off on a phase.
+
+    The keyword must stand alone on its own line: a plan that merely *mentions*
+    'IMP_COMPLETE' in prose used to end the phase instantly.
+    """
+    if not content:
+        return False
+    keyword = f"{phase.upper()}_COMPLETE"
+    for line in str(content).splitlines():
+        if re.fullmatch(rf"[\s*_`#>-]*{keyword}[\s*_`.!:]*", line):
+            return True
+    return False

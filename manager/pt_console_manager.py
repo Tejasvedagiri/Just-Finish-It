@@ -9,13 +9,41 @@ from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.data_structures import Point
 from prompt_toolkit.filters import Condition
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension as D
 from prompt_toolkit.styles import Style
 
 from manager.abstract_manager import AbstractManager
+
+
+def _teach_terminal_shift_enter() -> None:
+    """
+    Teaches the vt100 parser the Shift+Enter / Ctrl+Enter escape codes.
+
+    A bare terminal throws the modifier away and sends plain CR for
+    Shift+Enter, so there is nothing to bind. Terminals that *do* report it use
+    one of two encodings, and neither resolves to a distinct key by default
+    (prompt_toolkit even folds xterm's variant back into a plain Enter). Both
+    are remapped to Escape+Enter here, so they land on the same "insert a
+    newline" binding as Alt+Enter instead of submitting.
+    """
+    alt_enter = (Keys.Escape, Keys.ControlM)
+    ANSI_SEQUENCES.update({
+        # CSI-u (kitty, foot, WezTerm, Ghostty, recent xterm)
+        "\x1b[13;2u": alt_enter,  # Shift+Enter
+        "\x1b[13;5u": alt_enter,  # Ctrl+Enter
+        "\x1b[13;6u": alt_enter,  # Ctrl+Shift+Enter
+        # xterm modifyOtherKeys=2
+        "\x1b[27;2;13~": alt_enter,  # Shift+Enter
+        "\x1b[27;5;13~": alt_enter,  # Ctrl+Enter
+    })
+
+
+_teach_terminal_shift_enter()
 
 # ANSI colour names are used on purpose: they inherit the user's terminal
 # palette, so the UI stays readable on both light and dark backgrounds.
@@ -25,6 +53,7 @@ UI_STYLE = Style.from_dict({
     "header.phase": "ansibrightblack",
     "header.phase.active": "bold ansimagenta",
     "header.phase.done": "ansigreen",
+    "header.loop": "bold ansiyellow",
     "rule": "ansibrightblack",
     "status": "ansibrightblack",
     "status.queue": "bold ansiyellow",
@@ -93,6 +122,8 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._done_phases: List[str] = []
         self._state = "starting"
         self._awaiting: Optional[str] = None
+        self._iteration = 1
+        self._plan = None  # (ticked, total) checkbox progress
 
         # --- input / control ----------------------------------------------
         self._answers: "queue.Queue[str]" = queue.Queue()   # replies to a question
@@ -151,10 +182,22 @@ class PromptToolkitConsoleManager(AbstractManager):
 
         @kb.add("enter")
         def _submit(event):
-            event.current_buffer.validate_and_handle()
+            # Bracketed paste (on by default) delivers a pasted block as one
+            # event, so its newlines never reach this handler. Terminals
+            # without it deliver the block as a burst of keys instead: if more
+            # keys are already buffered, this newline came from the paste, not
+            # from the user reaching for send.
+            pending = [
+                key for key in event.app.key_processor.input_queue
+                if key.key != Keys.CPRResponse
+            ]
+            if pending:
+                event.current_buffer.insert_text("\n")
+            else:
+                event.current_buffer.validate_and_handle()
 
-        @kb.add("escape", "enter")
-        @kb.add("c-j")
+        @kb.add("escape", "enter")  # Alt+Enter, and Shift+Enter where reported
+        @kb.add("c-j")  # Ctrl+J, plus terminals that map Shift+Enter to LF
         def _newline(event):
             event.current_buffer.insert_text("\n")
 
@@ -216,21 +259,30 @@ class PromptToolkitConsoleManager(AbstractManager):
         with self._lock:
             session, phases = self._session, list(self._phases)
             phase, done = self._phase, set(self._done_phases)
+            iteration, plan = self._iteration, self._plan
 
         frags = [("class:header", f" {self.title}")]
         if session:
             frags += [("class:header.dim", "  ·  session: "), ("class:header", session)]
+        if iteration > 1:
+            frags += [("class:header.dim", "  ·  "), ("class:header.loop", f"loop #{iteration}")]
         if phases:
             frags.append(("class:header.dim", "  ·  "))
             for i, name in enumerate(phases):
                 if i:
                     frags.append(("class:header.dim", " › "))
-                if name == phase:
-                    frags.append(("class:header.phase.active", name))
-                elif name in done:
-                    frags.append(("class:header.phase.done", f"{name} ✓"))
+                # Done wins over active: the phase we just ticked off is still
+                # the current one until the next phase starts.
+                if name in done:
+                    frags.append(("class:header.phase.done", f"✓ {name}"))
+                elif name == phase:
+                    frags.append(("class:header.phase.active", f"▸ {name}"))
                 else:
                     frags.append(("class:header.phase", name))
+        if plan and plan[1]:
+            ticked, total = plan
+            style = "class:header.phase.done" if ticked == total else "class:header.loop"
+            frags += [("class:header.dim", "  ·  plan "), (style, f"{ticked}/{total}")]
         return frags
 
     def _status_fragments(self):
@@ -436,6 +488,20 @@ class PromptToolkitConsoleManager(AbstractManager):
         """The default queue, replayed as a new iteration after the review phase."""
         return self._drain(self._queued)
 
+    def wait_for_queued_input(self, poll: float = 0.2) -> List[str]:
+        """
+        Blocks until the user queues something, or the run is stopped.
+
+        Used instead of asking a question: the pipeline idles here with the
+        input line live, so feeding it more work stays entirely optional.
+        """
+        while not self._stop.is_set():
+            items = self._drain(self._queued)
+            if items:
+                return items
+            time.sleep(poll)
+        return []
+
     def pending_input_count(self) -> int:
         return self._queued.qsize()
 
@@ -443,8 +509,11 @@ class PromptToolkitConsoleManager(AbstractManager):
         return self._forced.qsize()
 
     def set_status(self, session: Optional[str] = None, phase: Optional[str] = None,
-                   state: Optional[str] = None, phases: Optional[List[str]] = None) -> None:
+                   state: Optional[str] = None, phases: Optional[List[str]] = None,
+                   plan: Optional[tuple] = None) -> None:
         with self._lock:
+            if plan is not None:
+                self._plan = plan
             if session is not None:
                 self._session = session
             if phase is not None:
@@ -459,6 +528,19 @@ class PromptToolkitConsoleManager(AbstractManager):
         with self._lock:
             if phase not in self._done_phases:
                 self._done_phases.append(phase)
+        self._invalidate()
+
+    def start_iteration(self, number: int, phases: Optional[List[str]] = None) -> None:
+        """
+        Rewinds the phase breadcrumb for a fresh pass through the pipeline, so
+        the header tracks the current loop rather than accumulating ticks.
+        """
+        with self._lock:
+            self._iteration = number
+            self._done_phases = []
+            self._phase = ""
+            if phases is not None:
+                self._phases = list(phases)
         self._invalidate()
 
     def should_stop(self) -> bool:
@@ -495,12 +577,21 @@ class PromptToolkitConsoleManager(AbstractManager):
                 self._line("class:out.system", " (nothing queued to force)")
         elif forced:
             self._forced.put(text)
-            self._line("class:out.tool", f" ⚡ forced ▸ {text}")
+            self._line("class:out.tool", f" ⚡ forced ▸ {self._preview(text)}")
         else:
             self._queued.put(text)
-            self._line("class:out.system", f" ⏳ queued #{self._queued.qsize()} ▸ {text}")
+            self._line("class:out.system", f" ⏳ queued #{self._queued.qsize()} ▸ {self._preview(text)}")
 
         return False  # clear the input line
+
+    @staticmethod
+    def _preview(text: str, limit: int = 70) -> str:
+        """One-line summary of a possibly pasted, multi-line request."""
+        lines = text.splitlines() or [""]
+        head = lines[0][:limit] + ("…" if len(lines[0]) > limit else "")
+        if len(lines) > 1:
+            head += f"  (+{len(lines) - 1} more line{'s' if len(lines) > 2 else ''})"
+        return head
 
     @staticmethod
     def _move_queue(src: "queue.Queue[str]", dst: "queue.Queue[str]") -> int:

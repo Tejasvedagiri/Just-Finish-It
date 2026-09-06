@@ -21,9 +21,11 @@ class ColibriLLMStream(BaseLLMStream):
     def send_message(self, message, tools=None):
         # Build the keyword arguments dynamically
         kwargs = {
-            "model": "glm-5.3-flash-colibri",
+            # self.model / self.temperature come from MODEL and TEMPERATURE in
+            # .env; these used to be hardcoded, so changing .env did nothing.
+            "model": self.model,
             "messages": message,
-            "temperature": 0.7,
+            "temperature": float(self.temperature),
             "stream": True
         }
 

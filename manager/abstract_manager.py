@@ -64,6 +64,10 @@ class AbstractManager(ABC):
         """Lines the user queued, to be replayed once the pipeline comes around."""
         return []
 
+    def wait_for_queued_input(self, poll: float = 0.2) -> List[str]:
+        """Block until the user queues work. Returns [] when unsupported."""
+        return []
+
     def pending_input_count(self) -> int:
         return 0
 
@@ -73,10 +77,15 @@ class AbstractManager(ABC):
     # ------------------------------------------------------------- status
 
     def set_status(self, session: Optional[str] = None, phase: Optional[str] = None,
-                   state: Optional[str] = None, phases: Optional[List[str]] = None) -> None:
+                   state: Optional[str] = None, phases: Optional[List[str]] = None,
+                   plan: Optional[tuple] = None) -> None:
         pass
 
     def mark_phase_done(self, phase: str) -> None:
+        pass
+
+    def start_iteration(self, number: int, phases: Optional[List[str]] = None) -> None:
+        """Called at the top of every pipeline pass so the UI can reset progress."""
         pass
 
     # ----------------------------------------------------------- lifecycle

@@ -19,11 +19,20 @@ def execute_command(command: str, timeout: int = 120) -> str:
             output.append(f"STDOUT:\n{result.stdout.strip()}")
         if result.stderr:
             output.append(f"STDERR:\n{result.stderr.strip()}")
+        body = "\n\n".join(output)
 
-        if not output:
-            return f"Success: Command '{command}' executed silently (Exit code {result.returncode})"
+        # The exit code has to be unmistakable: a failing command that only
+        # writes to stderr used to look indistinguishable from a chatty
+        # successful one, so nothing downstream could tell it needed fixing.
+        if result.returncode != 0:
+            return (
+                f"Error: Command '{command}' failed with exit code "
+                f"{result.returncode}.\n\n{body}".rstrip()
+            )
 
-        return "\n\n".join(output)
+        if not body:
+            return f"Success: Command '{command}' executed silently (exit code 0)."
+        return f"Success: Command '{command}' exited 0.\n\n{body}"
 
     except subprocess.TimeoutExpired:
         return f"Error: Command '{command}' timed out after {timeout} seconds."
