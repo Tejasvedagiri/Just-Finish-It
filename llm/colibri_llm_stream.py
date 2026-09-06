@@ -1,7 +1,3 @@
-from typing import Iterable
-
-from openai.types.chat import ChatCompletionMessageParam
-
 from llm.base_llm_stream import BaseLLMStream
 import os
 from openai import OpenAI
@@ -22,14 +18,17 @@ class ColibriLLMStream(BaseLLMStream):
     def close(self):
         self.stream_service.close()
 
-    def send_message(self, message):
-        print(message)
-        print(self.model)
-        print(self.stream)
-        return self.stream_service.chat.completions.create(
-            model="glm-5.3-flash-colibri",  # Pass the model identifier used by your custom backend
-            messages=message,
-            temperature=0.7,
-            stream=True  # Enables streaming chunks as they are generated
-        )
+    def send_message(self, message, tools=None):
+        # Build the keyword arguments dynamically
+        kwargs = {
+            "model": "glm-5.3-flash-colibri",
+            "messages": message,
+            "temperature": 0.7,
+            "stream": True
+        }
 
+        # Only attach tools if they are provided
+        if tools:
+            kwargs["tools"] = tools
+
+        return self.stream_service.chat.completions.create(**kwargs)

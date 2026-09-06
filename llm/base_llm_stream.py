@@ -1,9 +1,6 @@
 from abc import ABC, abstractmethod
 import os
-from typing import Iterable
-from rich.live import Live
-from rich.markdown import Markdown
-from openai.types.chat import ChatCompletionMessageParam
+
 
 
 class BaseLLMStream(ABC):
@@ -21,19 +18,23 @@ class BaseLLMStream(ABC):
     def close(self):
         pass
 
-    def generate_llm_response_stream(self, console, history: list) -> str:
-        resp = self.stream.send_message(history)
-        full_response = ""
+    def check_user_approval(self, user_input: str) -> bool:
+        # A strict system prompt forces the LLM to output only YES or NO
+        eval_messages = [
+            {
+                "role": "system",
+                "content": "You are an intent classifier. Evaluate if the user is approving the proposed plan or indicating they are ready to proceed. Reply with exactly 'YES' if they are approving, or 'NO' if they want changes/more planning. Say nothing else."
+            },
+            {"role": "user", "content": user_input}
+        ]
 
-        console.print("\n[bold purple]Assistant:[/bold purple]")
+        response_stream = self.send_message(eval_messages)
 
-        # Live allows us to update the rendered markdown as new tokens arrive
-        with Live(Markdown(""), console=console, refresh_per_second=15, transient=False) as live:
-            for chunk in resp:
-                if chunk.choices[0].delta.content is not None:
-                    content = chunk.choices[0].delta.content
-                    full_response += content
-                    # Update the display with the new full text
-                    live.update(Markdown(full_response))
+        # Consume the stream silently (no console updates)
+        evaluation = ""
+        for chunk in response_stream:
+            if chunk.choices[0].delta.content is not None:
+                evaluation += chunk.choices[0].delta.content
 
-        return full_response
+        # Return True if the LLM said YES
+        return "YES" in evaluation.strip().upper()

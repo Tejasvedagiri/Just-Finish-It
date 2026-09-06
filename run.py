@@ -1,43 +1,91 @@
-#Take user first input
-#Create a plan and reviwer with user till he accepts it.
-#implement the plan and then create.
-#Then sping up a reviewer agent to test the work done.
-#I
-
-import re
-import io
-import contextlib
 from dotenv import load_dotenv
+from openai.types.containers import file_list_response
 
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.prompt import Prompt, Confirm
-from rich.panel import Panel
-from rich.live import Live
-
-# Import your custom LLM stream class
 from llm.colibri_llm_stream import ColibriLLMStream
-from orchestrator.basic_orchestrator import BaseOrchestrator
+from manager.rich_console_manager import RichConsoleManager
+from session.simple_session_manager import SimpleSessionManager
+from inputimeout import inputimeout, TimeoutOccurred
 
 # Load environment variables
 load_dotenv()
+llm = ColibriLLMStream()
+console = RichConsoleManager()
 
-console = Console()
-stream = ColibriLLMStream()
+console.display_system("Welcome to Just Finish it")
+session_name = console.get_user_input("Please enter a session name to begin: ")
 
-console.print(Panel.fit("[bold blue]Welcome to Just Finish It CLI v1.0[/bold blue]\nType 'exit' or 'quit' to close."))
-console.print(Panel.fit("[bold blue]Enter the system message (Agent type).[/bold blue]\nType 'exit' or 'quit' to close."))
-user_input = Prompt.ask("\n[bold green]You")
-bmo = BaseOrchestrator(user_input)
-response = stream.generate_llm_response_stream(console, bmo.get_message())
+ssm = SimpleSessionManager(console, session_name)
+ssm.add_message("assistant", "What do you want to do?")
+
 while True:
-    bmo.add_message("assistant", response)
-    user_input = Prompt.ask("\n[bold green]You")
+    try:
+        # Since inputimeout doesn't use Rich formatting, we print the prompt with your console first
+        console.display_system("\nWhat do you want to do? (You have 120 seconds): ")
 
-    if user_input.lower() in ['exit', 'quit']:
+        # Wait for input for exactly 120 seconds
+        user_input = inputimeout(prompt="> ", timeout=120)
+
+    except TimeoutOccurred:
+        # This block triggers automatically if 120 seconds pass with no enter key pressed
+        console.display_system("\nTimeout reached. Proceeding automatically...")
+
+        # --- SET YOUR CUSTOM MESSAGE HERE ---
+        user_input = "I Approve. Please proceed."
+
+    # 1. Use the AI to check if the user is approving the plan
+    console.display_system("Evaluating intent...")  # Optional: let user know it's thinking
+    is_approved = llm.check_user_approval(user_input)
+    console.display_system("Intent evaluated")
+
+    if is_approved:
+        console.display_system("Plan approved! Moving to execution...")
+        ssm.add_message("user", user_input)  # Add their final confirmation to history
+        ssm.generate_plan_markdown()
+        break  # Exit the loop
+
+    # 2. If NOT approved, proceed with planning
+    ssm.add_message("user", user_input)
+
+    response = llm.send_message(ssm.get_messages("planner"))
+    full_response = console.print_agent_response(response)
+
+    ssm.add_message("assistant", full_response)
+
+# ==========================================
+# --- Phase 2: EXECUTION ---
+# ==========================================
+
+console.display_system("\n--- Starting Execution Phase ---")
+
+# 1. Kick off the execution phase automatically
+kickoff_message = "The plan is approved. Please begin executing the 'Steps of Implementation' one by one. Stop and ask for my input if you need to run commands, create files, or if you finish a step."
+ssm.add_message("user", kickoff_message)
+
+# Get the initial execution response
+response = llm.send_message(ssm.get_messages("execute"))
+full_response = console.print_agent_response(response)
+ssm.add_message("assistant", full_response)
+
+# 2. Start the interactive execution loop
+while True:
+    try:
+        console.display_system("\nProvide feedback, type 'done' to finish, or wait 120s to auto-continue: ")
+        user_input = inputimeout(prompt="> ", timeout=120)
+
+    except TimeoutOccurred:
+        console.display_system("\nTimeout reached. Auto-prompting agent to continue...")
+        user_input = "Looks good so far. Please continue with the next step."
+
+    # 3. Allow manual exit when the project is finished
+    if user_input.strip().lower() in ["done", "exit", "quit", "finish"]:
+        console.display_system("Execution complete. Shutting down Just Finish It. Great job!")
         break
 
-    orchestrator.add_message("user", user_input)
-    response = stream.generate_llm_response_stream(console, bmo.get_message())
+    # 4. Proceed with execution feedback
+    ssm.add_message("user", user_input)
 
-    pass
+    # Note: We pass "execute" here to fetch the execution system prompt
+    response = llm.send_message(ssm.get_messages("execute"))
+    full_response = console.print_agent_response(response)
+
+    ssm.add_message("assistant", full_response)

@@ -5,7 +5,16 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.28.1",
+    "inputimeout>=1.0.4",
     "openai>=3.8.0",
     "python-dotenv>=1.2.3",
     "rich>=15.0.0",
+    "typer>=0.27.2",
 ]
+
+[project.scripts]
+myagent = "agent_harness.cli.main:app"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
