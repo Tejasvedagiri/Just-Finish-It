@@ -1,16 +1,18 @@
+import os
+from typing import Dict, Any
+
 from rich.console import Console
-from rich.live import Live
 from rich.markdown import Markdown
 from rich.prompt import Prompt
 from rich.theme import Theme
-from typing import Dict, Any
+from prompt_toolkit import prompt
+from prompt_toolkit.key_binding import KeyBindings
 
 from manager.abstract_manager import AbstractManager
 
 
 def _check_light_env() -> bool:
     """Helper to catch common environment hints for light-themed terminals."""
-    import os
     colorfgbg = os.environ.get("COLORFGBG", "")
     if colorfgbg and ";" in colorfgbg:
         # COLORFGBG format is often "fg;bg". If bg is high number, it's light.
@@ -42,21 +44,26 @@ class RichConsoleManager(AbstractManager):
     """
     Terminal UI manager that detects background brightness
     to prevent unreadable text combinations.
+    Now thread-safe and compatible with prompt_toolkit.patch_stdout.
     """
 
     def __init__(self):
-        # Initialize a basic console first to probe terminal features
-        probe_console = Console()
-
         # Detect environment or fallback safely to dark theme defaults
+        probe_console = Console()
         is_dark_mode = getattr(probe_console, "is_terminal", True) and not _check_light_env()
 
         # Build dynamic color mapping based on palette detection
         palette = _get_adaptive_palette(is_dark_mode)
-
         self.theme = Theme(palette)
-        self.console = Console(theme=self.theme)
 
+        # CRITICAL FIX: Force pure ANSI rendering and disable legacy OS fallbacks
+        self.console = Console(
+            theme=self.theme,
+            force_terminal=True,
+            force_interactive=True,
+            legacy_windows=False,  # Prevents \x1b from turning into ?
+            color_system="truecolor"  # Forces standard modern ANSI escape codes
+        )
     def display_user(self, text: str) -> None:
         self.console.print(f"[user_theme]🧑 User: {text}")
 
@@ -66,58 +73,99 @@ class RichConsoleManager(AbstractManager):
     def display_system(self, text: str) -> None:
         self.console.print(f"[system_theme] ⚙️  [System]  {text}")
 
-    def get_user_input(self, prompt_label: str = "You") -> str:
+    def get_user_input(self, prompt_label: str = "You", multiline: bool = True) -> str:
         """
-        Implements terminal input gathering.
-        Uses adaptive 'user_theme' markup dynamically instead of hardcoded strings.
+        Gathers user input before the background thread starts.
+        - Enter: Submits immediately.
+        - Alt+Enter / Shift+Enter: Adds a new line.
+        - Paste: Bracketed paste safely handles multi-line blocks without submitting.
         """
-        # Formats the adaptive style cleanly before executing Prompt.ask
         styled_prompt = f"\n[user_theme]{prompt_label}[/]"
 
-        # Capture input utilizing your specialized console instance configuration
-        return Prompt.ask(styled_prompt, console=self.console)
+        if not multiline:
+            return Prompt.ask(styled_prompt, console=self.console)
+
+        self.console.print(
+            f"{styled_prompt} [dim](Enter to submit, Shift+Enter or Alt+Enter for new line. Pasting blocks is safe)[/]:"
+        )
+
+        kb = KeyBindings()
+
+        # 1. Alt+Enter (Meta+Enter) adds a new line
+        @kb.add("escape", "enter")
+        def _(event):
+            event.current_buffer.insert_text("\n")
+
+        # 2. Shift+Enter support (Modern terminals using CSI-u protocols)
+        @kb.add("escape", "[", "1", "3", ";", "2", "u")
+        def _(event):
+            event.current_buffer.insert_text("\n")
+
+        # 3. Shift+Enter support (Older terminals that send Ctrl+J / Line Feed)
+        @kb.add("c-j")
+        def _(event):
+            event.current_buffer.insert_text("\n")
+
+        # 4. Standard Enter submits the prompt
+        @kb.add("enter")
+        def _(event):
+            event.current_buffer.validate_and_handle()
+
+        try:
+            # multiline=True automatically enables Bracketed Paste Mode for safe pasting
+            user_text = prompt("> ", multiline=True, key_bindings=kb)
+            return user_text.strip()
+        except (KeyboardInterrupt, EOFError):
+            return ""
 
     def print_agent_response(self, agent_response: Any) -> Dict[str, Any]:
         """
-        Consumes the LLM stream, rendering text to the terminal in real-time.
+        Consumes the LLM stream, rendering text to the terminal sequentially with top/bottom borders.
         Simultaneously listens for and stitches together streaming tool calls.
         Returns a dictionary containing the full text and any tool calls made.
         """
         full_text = ""
         tool_calls_dict = {}  # Store tool calls by index to handle multiple tools in one stream
 
-        with Live(Markdown(""), console=self.console, refresh_per_second=15, transient=False) as live:
-            for chunk in agent_response:
-                delta = chunk.choices[0].delta
+        # --- DRAW TOP BORDER FOR AI ---
+        self.console.print("\n[system_theme]╭──────────────────────────────────────────────────╮[/]")
+        self.console.print("[assistant_theme]🤖 Assistant:[/assistant_theme] ", end="")
 
-                # 1. Handle standard text chunks
-                if delta.content is not None:
-                    full_text += delta.content
-                    live.update(Markdown(full_text), refresh=True)
+        for chunk in agent_response:
+            delta = chunk.choices[0].delta
 
-                # 2. Handle tool call chunks
-                if getattr(delta, "tool_calls", None):
-                    for tc in delta.tool_calls:
-                        idx = tc.index
+            # 1. Handle standard text chunks
+            if delta.content is not None:
+                full_text += delta.content
+                # Stream the text cleanly above the prompt bar
+                self.console.print(delta.content, end="")
 
-                        # Initialize a new tool call if we haven't seen this index yet
-                        if idx not in tool_calls_dict:
-                            tool_calls_dict[idx] = {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": getattr(tc.function, "name", ""),
-                                    "arguments": ""
-                                }
+            # 2. Handle tool call chunks
+            if getattr(delta, "tool_calls", None):
+                for tc in delta.tool_calls:
+                    idx = tc.index
+
+                    # Initialize a new tool call if we haven't seen this index yet
+                    if idx not in tool_calls_dict:
+                        tool_calls_dict[idx] = {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": getattr(tc.function, "name", ""),
+                                "arguments": ""
                             }
-                            # Optionally display to the user that a tool is starting
-                            if tc.function and tc.function.name:
-                                self.console.print(
-                                    f"\n[system_theme] 🛠️  [System] AI is preparing to call: {tc.function.name}[/]")
+                        }
+                        # Display to the user that a tool is starting (on a new line)
+                        if tc.function and tc.function.name:
+                            self.console.print(
+                                f"\n[system_theme] 🛠️  [System] AI is preparing to call: {tc.function.name}[/]")
 
-                        # Append argument fragments (JSON chunks)
-                        if tc.function and getattr(tc.function, "arguments", None):
-                            tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
+                    # Append argument fragments (JSON chunks)
+                    if tc.function and getattr(tc.function, "arguments", None):
+                        tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
+
+        # --- DRAW BOTTOM BORDER FOR AI ---
+        self.console.print("\n[system_theme]╰──────────────────────────────────────────────────╯[/]")
 
         # Convert the dictionary of tool calls into a clean list
         tool_calls_list = list(tool_calls_dict.values()) if tool_calls_dict else None

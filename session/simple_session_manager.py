@@ -1,4 +1,5 @@
 import os
+import json
 import pickle
 from pathlib import Path
 
@@ -88,10 +89,47 @@ class SimpleSessionManager:
         self.session_path = Path(os_session_path) / ".just_finish_it" / self.session_id
         self.session_pickle_path = self.session_path / "history.pkl"
 
+        # New: Metadata tracking path
+        self.metadata_path = self.session_path / "metadata.json"
+
         # Check if history exists BEFORE loading it
         self.is_resuming = self.session_pickle_path.exists()
 
         self.history = self.load_history()
+        self.metadata = self.load_metadata()
+
+    def load_metadata(self):
+        """Loads project metadata like tracked files."""
+        if self.metadata_path.exists():
+            try:
+                with open(self.metadata_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                self.console.display_system(f"Error loading metadata: {e}")
+        return {"implemented_files": []}
+
+    def save_metadata(self):
+        """Saves project metadata to disk."""
+        with open(self.metadata_path, "w", encoding="utf-8") as f:
+            json.dump(self.metadata, f, indent=4)
+
+    def track_file(self, file_path: str):
+        """Registers a newly created or modified file into the project state."""
+        if file_path and file_path not in self.metadata["implemented_files"]:
+            self.metadata["implemented_files"].append(file_path)
+            self.save_metadata()
+
+    def get_project_state_summary(self) -> str:
+        """Returns a string listing all files currently tracked in the project."""
+        files = self.metadata.get("implemented_files", [])
+        if not files:
+            return "No files have been tracked yet."
+
+        summary = "CURRENT PROJECT FILES:\n"
+        for f in files:
+            summary += f"- {f}\n"
+        summary += "\n(Tip for AI: If you need to change anything, use the read_file tool to inspect these files first, then use write_file or append_to_file to modify them.)"
+        return summary
 
     def load_history(self):
         # Ensure the session folder exists
@@ -137,7 +175,7 @@ class SimpleSessionManager:
     def generate_plan_markdown(self):
         # 1. Search backward through history to find the last assistant message
         for message in reversed(self.history):
-            if message["role"] == "assistant":
+            if message["role"] == "assistant" and message.get("content"):
                 self.plan_content = message["content"]
                 break
 
@@ -146,13 +184,15 @@ class SimpleSessionManager:
             return
 
         # 2. Define the markdown file path using the session path and ID
-        plan_file_path = self.session_path / f"plan.md"
+        plan_file_path = self.session_path / "plan.md"
 
         # 3. Write the content to the file
         try:
             with open(plan_file_path, "w", encoding="utf-8") as f:
                 f.write(self.plan_content)
             self.console.display_system(f"Plan successfully saved to: {plan_file_path}")
+            # Also track the plan file!
+            self.track_file(str(plan_file_path))
         except IOError as e:
             self.console.display_system(f"Failed to save plan markdown: {e}")
 
