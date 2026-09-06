@@ -83,12 +83,13 @@ class SimpleSessionManager:
         self.console: AbstractManager = console
         self.session_id = session_id.lower().replace(" ", "_")
 
+        # Path logic handled entirely inside the manager
         os_session_path = os.environ.get("SESSION_PATH", ".")
-        # 1. Base directory for the specific session
         self.session_path = Path(os_session_path) / ".just_finish_it" / self.session_id
-
-        # 2. FIX: Save the pickle file INSIDE the specific session folder
         self.session_pickle_path = self.session_path / "history.pkl"
+
+        # Check if history exists BEFORE loading it
+        self.is_resuming = self.session_pickle_path.exists()
 
         self.history = self.load_history()
 
@@ -155,3 +156,23 @@ class SimpleSessionManager:
         except IOError as e:
             self.console.display_system(f"Failed to save plan markdown: {e}")
 
+    def get_remaining_phases(self, all_phases: list[str]) -> list[str]:
+        """
+        Scans history to see which phases have already completed.
+        Returns a sliced list starting from the first incomplete phase.
+        """
+        completed_phases = set()
+        for msg in self.history:
+            if msg.get("role") == "assistant" and msg.get("content"):
+                content = msg["content"]
+                for phase in all_phases:
+                    if f"{phase.upper()}_COMPLETE" in content:
+                        completed_phases.add(phase)
+
+        # Find the first phase in sequence that hasn't completed yet
+        for i, phase in enumerate(all_phases):
+            if phase not in completed_phases:
+                return all_phases[i:]
+
+        # If all phases are already marked complete, return empty list
+        return []
