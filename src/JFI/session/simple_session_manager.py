@@ -96,9 +96,13 @@ PLAN_FORMAT_RULES = """
     - The plan file is exactly: {plan_path}
     - Every actionable item MUST be a GitHub task-list line and nothing else:
           - [ ] 1.1 Short description of the step
-      Not started is "- [ ] ", finished is "- [x] ".
+      Not started is "- [ ] ", finished is "- [x] ". A third marker, "- [○] ",
+      means the USER skipped that item directly (Ctrl+K) — never something you
+      write yourself. A skipped item is intentionally left undone: never redo
+      it, never revert it to "- [ ] ", and never flag it as a defect or missing
+      work — treat it exactly like a finished item when judging what's left.
       NEVER use any other marker for progress: no U+2610 ballot boxes, no emoji
-      ticks, no tables of checkboxes. Only "- [ ]" and "- [x]".
+      ticks, no tables of checkboxes. Only "- [ ]", "- [x]", and "- [○]".
     - Numbering: sections are 1, 2, 3 ...; steps inside them are 1.1, 1.2 ...
     - Item text must stay byte-identical when you tick it: change only the
       space inside the brackets to an x, so a targeted replace can find it.
@@ -125,6 +129,11 @@ CONTEXT_CACHE_RULES = """
 # fallback when callers do not pass an explicit plan_path.
 DEFAULT_PLAN_PATH = ".JFI/plan.md"
 DEFAULT_CONTEXT_CACHE_PATH = ".JFI/context.json"
+
+# The only two phases with a per-item checklist to work through (and so the
+# only two Ctrl+K/skip_current_task applies to) — planner writes the plan in
+# one continuous pass, reviewer judges the whole thing at once.
+PHASE_SECTION = {"imp": "Implementation", "testing": "Testing"}
 
 
 def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
@@ -518,14 +527,17 @@ class SimpleSessionManager:
             self.context_cache_file.write_text("{}\n", encoding="utf-8")
 
     def plan_progress(self):
-        """(ticked, total) task-list checkboxes in the plan file."""
+        """(resolved, total) task-list checkboxes in the plan file. A
+        user-skipped "- [○]" item counts as resolved alongside "- [x]" —
+        it's no longer pending action, just not done by the model."""
         try:
             text = self.plan_file.read_text(encoding="utf-8")
         except Exception:
             return 0, 0
         done = len(re.findall(r"^[ \t]*[-*][ \t]*\[[xX]\]", text, re.M))
+        skipped = len(re.findall(r"^[ \t]*[-*][ \t]*\[○\]", text, re.M))
         todo = len(re.findall(r"^[ \t]*[-*][ \t]*\[[ ]\]", text, re.M))
-        return done, done + todo
+        return done + skipped, done + skipped + todo
 
     def _pending_items(self, section: str) -> list[str]:
         """
@@ -553,6 +565,43 @@ class SimpleSessionManager:
                 pending.append(line.strip())
         return pending
 
+    def skip_current_task(self, phase: str) -> Optional[str]:
+        """
+        Ctrl+K: marks `phase`'s first unchecked item "- [○] ..." instead of
+        ticking it — the user's own call that this one item is done with,
+        not the model's. Only imp/testing have a checklist to skip from;
+        returns None (no-op) for any other phase, or when nothing is
+        pending. Returns the skipped item's description text on success.
+
+        Edits the raw line directly (not through _pending_items' stripped
+        copy) so original indentation is preserved exactly, the same
+        byte-for-byte-except-the-marker discipline PLAN_FORMAT_RULES asks
+        the model to follow for its own "- [x]" ticks.
+        """
+        section = PHASE_SECTION.get(phase)
+        if not section:
+            return None
+        try:
+            text = self.plan_file.read_text(encoding="utf-8")
+        except Exception:
+            return None
+
+        lines = text.splitlines(keepends=True)
+        in_section = False
+        for i, raw_line in enumerate(lines):
+            line = raw_line.splitlines()[0] if raw_line.splitlines() else ""
+            header = re.match(r"^\s*#{1,6}\s+(.*)", line)
+            if header:
+                in_section = header.group(1).strip().lower().startswith(section.lower())
+                continue
+            item = re.match(r"^([ \t]*[-*][ \t]+)\[ \]([ \t]+.*)", line)
+            if in_section and item:
+                newline = "\n" if raw_line.endswith("\n") else ""
+                lines[i] = item.group(1) + "[○]" + item.group(2) + newline
+                self.plan_file.write_text("".join(lines), encoding="utf-8")
+                return item.group(2).strip()
+        return None
+
     def current_task_title(self, phase: str, max_len: int = 140) -> Optional[str]:
         """
         The first unchecked item's descriptive text for `phase`'s section
@@ -565,7 +614,7 @@ class SimpleSessionManager:
         model's own self-reported "[CURRENT TASK: ...]" text, which would
         need parsing streamed output and could drift out of sync mid-turn.
         """
-        section = {"imp": "Implementation", "testing": "Testing"}.get(phase)
+        section = PHASE_SECTION.get(phase)
         if not section:
             return None
         pending = self._pending_items(section)
@@ -806,7 +855,7 @@ class SimpleSessionManager:
         not need to scan the whole plan just to find what is left.
         """
         base = get_system_message(phase, self.plan_path, self.context_cache_path)
-        section = {"imp": "Implementation", "testing": "Testing"}.get(phase)
+        section = PHASE_SECTION.get(phase)
         if phase in ("planner", "reviewer") or not section:
             return base
 

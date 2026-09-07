@@ -7,16 +7,20 @@ and its colors come from a small set of style dictionaries in
 - `UI_STYLE_BASE` — the baseline UI chrome (header, phase breadcrumb, status bar, rule
   lines, prompt). It uses ANSI color *names* (`ansicyan`, `ansiwhite`, ...) on purpose so
   those parts inherit whatever palette your terminal already has.
-- `PT_THEME_PRESETS` — six named presets. Each one only overrides the three message-role
-  keys (`out.user`, `out.assistant`/`.tag`, and `out.system`) with **literal hex** colors,
-  so they render identically regardless of the user's terminal palette.
+- `PT_THEME_PRESETS` — ten named presets. Each one overrides the three message-role keys
+  (`out.user`, `out.assistant`/`.tag`, and `out.system`) plus the terminal **background**
+  itself, all with **literal hex** colors, so a preset renders identically regardless of
+  the user's own terminal palette or profile.
 
-That split is deliberate: a preset changes how *your messages and the AI's output* look,
-while the UI chrome stays consistent on top of it.
+That background piece matters: prompt_toolkit's style rules support an unclassed `""`
+entry that applies to every cell on screen, including the blank space around your text —
+that's the one each preset (other than `dark-default`) sets, so `THEME=dark-ocean` actually
+paints the terminal in dark-ocean's own background instead of leaving whatever color your
+terminal profile happened to be (a stray purple, in one case that prompted this).
 
 `dark-default` overrides nothing — it *is* the ANSI-based baseline above — so a run with no
-`THEME` set looks identical to `THEME=dark-default`. The other five presets each define their
-own message-role hex colors and are shown below.
+`THEME` set looks identical to `THEME=dark-default`, background included. The other nine
+presets each define their own background plus message-role hex colors and are shown below.
 
 ## Selecting a theme (`THEME`)
 
@@ -57,12 +61,16 @@ THEME=dark-ocean
 
 | Preset | Background family | Character |
 |---|---|---|
-| `dark-default`  | dark  | ANSI baseline (no overrides) — matches an unset `THEME`. |
-| `dark-ocean`    | dark  | Cool blue user text, teal AI output. |
-| `dark-mono`     | dark  | Grayscale only: white user, light-gray AI, mid-gray system. |
-| `light-default` | light | Blue user text, green AI output — the auto-detected light pick. |
-| `light-sunrise` | light | Warm palette: magenta user, deep-red AI output. |
-| `light-paper`   | light | Ink-on-paper, low saturation: navy user, sage-green AI. |
+| `dark-default`  | dark  | ANSI baseline (no overrides, terminal's own background) — matches an unset `THEME`. |
+| `dark-ocean`    | dark  | Cool blue user text, teal AI output, deep navy background. |
+| `dark-mono`     | dark  | Grayscale only: white user, light-gray AI, mid-gray system, near-black background. |
+| `light-default` | light | Blue user text, green AI output on white — the auto-detected light pick. |
+| `light-sunrise` | light | Warm palette: magenta user, deep-red AI output, cream background. |
+| `light-paper`   | light | Ink-on-paper, low saturation: navy user, sage-green AI, warm off-white background. |
+| `catppuccin-mocha`     | dark  | [Catppuccin](https://github.com/catppuccin/catppuccin)'s darkest flavor — blue user, green AI, on its signature `#1e1e2e` base. |
+| `catppuccin-macchiato` | dark  | Catppuccin, one step lighter than Mocha. |
+| `catppuccin-frappe`    | dark  | Catppuccin's softest dark flavor. |
+| `catppuccin-latte`     | light | Catppuccin's light flavor. |
 
 The screenshots below are rendered from those exact style dictionaries by
 [`docs/make_theme_screenshots.py`](make_theme_screenshots.py) (run it with
@@ -105,3 +113,29 @@ Warm palette: magenta user text (`#af00af`) and deep-red AI output (`#870000`).
 Ink-on-paper, low saturation: navy user text on a warm off-white background.
 
 ![light-paper theme](images/theme-light-paper.png)
+
+### `catppuccin-mocha`
+
+[Catppuccin](https://github.com/catppuccin/catppuccin)'s flagship dark flavor: blue user
+text (`#89b4fa`), green AI output (`#a6e3a1`), on its `#1e1e2e` base.
+
+![catppuccin-mocha theme](images/theme-catppuccin-mocha.png)
+
+### `catppuccin-macchiato`
+
+The same Catppuccin accents, one step lighter — `#24273a` base.
+
+![catppuccin-macchiato theme](images/theme-catppuccin-macchiato.png)
+
+### `catppuccin-frappe`
+
+Catppuccin's softest dark flavor — `#303446` base.
+
+![catppuccin-frappe theme](images/theme-catppuccin-frappe.png)
+
+### `catppuccin-latte`
+
+Catppuccin's light flavor: blue user text (`#1e66f5`), green AI output (`#40a02b`), on its
+`#eff1f5` base.
+
+![catppuccin-latte theme](images/theme-catppuccin-latte.png)

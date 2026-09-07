@@ -21,6 +21,20 @@ def phase_display_name(phase: str) -> str:
     return PHASE_DISPLAY_NAMES.get(phase, phase.title() if phase else phase)
 
 
+class ResponseTooLongError(Exception):
+    """
+    Raised by a manager's print_agent_response when one response generates
+    more than RESPONSE_MAX_TOKEN tokens (see PromptToolkitConsoleManager).
+
+    A response this long is treated as a runaway generation, not a large-but-
+    valid one: the stream is abandoned mid-way (so a huge, possibly still-
+    truncated tool call never reaches history) and runner._is_retryable_llm_error
+    folds this into the same retry-with-backoff path as a dropped connection,
+    so the phase just re-sends the same turn instead of ending the run.
+    """
+    pass
+
+
 class AbstractManager(ABC):
     """
     Abstract interface for handling chat UI outputs.
@@ -133,6 +147,15 @@ class AbstractManager(ABC):
     def drain_forced_input(self) -> List[str]:
         """Lines the user pushed to the front of the queue, for the next AI turn."""
         return []
+
+    def drain_skip_request(self) -> bool:
+        """
+        True the moment a "skip the current checklist item" gesture (Ctrl+K
+        in PromptToolkitConsoleManager) is pending, and clears it — checked
+        once per turn boundary in run_phase, same as drain_forced_input.
+        No-op default for managers with no such gesture.
+        """
+        return False
 
     def drain_queued_input(self) -> List[str]:
         """Lines the user queued, to be replayed once the pipeline comes around."""

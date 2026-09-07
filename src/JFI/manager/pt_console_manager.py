@@ -19,9 +19,10 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension as D
+from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.styles import Style
 
-from JFI.manager.abstract_manager import AbstractManager, phase_display_name
+from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.manager.key_bindings import add_shift_enter_newline, teach_terminal_shift_enter
 from JFI.manager.theme_env import resolve_explicit_theme, theme_label
 
@@ -64,43 +65,82 @@ UI_STYLE_BASE: Dict[str, str] = {
     "out.rule": "bold ansibrightblack",
 }
 
-# Per-preset overrides for the three message-role colors, keyed the same as
-# README's THEME table. Colors here are literal hex so they render the same
-# regardless of the user's terminal ANSI palette (unlike the ansi* names in
-# UI_STYLE_BASE, which deliberately inherit it). "dark-default" overrides
-# nothing: it *is* the ansi*-based baseline above, so a THEME-less run and
-# THEME=dark-default look identical.
+# Per-preset overrides for the three message-role colors, plus the terminal
+# background/default-foreground fill (the "" key — matched by every style
+# lookup, see Style.get_attrs_for_style_str), keyed the same as README's
+# THEME table. Colors here are literal hex so they render the same regardless
+# of the user's terminal ANSI palette or its own background (unlike the
+# ansi* names in UI_STYLE_BASE, which deliberately inherit the terminal).
+# "dark-default" overrides nothing, including "": it *is* the ansi*-based
+# baseline above, so a THEME-less run and THEME=dark-default look identical
+# and keep the terminal's own background — every other preset paints over it.
 PT_THEME_PRESETS: Dict[str, Dict[str, str]] = {
     "dark-default": {},
     "dark-ocean": {
+        "": "bg:#141b26 fg:#cfd8e3",
         "out.user": "bold #5fafff",
         "out.assistant": "#00afaf",
         "out.assistant.tag": "bold #00afaf",
         "out.system": "#5f5fbe",
     },
     "dark-mono": {
+        "": "bg:#0f0f10 fg:#d0d0d0",
         "out.user": "bold #ffffff",
         "out.assistant": "#d0d0d0",
         "out.assistant.tag": "bold #d0d0d0",
         "out.system": "#808080",
     },
     "light-default": {
+        "": "bg:#ffffff fg:#1a1a1a",
         "out.user": "bold #0000ff",
         "out.assistant": "bold #006400",
         "out.assistant.tag": "bold #006400",
         "out.system": "#444444",
     },
     "light-sunrise": {
+        "": "bg:#fff3e0 fg:#3a2020",
         "out.user": "bold #af00af",
         "out.assistant": "#870000",
         "out.assistant.tag": "bold #870000",
         "out.system": "#87875f",
     },
     "light-paper": {
+        "": "bg:#faf7ef fg:#333333",
         "out.user": "#00005f",
         "out.assistant": "#5f8767",
         "out.assistant.tag": "bold #5f8767",
         "out.system": "#808080",
+    },
+    # Catppuccin (https://github.com/catppuccin/catppuccin) — its four
+    # official flavors, mapped onto the same four message-role keys using
+    # each flavor's own blue/green/overlay1 accents from the published palette.
+    "catppuccin-mocha": {
+        "": "bg:#1e1e2e fg:#cdd6f4",
+        "out.user": "bold #89b4fa",
+        "out.assistant": "#a6e3a1",
+        "out.assistant.tag": "bold #a6e3a1",
+        "out.system": "#9399b2",
+    },
+    "catppuccin-macchiato": {
+        "": "bg:#24273a fg:#cad3f5",
+        "out.user": "bold #8aadf4",
+        "out.assistant": "#a6da95",
+        "out.assistant.tag": "bold #a6da95",
+        "out.system": "#8087a2",
+    },
+    "catppuccin-frappe": {
+        "": "bg:#303446 fg:#c6d0f5",
+        "out.user": "bold #8caaee",
+        "out.assistant": "#a6d189",
+        "out.assistant.tag": "bold #a6d189",
+        "out.system": "#838ba7",
+    },
+    "catppuccin-latte": {
+        "": "bg:#eff1f5 fg:#4c4f69",
+        "out.user": "bold #1e66f5",
+        "out.assistant": "#40a02b",
+        "out.assistant.tag": "bold #40a02b",
+        "out.system": "#8c8fa1",
     },
 }
 
@@ -137,6 +177,13 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # Typing "!something" jumps the queue; a bare "!" promotes the whole queue.
 FORCE_PREFIX = "!"
+
+# A single response generating more than this many tokens is treated as a
+# runaway generation (a small/mid-sized local model looping instead of
+# finishing) rather than a large-but-valid one — see print_agent_response,
+# which aborts the stream and raises ResponseTooLongError once its running
+# char/4 estimate crosses this. Overridable via RESPONSE_MAX_TOKEN in .env.
+DEFAULT_RESPONSE_MAX_TOKENS = 10000
 
 
 class PromptToolkitConsoleManager(AbstractManager):
@@ -211,6 +258,7 @@ class PromptToolkitConsoleManager(AbstractManager):
         # the worker thread in drain_queued_input/wait_for_queued_input).
         self._queued_snapshot: List[str] = []
         self._queue_on_change: Optional[Callable[[List[str]], None]] = None
+        self._skip_requested = threading.Event()  # Ctrl+K; see drain_skip_request
         self._stop = threading.Event()
         self._app: Optional[Application] = None
         self._worker_error: Optional[BaseException] = None
@@ -238,6 +286,18 @@ class PromptToolkitConsoleManager(AbstractManager):
             height=D(min=1, max=8),
             wrap_lines=True,
             get_line_prefix=self._input_line_prefix,
+            # A near-empty buffer only occupies its 1 real line, but the
+            # Window itself is allocated up to 8 (its max height) — the rows
+            # in between are background-only padding. prompt_toolkit only
+            # paints that padding via Window._apply_style()'s fill_area(),
+            # which no-ops entirely on an empty/unset style (`if not
+            # style.strip(): return` in layout/screen.py). Without this, that
+            # padding silently falls back to the terminal's own raw
+            # background instead of the theme's — "class:input" doesn't need
+            # to be a real style rule; it only has to be non-empty so
+            # fill_area doesn't skip itself, and it inherits the theme's
+            # bg/fg from the "" default rule like any other unmatched class.
+            style="class:input",
         )
 
         root = HSplit([
@@ -328,6 +388,14 @@ class PromptToolkitConsoleManager(AbstractManager):
                 event.app.exit()  # second press: leave now
                 return
             self.request_stop()
+
+        @kb.add("c-k")
+        def _skip(event):
+            # Overrides prompt_toolkit's default emacs-style "kill to end of
+            # line" binding for c-k — deliberate: this app has no use for
+            # kill/yank, and Ctrl+K reads naturally as "skip this one".
+            self._skip_requested.set()
+            self._invalidate()
 
         return kb
 
@@ -552,7 +620,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             hint = "   Enter answers · Alt+Enter newline · PgUp/PgDn scroll · Ctrl+C stop"
         else:
             hint = ("   Enter queues for after review · !text runs now · ! runs the whole queue · "
-                    "Alt+Enter newline · Ctrl+C stop")
+                    "Alt+Enter newline · Ctrl+K skip task · Ctrl+C stop")
         frags.append(("class:status", hint))
         return frags
 
@@ -709,6 +777,13 @@ class PromptToolkitConsoleManager(AbstractManager):
                 self._choice_index = 0
             self._invalidate()
 
+    @staticmethod
+    def _max_response_tokens() -> int:
+        try:
+            return int(os.environ.get("RESPONSE_MAX_TOKEN", DEFAULT_RESPONSE_MAX_TOKENS))
+        except ValueError:
+            return DEFAULT_RESPONSE_MAX_TOKENS
+
     def print_agent_response(self, agent_response: Any, prompt_tokens_estimate: int = 0) -> Dict[str, Any]:
         """Consumes the LLM stream into the AI space and returns the parsed turn.
 
@@ -718,10 +793,20 @@ class PromptToolkitConsoleManager(AbstractManager):
         ``usage`` (most OpenAI-compatible servers omit it in streaming mode
         unless ``stream_options.include_usage`` was requested, which isn't
         universally supported, so we don't require it).
+
+        Raises :class:`ResponseTooLongError` — caught by runner's LLM retry
+        loop, same as a dropped connection — the moment the response's
+        running char/4 estimate crosses ``RESPONSE_MAX_TOKEN`` (default
+        ``DEFAULT_RESPONSE_MAX_TOKENS``, 10000). The stream is abandoned
+        right there: a response this long is a runaway generation, not a
+        large-but-valid one, and letting it keep going only burns more
+        tokens on output the turn will just get re-sent to replace.
         """
         full_text = ""
         tool_calls_dict: Dict[int, Dict[str, Any]] = {}
         usage_seen = False
+        generated_chars = 0
+        max_tokens = self._max_response_tokens()
 
         self.set_status(state="streaming")
         self._line("class:out.assistant.tag", "🤖 Assistant")
@@ -746,6 +831,7 @@ class PromptToolkitConsoleManager(AbstractManager):
 
             if delta.content is not None:
                 full_text += delta.content
+                generated_chars += len(delta.content)
                 self._write("class:out.assistant", delta.content)
 
             if getattr(delta, "tool_calls", None):
@@ -762,10 +848,19 @@ class PromptToolkitConsoleManager(AbstractManager):
                             },
                         }
                         if tc.function and tc.function.name:
+                            generated_chars += len(tc.function.name)
                             self._line("class:out.tool", f" 🛠  preparing call: {tc.function.name}")
 
                     if tc.function and getattr(tc.function, "arguments", None):
                         tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
+                        generated_chars += len(tc.function.arguments)
+
+            if (generated_chars + 8) // 4 > max_tokens:
+                self.set_status(state="thinking")
+                raise ResponseTooLongError(
+                    f"Response exceeded RESPONSE_MAX_TOKEN ({max_tokens}) — generated "
+                    f"~{(generated_chars + 8) // 4} tokens and still going."
+                )
 
         if not usage_seen:
             written_chars = len(full_text)
@@ -801,6 +896,12 @@ class PromptToolkitConsoleManager(AbstractManager):
     def drain_forced_input(self) -> List[str]:
         """Lines the user pushed to the front; belong in the AI's next turn."""
         return self._drain(self._forced)
+
+    def drain_skip_request(self) -> bool:
+        if self._skip_requested.is_set():
+            self._skip_requested.clear()
+            return True
+        return False
 
     def drain_queued_input(self) -> List[str]:
         """The default queue, replayed as a new iteration after the review phase."""
@@ -979,6 +1080,24 @@ class PromptToolkitConsoleManager(AbstractManager):
         except Exception:
             pass
 
+    @staticmethod
+    def _resolve_color_depth() -> ColorDepth:
+        """
+        Themes use literal 24-bit hex (see ``PT_THEME_PRESETS``) so they
+        render identically everywhere, but prompt_toolkit's own default color
+        depth is 256-color, not truecolor ("we prefer 256 colors almost
+        always" — ``vt100.Vt100_Output.get_default_color_depth``) — every hex
+        color, including each preset's background fill, was silently
+        quantized down to the nearest xterm-256 entry, which for a
+        low-saturation navy/cream/etc. background can round to a near-black
+        or near-white grey that barely looks different from whatever the
+        terminal's own background already was. Force true color so what you
+        see matches the hex actually configured; ``PROMPT_TOOLKIT_COLOR_DEPTH``
+        (prompt_toolkit's own standard env override) still wins for a
+        terminal that genuinely can't do 24-bit.
+        """
+        return ColorDepth.from_env() or ColorDepth.DEPTH_24_BIT
+
     def run(self, worker: Callable[[], Any]) -> Any:
         """
         Takes over the terminal and runs ``worker`` on a background thread.
@@ -993,6 +1112,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             full_screen=True,
             mouse_support=True,
             refresh_interval=0.2,
+            color_depth=self._resolve_color_depth(),
         )
         app = self._app
 

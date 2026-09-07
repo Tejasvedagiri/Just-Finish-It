@@ -9,7 +9,7 @@ from openai import APIConnectionError, APIStatusError
 
 # LLM and Console Management
 from JFI.llm.openai_compatable_stream import OpenAICompatableStream
-from JFI.manager.abstract_manager import AbstractManager, phase_display_name
+from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
 
 # Session Management
@@ -56,12 +56,15 @@ LLM_RETRY_DELAY_SECONDS = 3.0
 def _is_retryable_llm_error(e: Exception) -> bool:
     """
     Worth retrying: a network-level failure (server down/restarting, a
-    dropped connection) or a 5xx-class server error — both are typically
-    transient on a local LLM server. NOT a 4xx client error: retrying an
-    identical request the server already rejected (bad request, auth,
-    context-length) won't produce a different result.
+    dropped connection), a 5xx-class server error — both are typically
+    transient on a local LLM server — or a response that blew past
+    RESPONSE_MAX_TOKEN (see ResponseTooLongError): the model was still going,
+    not finished, so re-sending the identical turn is worth another shot.
+    NOT a 4xx client error: retrying an identical request the server already
+    rejected (bad request, auth, context-length) won't produce a different
+    result.
     """
-    if isinstance(e, APIConnectionError):
+    if isinstance(e, (APIConnectionError, ResponseTooLongError)):
         return True
     if isinstance(e, APIStatusError):
         return e.status_code >= 500
@@ -273,6 +276,29 @@ def drain_forced_input(console: AbstractManager, ssm: SimpleSessionManager) -> N
         )
 
 
+def handle_skip_request(console: AbstractManager, ssm: SimpleSessionManager, phase: str) -> None:
+    """
+    Ctrl+K: skips the current checklist item outright, independent of
+    whatever the model is doing right now — marks it "- [○]" in the plan
+    (see SimpleSessionManager.skip_current_task) rather than waiting for the
+    model to agree to move on. Only imp/testing have an item to skip;
+    anywhere else (or with nothing pending) this is a no-op.
+    """
+    if not console.drain_skip_request():
+        return
+    skipped = ssm.skip_current_task(phase)
+    if skipped is None:
+        console.display_system("Nothing to skip right now.")
+        return
+    console.display_system(f"⏭  Skipped: {skipped}")
+    ssm.add_message(
+        "user",
+        f"USER ACTION: the current task was skipped (marked \"- [○]\" in the plan) — "
+        f"it is done with, not something you should redo or revert. Move on to the "
+        f"next unchecked item."
+    )
+
+
 MAX_REVIEW_ITERATIONS = 3
 
 
@@ -371,6 +397,8 @@ def run_phase(console: AbstractManager, llm: OpenAICompatableStream, ssm: Simple
 
     while not console.should_stop():
         drain_forced_input(console, ssm)
+        handle_skip_request(console, ssm, phase)
+        console.set_status(plan=ssm.plan_progress(), task=ssm.current_task_title(phase) or "")
 
         messages = ssm.get_messages(phase)
         attempt = 0

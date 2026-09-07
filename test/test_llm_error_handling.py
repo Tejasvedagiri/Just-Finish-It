@@ -16,6 +16,8 @@ import httpx
 import pytest
 from openai import APIConnectionError, BadRequestError, InternalServerError
 
+from JFI.manager.abstract_manager import ResponseTooLongError
+
 _REQUEST = httpx.Request("POST", "http://127.0.0.1:1234/v1/chat/completions")
 
 _HTML_500_BODY = (
@@ -113,6 +115,13 @@ class TestIsRetryableLlmError:
 
         assert _is_retryable_llm_error(ValueError("boom")) is False
 
+    def test_response_too_long_is_retryable(self):
+        """A runaway generation past RESPONSE_MAX_TOKEN is worth re-sending
+        the same turn for, same as a dropped connection."""
+        from JFI.runner import _is_retryable_llm_error
+
+        assert _is_retryable_llm_error(ResponseTooLongError("too long")) is True
+
 
 class _FakeConsole:
     """Just enough of AbstractManager's surface for run_phase."""
@@ -139,6 +148,9 @@ class _FakeConsole:
 
     def drain_forced_input(self):
         return []
+
+    def drain_skip_request(self):
+        return False
 
     def mark_phase_done(self, phase):
         pass
@@ -207,3 +219,34 @@ class TestRunPhaseRetry:
         assert result is False
         assert llm.calls == 1  # never retried
         assert not any("retrying" in e.lower() for e in console.errors)
+
+    def test_response_too_long_retries_the_same_turn(self, make_manager, monkeypatch):
+        """A runaway generation (print_agent_response, not send_message,
+        raises this one) must be re-sent rather than ending the run — same
+        retry path as a dropped connection."""
+        from JFI.runner import run_phase
+        import JFI.runner as runner_module
+
+        monkeypatch.setattr(runner_module, "LLM_RETRY_DELAY_SECONDS", 0)
+        ssm = make_manager("retry_too_long")
+
+        class _ScriptedResponseConsole(_FakeConsole):
+            def __init__(self, exceptions):
+                super().__init__()
+                self.exceptions = list(exceptions)
+                self.calls = 0
+
+            def print_agent_response(self, response, prompt_tokens_estimate=0):
+                self.calls += 1
+                if self.exceptions:
+                    raise self.exceptions.pop(0)
+                return {"content": "IMP_COMPLETE", "tool_calls": None}
+
+        console = _ScriptedResponseConsole([ResponseTooLongError("too long")])
+        llm = _ScriptedLLM([])  # send_message always succeeds
+
+        result = run_phase(console, llm, ssm, "imp")
+
+        assert result is True
+        assert console.calls == 2  # one abort, then the retry succeeded
+        assert any("retrying" in e.lower() for e in console.errors)

@@ -8,15 +8,17 @@ auto-detection (never crash).
 import pytest
 
 # Import at module level so the parametrize decorator can reference the table.
-from JFI.manager.pt_console_manager import PT_THEME_PRESETS
+from JFI.manager.pt_console_manager import PT_THEME_PRESETS, UI_STYLE_BASE
 
 
-def test_six_presets_exist():
-    """The documented set is 3 dark + 3 light presets."""
+def test_ten_presets_exist():
+    """3 dark + 3 light originals, plus all four Catppuccin flavors."""
     names = set(PT_THEME_PRESETS)
     assert {
         "dark-default", "dark-ocean", "dark-mono",
         "light-default", "light-sunrise", "light-paper",
+        "catppuccin-mocha", "catppuccin-macchiato",
+        "catppuccin-frappe", "catppuccin-latte",
     } <= names
 
 
@@ -157,3 +159,102 @@ def test_main_loads_dotenv_before_console(monkeypatch):
     runner.main()
 
     assert order == ["load_dotenv", "console_init"]
+
+
+# --------------------------------------------------------- background fill
+#
+# Every preset except dark-default now sets a "" style rule (bg + default
+# fg) so the *actual terminal background* changes with the theme, instead of
+# leaving whatever background color the user's own terminal profile had —
+# previously nothing did this, so THEME=dark-ocean recolored messages but the
+# screen behind them stayed whatever the terminal already was.
+
+NON_DEFAULT_PRESETS = sorted(name for name in PT_THEME_PRESETS if name != "dark-default")
+
+
+@pytest.mark.parametrize("preset", NON_DEFAULT_PRESETS)
+def test_non_default_preset_sets_background_fill(preset):
+    """Every preset but dark-default carries a "" rule with both bg: and fg:."""
+    rule = PT_THEME_PRESETS[preset].get("")
+    assert rule is not None, f"{preset} has no '' background rule"
+    assert "bg:#" in rule
+    assert "fg:#" in rule
+
+
+def test_dark_default_has_no_background_override():
+    """dark-default must stay the terminal's own background — it's the one
+    preset documented as 'inherits your terminal's own palette'."""
+    assert PT_THEME_PRESETS["dark-default"] == {}
+
+
+@pytest.mark.parametrize("preset", NON_DEFAULT_PRESETS)
+def test_preset_background_actually_resolves_via_style(preset):
+    """The '' rule isn't just present — it must be what a real Style object
+    hands back for blank/unstyled screen space (Style.get_attrs_for_style_str
+    matches every lookup against the "" class; see prompt_toolkit's
+    styles/style.py). This is the exact mechanism the live app relies on to
+    paint the background, not just decorate message text."""
+    from prompt_toolkit.styles import Style
+
+    style = Style.from_dict({**UI_STYLE_BASE, **PT_THEME_PRESETS[preset]})
+    attrs = style.get_attrs_for_style_str("")
+    expected_bg = PT_THEME_PRESETS[preset][""].split("bg:")[1].split()[0]
+    assert attrs.bgcolor == expected_bg.lstrip("#")
+
+
+def test_dark_default_background_is_unset_via_style():
+    """Without a '' override, blank screen space keeps DEFAULT_ATTRS (empty
+    bg/fg) so the terminal's own background actually shows through."""
+    from prompt_toolkit.styles import Style
+
+    style = Style.from_dict({**UI_STYLE_BASE, **PT_THEME_PRESETS["dark-default"]})
+    attrs = style.get_attrs_for_style_str("")
+    assert attrs.bgcolor == ""
+    assert attrs.color == ""
+
+
+CATPPUCCIN_BACKGROUNDS = {
+    "catppuccin-mocha": "#1e1e2e",
+    "catppuccin-macchiato": "#24273a",
+    "catppuccin-frappe": "#303446",
+    "catppuccin-latte": "#eff1f5",
+}
+
+
+@pytest.mark.parametrize("preset, bg", sorted(CATPPUCCIN_BACKGROUNDS.items()))
+def test_catppuccin_presets_match_official_palette(preset, bg):
+    """Pins each flavor's background to catppuccin/catppuccin's published hex
+    (https://github.com/catppuccin/catppuccin) so a future edit can't drift
+    from the real palette without this test catching it."""
+    assert PT_THEME_PRESETS[preset][""].startswith(f"bg:{bg} ")
+
+
+# ------------------------------------------------------------- color depth
+#
+# Even with the "" background rule above, the app rendered no visible color
+# change: prompt_toolkit's own default color depth is 256-color (see
+# vt100.Vt100_Output.get_default_color_depth — "we prefer 256 colors almost
+# always"), so every literal 24-bit hex in PT_THEME_PRESETS was getting
+# quantized down to the nearest xterm-256 entry — confirmed by capturing raw
+# output in a real pty: THEME=dark-ocean's #141b26 background rendered as
+# plain "48;5;234" (a generic near-black grey from the 256 palette), not the
+# navy that was actually configured. PromptToolkitConsoleManager._resolve_color_depth
+# is what fixes this — these tests pin its env-override precedence.
+
+def test_resolve_color_depth_defaults_to_true_color(monkeypatch):
+    from prompt_toolkit.output.color_depth import ColorDepth
+
+    from JFI.manager.pt_console_manager import PromptToolkitConsoleManager as PTCM
+
+    monkeypatch.delenv("PROMPT_TOOLKIT_COLOR_DEPTH", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    assert PTCM._resolve_color_depth() == ColorDepth.DEPTH_24_BIT
+
+
+def test_resolve_color_depth_honors_prompt_toolkit_env_override(monkeypatch):
+    from prompt_toolkit.output.color_depth import ColorDepth
+
+    from JFI.manager.pt_console_manager import PromptToolkitConsoleManager as PTCM
+
+    monkeypatch.setenv("PROMPT_TOOLKIT_COLOR_DEPTH", "DEPTH_4_BIT")
+    assert PTCM._resolve_color_depth() == ColorDepth.DEPTH_4_BIT

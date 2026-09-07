@@ -195,3 +195,75 @@ def test_ensure_plan_file_counts_x_and_uppercase_ticks(console, manager):
     assert manager.ensure_plan_file() is True
     assert manager.plan_progress() == (2, 3)
     assert any("2/3" in msg for msg in console.system_messages)
+
+
+def test_plan_progress_counts_skipped_as_resolved(manager):
+    """A user-skipped '- [○]' item counts toward progress the same as '- [x]'
+    — it's no longer pending action, even though the model didn't do it."""
+    _plan_with(
+        manager,
+        "## Implementation\n- [x] 1.1 done\n- [○] 1.2 skipped\n- [ ] 1.3 pending\n",
+    )
+    assert manager.plan_progress() == (2, 3)
+
+
+# ---------------------------------------------------------------------------
+# skip_current_task (Ctrl+K)
+# ---------------------------------------------------------------------------
+
+def test_skip_current_task_marks_first_pending_item(manager):
+    _plan_with(manager, PLAN_TWO_SECTIONS)
+    skipped_text = manager.skip_current_task("imp")
+
+    assert skipped_text == "1.1 first step"
+    text = manager.plan_file.read_text(encoding="utf-8")
+    assert "- [○] 1.1 first step" in text
+    # Nothing else in the file was touched.
+    assert "- [x] 1.2 second step (done)" in text
+    assert "- [ ] 1.3 third step" in text
+
+
+def test_skip_current_task_only_touches_its_own_section(manager):
+    _plan_with(manager, PLAN_TWO_SECTIONS)
+    manager.skip_current_task("testing")
+
+    text = manager.plan_file.read_text(encoding="utf-8")
+    assert "- [○] 2.1 a test" in text
+    # Implementation's pending item is untouched.
+    assert "- [ ] 1.1 first step" in text
+
+
+def test_skip_current_task_preserves_indentation(manager):
+    _plan_with(manager, "## Implementation\n  - [ ] 1.1 indented item\n")
+    skipped_text = manager.skip_current_task("imp")
+
+    assert skipped_text == "1.1 indented item"
+    assert "  - [○] 1.1 indented item" in manager.plan_file.read_text(encoding="utf-8")
+
+
+def test_skip_current_task_removes_item_from_pending_queue(manager):
+    _plan_with(manager, PLAN_TWO_SECTIONS)
+    manager.skip_current_task("imp")
+
+    pending = manager._pending_items("Implementation")
+    assert "- [ ] 1.1 first step" not in pending
+    assert pending == ["- [ ] 1.3 third step"]
+
+
+def test_skip_current_task_nothing_pending_returns_none(manager):
+    _plan_with(manager, "## Implementation\n- [x] 1.1 done\n")
+    assert manager.skip_current_task("imp") is None
+
+
+def test_skip_current_task_missing_plan_returns_none(manager):
+    assert not manager.plan_file.exists()
+    assert manager.skip_current_task("imp") is None
+
+
+@pytest.mark.parametrize("phase", ["planner", "reviewer", "nonexistent"])
+def test_skip_current_task_noop_for_non_checklist_phases(manager, phase):
+    """Only imp/testing have a per-item checklist to skip from."""
+    _plan_with(manager, PLAN_TWO_SECTIONS)
+    assert manager.skip_current_task(phase) is None
+    # And nothing in the plan file changed.
+    assert "○" not in manager.plan_file.read_text(encoding="utf-8")

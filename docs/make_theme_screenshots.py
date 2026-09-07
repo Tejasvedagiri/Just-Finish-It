@@ -46,7 +46,19 @@ BACKGROUNDS = {
     "light-default": "#ffffff",
     "light-sunrise": "#fff3e0",
     "light-paper": "#faf7ef",
+    # Match the real "" bg fill each preset now sets in PT_THEME_PRESETS
+    # (src/JFI/manager/pt_console_manager.py) so the screenshot matches what
+    # actually renders in a live terminal.
+    "catppuccin-mocha": "#1e1e2e",
+    "catppuccin-macchiato": "#24273a",
+    "catppuccin-frappe": "#303446",
+    "catppuccin-latte": "#eff1f5",
 }
+
+# Preset names whose window chrome (title-bar rule) should use the light
+# variant — checked explicitly rather than by name prefix, since
+# "catppuccin-latte" doesn't start with "light".
+LIGHT_PRESETS = {"light-default", "light-sunrise", "light-paper", "catppuccin-latte"}
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 FONT_BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"
@@ -210,7 +222,7 @@ def render_theme(name: str, out_path: Path) -> None:
     term_bg = bg
     radius = 10
     d.rounded_rectangle([2, 2, img_w - 3, img_h - 3], radius=radius, fill=term_bg)
-    chrome_fg = "#8b949e" if name.startswith("dark") else "#6a737d"
+    chrome_fg = "#6a737d" if name in LIGHT_PRESETS else "#8b949e"
     d.line([(2 + radius // 2, title_h), (img_w - 3 - radius // 2, title_h)], fill=chrome_fg, width=1)
     for i in range(3):
         c = ["#ff5f56", "#ffbd2e", "#27c93f"][i]
