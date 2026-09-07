@@ -19,16 +19,16 @@ dependencies = [
 ]
 
 [project.scripts]
-jfi = "autonomous_runner:main"
-JFI = "autonomous_runner:main"
+jfi = "JFI.runner:main"
+JFI = "JFI.runner:main"
+shbuild = "shbuild.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["llm", "manager", "session", "tool"]
-include = ["autonomous_runner.py"]
+packages = ["src/JFI", "src/shbuild"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
-testpaths = ["tests"]
+pythonpath = ["src"]
+testpaths = ["test"]
 norecursedirs = [".venv", ".JFI"]
 
 [dependency-groups]
