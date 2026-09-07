@@ -1,12 +1,14 @@
 #!/bin/sh
 # JFI launcher: prefer the project's virtualenv, fall back to the current interpreter.
+cd "$(dirname "$0")" || exit 1
 if [ -x .venv/bin/jfi ]; then
     exec .venv/bin/jfi "$@"
 else
-    # Use the python that is on PATH (or the one running this script).
+    # Fall back to running the package straight out of src/, no install needed.
+    export PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}"
     if command -v python3 >/dev/null 2>&1; then
-        exec python3 autonomous_runner.py "$@"
+        exec python3 -m JFI.runner "$@"
     else
-        exec python autonomous_runner.py "$@"
+        exec python -m JFI.runner "$@"
     fi
 fi

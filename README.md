@@ -58,8 +58,9 @@ install — no further steps needed.
 ## Running
 
 The repository ships an executable launcher at the project root — `./JFI`. It
-prefers the `.venv` install and falls back to `python autonomous_runner.py`, so you
-can invoke it directly without activating anything:
+prefers the `.venv` install and falls back to running the package straight out of
+`src/` (`python -m JFI.runner`), so you can invoke it directly without activating
+anything:
 
 ```bash
 # 1. straight from the repo root (no activation needed)
@@ -110,6 +111,20 @@ auto-detection. Leave it empty (or set `THEME=auto`) and JFI inspects your termi
 (`COLORFGBG`, TTY) to choose a dark or light palette automatically. Unknown values
 log a hint and fall back safely — they never crash startup.
 
+**Precedence rules:**
+
+1. An explicit, known preset in `.env` always wins over auto-detection.
+2. Empty, whitespace-only, unset, or the literal `auto` all mean "detect my terminal".
+3. Values are case-insensitive and accept `_` or `-` as separators (`Dark_Ocean`,
+   `dark_ocean`, and `dark-ocean` all select the same preset).
+4. Unknown names print a `[system]` hint listing valid presets, then fall back to
+   auto-detection (they never crash startup).
+
+**Confirming your theme took effect:** the full-screen UI's header bar shows the
+resolved source on every frame — e.g. `Just Finish It  ·  theme: env:THEME=dark-ocean`
+when `.env` selected a preset, or `theme: auto (light)` when detection kicked in.
+The Rich renderer prints the same hint once at startup instead.
+
 | Preset | Background |
 |---|---|
 | `dark-default` | dark |
@@ -135,11 +150,12 @@ THEME=dark-ocean
 | Path | Role |
 |---|---|
 | `JFI` | Repo-root executable launcher; prefers `.venv/bin/jfi`, falls back to the source tree. |
-| `autonomous_runner.py` | CLI entry point (`jfi`) and the main agent loop. |
-| `session/simple_session_manager.py` | Session workspace, plan path resolution, phase triggers, context compression. |
-| `manager/rich_console_manager.py` | Rich-based terminal UI, theme presets, streaming display of LLM output. |
-| `llm/colibri_llm_stream.py` | OpenAI-compatible streaming client. |
-| `tool/file_tools.py`, `tool/cmd_tools.py` | The tools the LLM calls: file read/write/append/replace and shell execution. |
+| `src/JFI/runner.py` | CLI entry point (`jfi`) and the main agent loop. |
+| `src/JFI/session/simple_session_manager.py` | Session workspace, plan path resolution, phase triggers, context compression. |
+| `src/JFI/manager/pt_console_manager.py` | The live terminal UI: full-screen prompt_toolkit app, status bar, theme presets, streaming display of LLM output. |
+| `src/JFI/manager/rich_console_manager.py` | Alternative Rich-based terminal UI implementing the same manager interface. |
+| `src/JFI/llm/colibri_llm_stream.py` | OpenAI-compatible streaming client. |
+| `src/JFI/tool/file_tools.py`, `src/JFI/tool/cmd_tools.py` | The tools the LLM calls: file read/write/append/replace and shell execution. |
 
 ## Tests
 
@@ -147,5 +163,5 @@ THEME=dark-ocean
 uv run pytest
 ```
 
-The test suite lives in `tests/`; `.JFI/` is excluded from collection so your real
+The test suite lives in `test/`; `.JFI/` is excluded from collection so your real
 session plans never interfere with it.
