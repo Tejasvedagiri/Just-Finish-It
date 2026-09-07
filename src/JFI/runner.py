@@ -18,7 +18,7 @@ from JFI.session.simple_session_manager import SimpleSessionManager, get_phase_t
 # Tools and Schemas
 from JFI.tool.schemas import AVAILABLE_TOOLS
 from JFI.tool.file_tools import write_file, read_file, append_to_file, replace_in_file
-from JFI.tool.cmd_tools import execute_command
+from JFI.tool.cmd_tools import execute_command, make_gated_execute_command
 from JFI.tool.image_tools import capture_screenshot, view_image
 
 # Dynamic mapping of tool names to their python functions
@@ -480,6 +480,10 @@ def run_pipeline(console: AbstractManager, llm: OpenAICompatableStream) -> None:
 
     # 2. Initialize Session Manager once
     ssm = SimpleSessionManager(console, session_name)
+    # Gate execute_command behind the human's approval, backed by this
+    # session's own context.json (approved "Save" prefixes live there,
+    # alongside whatever facts the LLM itself has stashed there).
+    TOOL_MAP["execute_command"] = make_gated_execute_command(console, ssm.context_cache_path)
     console.start_session_log(ssm.session_path / "run.log")
     # Requests queued but never drained before the process closed (killed,
     # crashed, or just quit) live in metadata.json — hand them back now, and
@@ -574,6 +578,11 @@ def main():
         llm.close()
         # Full-screen UI is gone by now; replay the transcript into scrollback.
         console.dump_transcript()
+        # Erase everything (screen + scrollback) so a closed run — Ctrl+C,
+        # normal completion, or an early return before the pipeline started —
+        # leaves the user's shell a clean screen. Best-effort by design; it
+        # must never raise through main()'s exit path.
+        console.clear_console()
 
 
 if __name__ == "__main__":

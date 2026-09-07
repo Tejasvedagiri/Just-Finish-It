@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Human-friendly titles for the internal phase keys — display only. The keys
 # themselves (PHASES in runner.py, completion markers like "IMP_COMPLETE" the
@@ -90,6 +90,29 @@ class AbstractManager(ABC):
                     )
                 except Exception:
                     pass  # Never let the recovery print hide the loop.
+
+    def get_user_choice(self, prompt_label: str, options: List[Tuple[str, str]]) -> str:
+        """
+        Presents `options` — a list of (key, label) pairs, e.g.
+        ``[("y", "Yes, run once"), ("n", "No, don't run")]`` — and returns the
+        chosen key.
+
+        Managers with a live UI can render this as an arrow-key-movable menu
+        (see :class:`PromptToolkitConsoleManager`); this default degrades to a
+        free-text prompt matched against each option's key or label
+        (case-insensitive, exact match only), re-prompting on anything else so
+        a caller never gets back a value outside `options`.
+        """
+        menu = "  /  ".join(f"[{key.upper()}] {label}" for key, label in options)
+        while True:
+            raw = self.safe_get_user_input(f"{prompt_label}  {menu}", multiline=False)
+            answer = (raw or "").strip().lower()
+            for key, label in options:
+                if answer == key.lower() or answer == label.lower():
+                    return key
+            self.display_system(
+                f"Please answer one of: {', '.join(key for key, _ in options)} (got {raw!r})."
+            )
 
     # ------------------------------------------------------------- rendering
 
