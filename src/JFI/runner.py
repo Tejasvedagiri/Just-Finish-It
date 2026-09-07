@@ -1,5 +1,6 @@
 import inspect
 import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import find_dotenv, load_dotenv
@@ -183,32 +184,74 @@ def drain_forced_input(console: AbstractManager, ssm: SimpleSessionManager) -> N
         )
 
 
-def collect_next_iteration(console: AbstractManager) -> Optional[str]:
+MAX_REVIEW_ITERATIONS = 3
+
+
+def review_outcome(review_path: str) -> Optional[str]:
+    """
+    Post-review decision (1): a generated review.md means the reviewer found
+    issues and wants another full iteration (planner → imp → testing →
+    reviewer). No review.md means the review was good — return None to end
+    the run normally.
+
+    The returned feedback embeds the report's full content, so the next
+    planner sees every issue even after the file is cleared away.
+    """
+    if not Path(review_path).exists():
+        return None
+    try:
+        report = Path(review_path).read_text(encoding="utf-8")
+    except OSError:
+        report = "(the review report could not be read — re-inspect the plan and the code)"
+    return (
+        f"REVIEW FAILED: the reviewer found issues in the finished work. Its report:\n\n"
+        f"{report}\n\n"
+        f"Update the plan with new '- [ ]' items (continuing the existing numbering) to fix "
+        f"every issue listed above — do NOT touch any already-ticked '- [x]' lines. Then "
+        f"implement and test those fixes."
+    )
+
+
+def collect_next_iteration(console: AbstractManager, review_path: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
     """
     Decides what happens once the review phase has landed.
 
-    Nothing here asks for approval. Queued requests start the next pass
-    immediately; with an empty queue the pipeline idles with the input line
-    live, so feeding it more work stays optional. Returns None to end the run.
+    Nothing here asks for approval. A generated review.md takes priority over
+    anything queued (the failed review must be fixed first); otherwise queued
+    requests start the next pass immediately, and with an empty queue the
+    pipeline idles with the input line live, so feeding it more work stays
+    optional. Returns a (feedback, review_path) tuple — feedback is None to end
+    the run; review_path is set only for a failed-review re-iteration.
     """
+    feedback = review_outcome(review_path) if review_path else None
+    if feedback:
+        console.display_rule("🔁 REVIEW FAILED — SCHEDULING ANOTHER FULL ITERATION")
+        # Remove the stale report so it cannot re-trigger a loop on its own;
+        # only a freshly written review.md may schedule another iteration.
+        try:
+            Path(review_path).unlink()
+        except OSError:
+            pass
+        return feedback, review_path
+
     queued = console.drain_queued_input()
 
     if not queued:
-        console.set_status(phase="", state="idle · queue empty")
+        console.set_status(phase="", state="idle · queue empty", task="")
         console.display_rule("✅ PIPELINE COMPLETE — IDLE (queue anything to continue)")
         queued = console.wait_for_queued_input()
 
     if not queued:
-        return None  # stopped, or the console has no queue at all
+        return None, None  # stopped, or the console has no queue at all
 
     requests = [q for q in queued if q.strip().lower() not in EXIT_WORDS]
     if not requests:
-        return None
+        return None, None
 
     console.display_rule(f"▶  RUNNING {len(requests)} QUEUED REQUEST(S)")
     for request in requests:
         console.display_user(request)
-    return "\n".join(f"- {request}" for request in requests)
+    return "\n".join(f"- {request}" for request in requests), None
 
 
 # ----------------------------------------------------------------- the phases
@@ -219,7 +262,8 @@ def run_phase(console: AbstractManager, llm: ColibriLLMStream, ssm: SimpleSessio
     Drives one phase to completion. Returns False if the run should stop early
     (user interrupt or LLM failure), True when the phase finished cleanly.
     """
-    console.set_status(phase=phase, state="thinking", plan=ssm.plan_progress(), tokens=ssm.token_usage())
+    console.set_status(phase=phase, state="thinking", plan=ssm.plan_progress(), tokens=ssm.token_usage(),
+                       task=ssm.current_task_title(phase) or "")
     console.display_rule(f"PHASE: {phase.upper()}")
 
     failures: Dict[tuple, int] = {}
@@ -266,7 +310,8 @@ def run_phase(console: AbstractManager, llm: ColibriLLMStream, ssm: SimpleSessio
                     "content": str(tool_result)
                 })
 
-            console.set_status(state="thinking", plan=ssm.plan_progress(), tokens=ssm.token_usage())
+            console.set_status(state="thinking", plan=ssm.plan_progress(), tokens=ssm.token_usage(),
+                               task=ssm.current_task_title(phase) or "")
 
         # --- CHECK FOR COMPLETION ---
         # Checked even alongside tool calls: ticking the last box and signing
@@ -277,7 +322,8 @@ def run_phase(console: AbstractManager, llm: ColibriLLMStream, ssm: SimpleSessio
 
             if phase == "planner":
                 ssm.ensure_plan_file()
-            console.set_status(plan=ssm.plan_progress(), tokens=ssm.token_usage())
+            console.set_status(plan=ssm.plan_progress(), tokens=ssm.token_usage(),
+                               task=ssm.current_task_title(phase) or "")
             return True
 
         if tool_calls:
@@ -331,12 +377,15 @@ def run_pipeline(console: AbstractManager, llm: ColibriLLMStream) -> None:
         console.display_system(f"⏩ Skipping completed phases: {', '.join(skipped).upper()}")
 
     # 4. Outer Loop for Re-runs and Feedback
+    review_feedback: Optional[str] = None  # set when a failed review re-iteration starts
+    review_failures = 0                    # counts consecutive failed reviews (loop guard)
     while not console.should_stop():
         if not active_phases:
             console.display_system("All phases have already been completed for this session.")
 
         for phase in active_phases:
-            trigger_message = get_phase_trigger(phase, initial_goal, ssm.plan_path, iteration)
+            trigger_message = get_phase_trigger(phase, initial_goal, ssm.plan_path, iteration,
+                                                review_path=review_feedback)
 
             # Avoid inserting duplicate trigger if already present in history
             last_user_msg = next((m.get("content", "") for m in reversed(ssm.history) if m.get("role") == "user"), "")
@@ -346,10 +395,22 @@ def run_pipeline(console: AbstractManager, llm: ColibriLLMStream) -> None:
             if not run_phase(console, llm, ssm, phase):
                 return
 
-        # 5. Review has landed: queued requests loop us round again, no prompt
-        feedback = collect_next_iteration(console)
+        # 5. Review has landed: a generated review.md (failed review) or queued
+        # requests loop us round again, no prompt.
+        feedback, review_feedback = collect_next_iteration(console, review_path=str(Path(ssm.plan_path).with_name("review.md")))
         if feedback is None:
             break
+
+        if review_feedback is not None:
+            review_failures += 1
+            console.display_rule(f"🔎 REVIEW FAIL #{review_failures}/{MAX_REVIEW_ITERATIONS} THIS SESSION")
+            if review_failures >= MAX_REVIEW_ITERATIONS:
+                console.display_rule(
+                    f"⛔ REVIEW LOOP CAP REACHED ({MAX_REVIEW_ITERATIONS} failed reviews) — "
+                    f"ending the run so a failing cycle is visible here instead of looping forever. "
+                    f"Queue another request to keep going."
+                )
+                break
 
         ssm.add_message(
             "user",
@@ -358,13 +419,12 @@ def run_pipeline(console: AbstractManager, llm: ColibriLLMStream) -> None:
             f"The plan file is {ssm.plan_path}. Keep its completed '- [x]' items, add new "
             f"'- [ ]' items for this request, then implement and test them."
         )
-
         # Fresh pass: the header rewinds to planner and counts the loop.
         iteration += 1
         active_phases = PHASES
         console.start_iteration(iteration, PHASES)
 
-    console.set_status(phase="", state="finished", plan=ssm.plan_progress(), tokens=ssm.token_usage())
+    console.set_status(phase="", state="finished", plan=ssm.plan_progress(), tokens=ssm.token_usage(), task="")
     console.display_rule("🎉 JUST FINISH IT — SESSION TERMINATED 🎉")
 
 

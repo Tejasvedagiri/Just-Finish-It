@@ -80,3 +80,41 @@ class TestPendingItems:
 
     def test_pending_items_empty_when_missing(self, manager):
         assert manager._pending_items("Implementation") == []
+
+
+class TestReviewerSystemMessage:
+    """The reviewer phase must carry BOTH branches of the conditional review.md
+    instruction: do not generate it when the work is good; generate it (via
+    write_file) into .JFI/<session>/review.md when issues exist."""
+
+    def test_good_branch_instructs_not_to_generate_review_md(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("reviewer", manager.plan_path).lower()
+        assert "do not write or touch .jfi/demo/review.md" in msg
+        assert "pass" in msg  # the short 'Review: PASS' summary branch
+
+    def test_issues_branch_instructs_to_generate_review_md(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("reviewer", manager.plan_path).lower()
+        assert "write_file to create .jfi/demo/review.md" in msg
+        # The report must be concrete and actionable.
+        assert "line(s)" in msg or "file/line" in msg
+
+    def test_review_md_lives_next_to_plan(self, manager):
+        """The reviewer's review.md target is derived from the plan path — same folder."""
+        from pathlib import Path
+        from JFI.session.simple_session_manager import get_system_message
+
+        expected = str(Path(manager.plan_path).with_name("review.md"))
+        assert expected == ".JFI/demo/review.md"
+        msg = get_system_message("reviewer", manager.plan_path)
+        assert expected in msg  # the exact path, not a placeholder
+
+    def test_other_phases_do_not_mention_review_md(self, manager):
+        """Only the reviewer decides about review.md."""
+        from JFI.session.simple_session_manager import get_system_message
+
+        for phase in ("planner", "imp", "testing"):
+            assert "review.md" not in get_system_message(phase, manager.plan_path)

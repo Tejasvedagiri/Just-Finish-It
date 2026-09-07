@@ -58,27 +58,3 @@ class TestSafeGetUserInput:
 
         m = M(results=["ok"], excs=[IndexError("a")])
         assert m.safe_get_user_input() == "ok"
-
-
-class TestRichConsoleManagerSafeInput:
-
-    def test_rich_manager_retries_then_succeeds(self):
-        from JFI.manager.rich_console_manager import RichConsoleManager
-
-        mgr = RichConsoleManager.__new__(RichConsoleManager)  # skip console init for unit test
-        state = {"n": 0}
-
-        def flaky(prompt_label="You", **kwargs):
-            state["n"] += 1
-            if state["n"] == 1:
-                raise IndexError("event-loop redraw glitch")
-            return "typed"
-
-        mgr.get_user_input = flaky
-        assert mgr.safe_get_user_input() == "typed"
-        assert state["n"] == 2
-
-    def test_rich_manager_uses_inherited_safe_path(self):
-        from JFI.manager.rich_console_manager import RichConsoleManager
-        assert isinstance(RichConsoleManager, type)
-        assert issubclass(RichConsoleManager, AbstractManager)

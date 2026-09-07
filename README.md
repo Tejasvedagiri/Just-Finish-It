@@ -123,7 +123,6 @@ log a hint and fall back safely — they never crash startup.
 **Confirming your theme took effect:** the full-screen UI's header bar shows the
 resolved source on every frame — e.g. `Just Finish It  ·  theme: env:THEME=dark-ocean`
 when `.env` selected a preset, or `theme: auto (light)` when detection kicked in.
-The Rich renderer prints the same hint once at startup instead.
 
 | Preset | Background |
 |---|---|
@@ -139,7 +138,7 @@ Example:
 ```dotenv
 OPENAI_URL="http://127.0.0.1:1234/v1"
 OPENAI_API_KEY="local"
-MODEL="qwen3.8-27b-ultra-uncensored-heretic-native-mtp-preserved"
+MODEL="qwen/qwen3.8-27b"
 CONTEXT_SIZE=32768
 CONTEXT_COMPRESSION_RATIO=0.7
 THEME=dark-ocean
@@ -152,8 +151,7 @@ THEME=dark-ocean
 | `JFI` | Repo-root executable launcher; prefers `.venv/bin/jfi`, falls back to the source tree. |
 | `src/JFI/runner.py` | CLI entry point (`jfi`) and the main agent loop. |
 | `src/JFI/session/simple_session_manager.py` | Session workspace, plan path resolution, phase triggers, context compression. |
-| `src/JFI/manager/pt_console_manager.py` | The live terminal UI: full-screen prompt_toolkit app, status bar, theme presets, streaming display of LLM output. |
-| `src/JFI/manager/rich_console_manager.py` | Alternative Rich-based terminal UI implementing the same manager interface. |
+| `src/JFI/manager/pt_console_manager.py` | The terminal UI: full-screen prompt_toolkit app, status bar, theme presets, streaming display of LLM output. |
 | `src/JFI/llm/colibri_llm_stream.py` | OpenAI-compatible streaming client. |
 | `src/JFI/tool/file_tools.py`, `src/JFI/tool/cmd_tools.py` | The tools the LLM calls: file read/write/append/replace and shell execution. |
 

@@ -193,33 +193,51 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH) -> str:
         """
 
     elif phase == "reviewer":
+        review_path = str(Path(plan_path).with_name("review.md"))
         return f"""
-            You are an expert Reviewer Agent. You report on the finished work.
+            You are an expert Reviewer Agent. You evaluate the finished work and decide whether it
+            needs another iteration of planner → imp → testing → reviewer.
             You do NOT gate anything: you never ask for approval, never ask the user a question,
             and never wait for a reply.
             {rules}
 
-            1. read_file {plan_path} and inspect the files that were produced.
-            2. Write a short, concrete report: what was built, what was verified, and anything
-               that is still incomplete or looks wrong.
-            3. If an item is still "- [ ]" but is genuinely finished, tick it with replace_in_file.
-               If it is genuinely unfinished, just say so plainly in your report.
+            1. read_file {plan_path}, then inspect the files that were produced (and re-run any
+               tests or commands needed to judge them).
+            2. Decide: is the work good — every planned item genuinely done, verified, and free of
+               defects?
+            3. If the review is GOOD: do NOT write or touch {review_path}. Just output a short
+               "Review: PASS" summary in your reply (what was built, what was verified).
+            4. Only if problems exist (broken/unfinished work, failing tests, missing pieces):
+               use write_file to create {review_path} with concrete, actionable issue descriptions —
+               one numbered item per problem, each naming the file(s) and line(s) involved where
+               relevant, plus how to fix it. The next planner iteration will read that file and add
+               new plan items from it, so be specific.
 
-            When the report is written, output the exact phrase on its own line: REVIEWER_COMPLETE
+            When you are done (PASS summary written or {review_path} saved), output the exact phrase
+            on its own line: REVIEWER_COMPLETE
         """
 
     return ""
 
 
-def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_PATH, iteration: int = 1) -> str:
+def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_PATH, iteration: int = 1,
+                      review_path: Optional[str] = None) -> str:
     """The opening human turn that kicks off a phase."""
     if phase == "planner":
         if iteration > 1:
-            return (
+            trigger = (
                 f"Update the plan at {plan_path} so it covers the request above.\n"
                 f"Read it first, keep every '- [x]' line untouched, and append new '- [ ]' items "
                 f"for the new work, continuing the numbering."
             )
+            if review_path:
+                trigger += (
+                    f"\nThe previous iteration's review FAILED — its full report is quoted in the "
+                    f"feedback message above (the reviewer saved it to {review_path} and it has "
+                    f"since been archived). Add one new '- [ ]' item per issue to fix it — do NOT "
+                    f"touch any already-ticked '- [x]' lines."
+                )
+            return trigger
         return (
             f"My goal is: {goal}\n\n"
             f"Write the step-by-step plan to {plan_path} now, using the mandated '- [ ]' format."
@@ -240,8 +258,12 @@ def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_
         )
 
     if phase == "reviewer":
+        review_path = str(Path(plan_path).with_name("review.md"))
         return (
-            f"Testing is done. Review the final state against {plan_path} and write your report. "
+            f"Testing is done. Evaluate the finished work against {plan_path}. If it is good, do NOT "
+            f"write any file — just reply with a short 'Review: PASS' summary. Only if problems "
+            f"exist, write them to {review_path} as concrete, actionable issues (file/line references "
+            f"where relevant), which triggers another planner → imp → testing → reviewer iteration. "
             f"Do not ask for approval."
         )
 
@@ -451,6 +473,30 @@ class SimpleSessionManager:
             if in_section and item:
                 pending.append(line.strip())
         return pending
+
+    def current_task_title(self, phase: str, max_len: int = 140) -> Optional[str]:
+        """
+        The first unchecked item's descriptive text for `phase`'s section
+        (e.g. "1.1 Verify .env loading happens before theme resolution..."),
+        or None when the phase has no checkbox-driven task queue at all
+        (planner/reviewer just work on the plan/report directly) or nothing
+        is pending. Mirrors `_phase_system_message`'s own work-queue
+        extraction, so this is exactly the item the model was just handed as
+        its next one — for display in the console's status line, not the
+        model's own self-reported "[CURRENT TASK: ...]" text, which would
+        need parsing streamed output and could drift out of sync mid-turn.
+        """
+        section = {"imp": "Implementation", "testing": "Testing"}.get(phase)
+        if not section:
+            return None
+        pending = self._pending_items(section)
+        if not pending:
+            return None
+        match = re.match(r"^[ \t]*[-*][ \t]+\[[ ]\]\s*(.*)", pending[0])
+        title = match.group(1).strip() if match else pending[0]
+        if len(title) > max_len:
+            title = title[:max_len - 1].rstrip() + "…"
+        return title
 
     def ensure_plan_file(self) -> bool:
         """

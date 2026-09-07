@@ -1,9 +1,7 @@
-"""Shared helpers for resolving the ``THEME`` environment variable.
+"""Helpers for resolving the ``THEME`` environment variable.
 
-Both console renderers (Rich and prompt_toolkit) keep their own preset tables
-because they don't share a color-name vocabulary, but the *rules* for turning
-a raw ``THEME`` value into a lookup must stay identical — this module is the
-single place those rules live:
+Kept separate from the console manager itself so the rules for turning a raw
+``THEME`` value into a preset lookup live in one small, easily-tested place:
 
 1. strip surrounding whitespace;
 2. lower-case and translate ``_`` to ``-`` (so ``Dark_Ocean`` == ``dark-ocean``);

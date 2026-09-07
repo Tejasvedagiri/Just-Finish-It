@@ -40,6 +40,9 @@ UI_STYLE_BASE: Dict[str, str] = {
     "header.loop": "bold ansiyellow",
     "header.tokens": "ansibrightblack",
     "header.tokens.warn": "bold ansired",
+    "tasktitle.phase": "bold ansimagenta",
+    "tasktitle.dim": "ansibrightblack",
+    "tasktitle": "ansiwhite",
     "rule": "ansibrightblack",
     "status": "ansibrightblack",
     "status.queue": "bold ansiyellow",
@@ -113,12 +116,10 @@ def _check_light_env() -> bool:
 def resolve_pt_theme() -> tuple[Dict[str, str], Optional[str]]:
     """Picks the live console's style overrides and reports how they were chosen.
 
-    Mirrors ``rich_console_manager.resolve_theme``'s contract (an explicit
-    THEME preset always wins; empty/"auto" falls back to COLORFGBG detection;
-    an unknown name logs a hint and falls back too, so a typo can never crash
-    startup) but returns prompt_toolkit style overrides instead of a Rich
-    palette — the two renderers don't share a color-name vocabulary, so each
-    keeps its own preset table.
+    An explicit THEME preset always wins; empty/"auto" falls back to
+    COLORFGBG detection; an unknown name logs a hint and falls back too, so a
+    typo can never crash startup (see ``theme_env.resolve_explicit_theme``
+    for the shared normalization/precedence rules).
     """
     explicit = resolve_explicit_theme(PT_THEME_PRESETS)
     if explicit is not None:
@@ -186,6 +187,7 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._awaiting: Optional[str] = None
         self._iteration = 1
         self._plan = None  # (ticked, total) checkbox progress
+        self._task: Optional[str] = None  # current plan item's text (imp/testing only)
         self._tokens = None  # (estimated tokens used, context window)
         self._tokens_read = 0  # cumulative prompt tokens sent this run
         self._tokens_written = 0  # cumulative completion tokens generated this run
@@ -225,7 +227,7 @@ class PromptToolkitConsoleManager(AbstractManager):
 
         root = HSplit([
             Window(FormattedTextControl(self._header_fragments), height=1),
-            Window(char="─", height=1, style="class:rule"),
+            Window(FormattedTextControl(self._task_line_fragments), height=1),
             self._out_window,
             # --- the three reserved lines -------------------------------
             Window(char="─", height=1, style="class:rule"),
@@ -415,6 +417,25 @@ class PromptToolkitConsoleManager(AbstractManager):
                 ("class:header.dim", "  ·  "),
                 ("class:header.dim", theme_label(self.theme_source)),
             ]
+        return frags
+
+    def _task_line_fragments(self):
+        """The line right under the header: which phase is active and, for
+        imp/testing (the only phases with a checkbox work queue), the exact
+        item currently being worked. Falls back to a plain divider when idle
+        (no phase set), matching the look this line had before it did
+        anything — planner/reviewer show just the phase, since they have no
+        per-item task concept.
+        """
+        with self._lock:
+            phase, task = self._phase, self._task
+
+        if not phase:
+            return [("class:rule", "─" * self._width())]
+
+        frags = [("class:tasktitle.phase", f" ▸ {phase.upper()}")]
+        if task:
+            frags += [("class:tasktitle.dim", "  ·  "), ("class:tasktitle", task)]
         return frags
 
     def _status_fragments(self):
@@ -678,12 +699,15 @@ class PromptToolkitConsoleManager(AbstractManager):
 
     def set_status(self, session: Optional[str] = None, phase: Optional[str] = None,
                    state: Optional[str] = None, phases: Optional[List[str]] = None,
-                   plan: Optional[tuple] = None, tokens: Optional[tuple] = None) -> None:
+                   plan: Optional[tuple] = None, tokens: Optional[tuple] = None,
+                   task: Optional[str] = None) -> None:
         with self._lock:
             if plan is not None:
                 self._plan = plan
             if tokens is not None:
                 self._tokens = tokens
+            if task is not None:
+                self._task = task
             if session is not None:
                 self._session = session
             if phase is not None:
@@ -709,6 +733,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             self._iteration = number
             self._done_phases = []
             self._phase = ""
+            self._task = None
             if phases is not None:
                 self._phases = list(phases)
         self._invalidate()

@@ -110,7 +110,8 @@ class AbstractManager(ABC):
 
     def set_status(self, session: Optional[str] = None, phase: Optional[str] = None,
                    state: Optional[str] = None, phases: Optional[List[str]] = None,
-                   plan: Optional[tuple] = None, tokens: Optional[tuple] = None) -> None:
+                   plan: Optional[tuple] = None, tokens: Optional[tuple] = None,
+                   task: Optional[str] = None) -> None:
         pass
 
     def mark_phase_done(self, phase: str) -> None:
