@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import queue
+import sys
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
@@ -50,6 +51,8 @@ UI_STYLE_BASE: Dict[str, str] = {
     "status.busy": "bold ansigreen",
     "status.wait": "bold ansicyan",
     "status.locked": "bold ansired",
+    "status.choice": "ansibrightblack",
+    "status.choice.selected": "bold reverse ansicyan",
     "prompt": "bold ansigreen",
     "out.user": "bold ansicyan",
     "out.assistant": "ansigreen",
@@ -185,6 +188,11 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._done_phases: List[str] = []
         self._state = "starting"
         self._awaiting: Optional[str] = None
+        # Set only while get_user_choice() is waiting: a (key, label) menu
+        # rendered in the status bar, movable with arrow keys. None the rest
+        # of the time, including during a plain get_user_input() question.
+        self._choice_options: Optional[List[Tuple[str, str]]] = None
+        self._choice_index = 0
         self._iteration = 1
         self._plan = None  # (ticked, total) checkbox progress
         self._task: Optional[str] = None  # current plan item's text (imp/testing only)
@@ -256,6 +264,14 @@ class PromptToolkitConsoleManager(AbstractManager):
 
         @kb.add("enter")
         def _submit(event):
+            # A choice menu (get_user_choice) takes Enter over entirely: it
+            # confirms whatever's highlighted, ignoring anything typed —
+            # typing a key/label still works, but jumps the selection via
+            # _choice_left/_choice_right below rather than through here.
+            if self._choice_options is not None:
+                self._confirm_choice()
+                return
+
             # Bracketed paste (on by default) delivers a pasted block as one
             # event, so its newlines never reach this handler. Terminals
             # without it deliver the block as a burst of keys instead: if more
@@ -271,6 +287,18 @@ class PromptToolkitConsoleManager(AbstractManager):
                 event.current_buffer.validate_and_handle()
 
         add_shift_enter_newline(kb)
+
+        choice_active = Condition(lambda: self._choice_options is not None)
+
+        @kb.add("left", filter=choice_active)
+        @kb.add("up", filter=choice_active)
+        def _choice_prev(event):
+            self._move_choice(-1)
+
+        @kb.add("right", filter=choice_active)
+        @kb.add("down", filter=choice_active)
+        def _choice_next(event):
+            self._move_choice(1)
 
         @kb.add("pageup")
         def _page_up(event):
@@ -302,6 +330,43 @@ class PromptToolkitConsoleManager(AbstractManager):
             self.request_stop()
 
         return kb
+
+    # --------------------------------------------------------- choice menu
+
+    def _move_choice(self, delta: int) -> None:
+        with self._lock:
+            if not self._choice_options:
+                return
+            self._choice_index = (self._choice_index + delta) % len(self._choice_options)
+        self._invalidate()
+
+    def _match_choice_key(self, text: str) -> Optional[str]:
+        """Matches typed `text` against an option's key or label (exact,
+        case-insensitive) — lets someone who already knows the answer type
+        it and hit Enter instead of arrowing over."""
+        text = text.strip().lower()
+        if not text:
+            return None
+        with self._lock:
+            options = list(self._choice_options or [])
+        for key, label in options:
+            if text == key.lower() or text == label.lower():
+                return key
+        return None
+
+    def _confirm_choice(self) -> None:
+        """Enter, while a choice menu is up: the typed text wins if it names
+        an option outright, otherwise the arrow-highlighted one is used."""
+        typed = self._input_buffer.text
+        matched = self._match_choice_key(typed)
+        with self._lock:
+            options = self._choice_options
+            index = self._choice_index
+        if not options:
+            return
+        key = matched if matched is not None else options[index][0]
+        self._input_buffer.reset()
+        self._answers.put(key)
 
     def _logical_line_count(self) -> int:
         """Number of *renderable* logical lines for the fragments prompt_toolkit is
@@ -450,6 +515,8 @@ class PromptToolkitConsoleManager(AbstractManager):
     def _status_fragments(self):
         with self._lock:
             phase, state, awaiting, follow = self._phase, self._state, self._awaiting, self._follow
+            choice_options = list(self._choice_options) if self._choice_options else None
+            choice_index = self._choice_index
         queued, forced = self._queued.qsize(), self._forced.qsize()
 
         frags = [
@@ -460,7 +527,16 @@ class PromptToolkitConsoleManager(AbstractManager):
             frags += [("class:status", "  "), ("class:status.forced", f"⚡{forced}")]
         frags.append(("class:status", "   "))
 
-        if awaiting is not None:
+        if choice_options is not None:
+            frags.append(("class:status.wait", "⌨ "))
+            for i, (_key, label) in enumerate(choice_options):
+                if i:
+                    frags.append(("class:status", "   "))
+                if i == choice_index:
+                    frags.append(("class:status.choice.selected", f"❯ {label}"))
+                else:
+                    frags.append(("class:status.choice", f"  {label}"))
+        elif awaiting is not None:
             frags += [("class:status.wait", "⌨ waiting for your input")]
         else:
             tick = SPINNER[int(time.monotonic() * 10) % len(SPINNER)]
@@ -470,7 +546,9 @@ class PromptToolkitConsoleManager(AbstractManager):
         if not follow:
             frags += [("class:status", "   "), ("class:status.locked", "SCROLL LOCK · PgDn to resume")]
 
-        if awaiting is not None:
+        if choice_options is not None:
+            hint = "   ←/→ move · Enter confirm · type to jump · Ctrl+C stop"
+        elif awaiting is not None:
             hint = "   Enter answers · Alt+Enter newline · PgUp/PgDn scroll · Ctrl+C stop"
         else:
             hint = ("   Enter queues for after review · !text runs now · ! runs the whole queue · "
@@ -596,6 +674,39 @@ class PromptToolkitConsoleManager(AbstractManager):
         finally:
             with self._lock:
                 self._awaiting = None
+            self._invalidate()
+
+    def get_user_choice(self, prompt_label: str, options: List[Tuple[str, str]]) -> str:
+        """
+        Renders `options` (key, label pairs) as a menu pinned to the status
+        bar — highlighted option movable with the arrow keys, Enter confirms
+        it (typing a key or label and hitting Enter jumps straight there).
+        Returns the chosen option's key.
+        """
+        if self._stop.is_set():
+            return options[0][0] if options else ""
+
+        self._line("class:out.user", f"❯ {prompt_label}")
+        with self._lock:
+            self._awaiting = prompt_label
+            self._choice_options = options
+            self._choice_index = 0
+        self._invalidate()
+        try:
+            while not self._stop.is_set():
+                try:
+                    key = self._answers.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                label = next((lbl for k, lbl in options if k == key), key)
+                self.display_user(label)
+                return key
+            return options[0][0] if options else ""
+        finally:
+            with self._lock:
+                self._awaiting = None
+                self._choice_options = None
+                self._choice_index = 0
             self._invalidate()
 
     def print_agent_response(self, agent_response: Any, prompt_tokens_estimate: int = 0) -> Dict[str, Any]:
@@ -906,6 +1017,24 @@ class PromptToolkitConsoleManager(AbstractManager):
         if self._worker_error is not None:
             raise self._worker_error
         return result[0]
+
+    def clear_console(self) -> None:
+        """Best-effort erase of the whole terminal (screen + scrollback).
+
+        Called on exit so a closed run leaves the user's shell a clean screen.
+        Writes ANSI home/erase codes directly to ``sys.stdout`` when it is a TTY
+        and skips everything else, swallowing all exceptions so clearing can
+        never break shutdown or pollute a captured/piped stream.
+        """
+        try:
+            if sys.stdout is None or not sys.stdout.isatty():
+                return
+            # \x1b[H  home cursor; \x1b[2J erase visible screen;
+            # \x1b[3J clear scrollback (harmless on terminals without it).
+            sys.stdout.write("\x1b[H\x1b[2J\x1b[3J")
+            sys.stdout.flush()
+        except Exception:
+            pass
 
     def dump_transcript(self) -> None:
         """Reprints the AI space to the normal terminal after the UI closes."""

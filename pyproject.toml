@@ -15,16 +15,15 @@ dependencies = [
     "openai>=3.8.0",
     "prompt-toolkit>=3.0.53",
     "python-dotenv>=1.2.3",
-    "typer>=0.27.2",
 ]
 
 [project.scripts]
 jfi = "JFI.runner:main"
 JFI = "JFI.runner:main"
-shbuild = "shbuild.cli:main"
+build = "build_binary:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/JFI", "src/shbuild"]
+packages = ["src/JFI", "src/build_binary"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -34,4 +33,5 @@ norecursedirs = [".venv", ".JFI"]
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pyinstaller>=6.11.0",
 ]
