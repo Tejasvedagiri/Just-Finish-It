@@ -6,25 +6,45 @@ from manager.rich_console_manager import RichConsoleManager
 from session.simple_session_manager import SimpleSessionManager
 from inputimeout import inputimeout, TimeoutOccurred
 
+
+def _timed_input(console: RichConsoleManager, prompt_label: str, timeout: float = 120) -> str:
+    """
+    Reads user input with a timeout, re-prompting on any unexpected error.
+
+    ``inputimeout`` reads raw stdin (no event loop of its own), but the rich
+    prints that surround it can still leave the terminal in a half-rendered state;
+    if anything raises here we surface it as a clean retry instead of letting it
+    kill the process. ``TimeoutOccurred`` is propagated to the caller so the
+    auto-approve / auto-continue behaviour stays intact.
+    """
+    while True:
+        try:
+            console.display_system(f"\n{prompt_label}")
+            return inputimeout(prompt="> ", timeout=timeout)
+        except TimeoutOccurred:
+            raise  # let the caller decide what a timeout means
+        except Exception as exc:  # noqa: BLE001 - any hiccup means "try again"
+            console.display_system(
+                f"\u26a0\ufe0f Input interrupted ({exc.__class__.__name__}), re-prompting..."
+            )
+
+
 # Load environment variables
 load_dotenv()
 llm = ColibriLLMStream()
 console = RichConsoleManager()
 
 console.display_system("Welcome to Just Finish it")
-session_name = console.get_user_input("Please enter a session name to begin: ")
+session_name = console.safe_get_user_input(
+    "Please enter a session name to begin: ", multiline=False
+)
 
-ssm = SimpleSessionManager(console, session_name)
+ssm = SimpleSessionManager(console, session_name or "default")
 ssm.add_message("assistant", "What do you want to do?")
 
 while True:
     try:
-        # Since inputimeout doesn't use Rich formatting, we print the prompt with your console first
-        console.display_system("\nWhat do you want to do? (You have 120 seconds): ")
-
-        # Wait for input for exactly 120 seconds
-        user_input = inputimeout(prompt="> ", timeout=120)
-
+        user_input = _timed_input(console, "What do you want to do? (You have 120 seconds): ")
     except TimeoutOccurred:
         # This block triggers automatically if 120 seconds pass with no enter key pressed
         console.display_system("\nTimeout reached. Proceeding automatically...")
@@ -68,9 +88,9 @@ ssm.add_message("assistant", full_response)
 # 2. Start the interactive execution loop
 while True:
     try:
-        console.display_system("\nProvide feedback, type 'done' to finish, or wait 120s to auto-continue: ")
-        user_input = inputimeout(prompt="> ", timeout=120)
-
+        user_input = _timed_input(
+            console, "Provide feedback, type 'done' to finish, or wait 120s to auto-continue: "
+        )
     except TimeoutOccurred:
         console.display_system("\nTimeout reached. Auto-prompting agent to continue...")
         user_input = "Looks good so far. Please continue with the next step."

@@ -299,7 +299,7 @@ def run_pipeline(console: AbstractManager, llm: ColibriLLMStream) -> None:
     )
 
     # 1. Gather Session Name
-    session_name = console.get_user_input("Please enter a session name to begin:", multiline=False)
+    session_name = console.safe_get_user_input("Please enter a session name to begin:", multiline=False)
     if not session_name or console.should_stop():
         return
     console.set_status(session=session_name)
@@ -311,7 +311,7 @@ def run_pipeline(console: AbstractManager, llm: ColibriLLMStream) -> None:
         console.display_system(f"📁 Resuming existing session '{session_name}'...")
         initial_goal = "(Resuming previous session goal from history)"
     else:
-        initial_goal = console.get_user_input("What is your goal? (Be as detailed as possible):", multiline=True)
+        initial_goal = console.safe_get_user_input("What is your goal? (Be as detailed as possible):", multiline=True)
         if not initial_goal or console.should_stop():
             return
 

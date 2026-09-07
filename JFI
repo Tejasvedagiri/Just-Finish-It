@@ -1,0 +1,12 @@
+#!/bin/sh
+# JFI launcher: prefer the project's virtualenv, fall back to the current interpreter.
+if [ -x .venv/bin/jfi ]; then
+    exec .venv/bin/jfi "$@"
+else
+    # Use the python that is on PATH (or the one running this script).
+    if command -v python3 >/dev/null 2>&1; then
+        exec python3 autonomous_runner.py "$@"
+    else
+        exec python autonomous_runner.py "$@"
+    fi
+fi

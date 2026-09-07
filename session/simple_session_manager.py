@@ -73,7 +73,9 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH) -> str:
             {rules}
 
             Work ONE step at a time, in this exact loop:
-            1. read_file {plan_path} and take the FIRST unchecked "- [ ]" item under Implementation.
+            1. Your work queue (the unchecked Implementation items) is already listed for you
+               below the rules — take the FIRST item from it. If anything looks stale, verify
+               with read_file {plan_path}.
             2. State which item you are on, in exactly this format:
                **[CURRENT TASK: 1.1]**
             3. Do the work with the tools (write_file, append_to_file, replace_in_file,
@@ -99,7 +101,9 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH) -> str:
             {rules}
 
             Work ONE step at a time, in this exact loop:
-            1. read_file {plan_path} and take the FIRST unchecked "- [ ]" item under Testing.
+            1. Your work queue (the unchecked Testing items) is already listed for you below
+               the rules — take the FIRST item from it. Re-read {plan_path} only for
+               surrounding context or when the list looks stale.
             2. State what you are testing, in exactly this format:
                **[CURRENT TEST: 2.1]**
             3. Run it with execute_command, or read the produced files to verify them.
@@ -309,13 +313,45 @@ class SimpleSessionManager:
         todo = len(re.findall(r"^[ \t]*[-*][ \t]*\[[ ]\]", text, re.M))
         return done, done + todo
 
+    def _pending_items(self, section: str) -> list[str]:
+        """
+        Returns the unchecked "- [ ]" task-list lines of one plan section (e.g.
+        "Implementation" or "Testing"), in file order. Completed "- [x]" lines and
+        items from other sections are excluded; a missing or empty plan file yields
+        an empty list. Section headers may carry suffixes such as "(iteration 2)".
+        """
+        try:
+            text = self.plan_file.read_text(encoding="utf-8")
+        except Exception:
+            return []
+
+        pending, in_section = [], False
+        for line in text.splitlines():
+            header = re.match(r"^\s*#{1,6}\s+(.*)", line)
+            if header:
+                title = header.group(1).strip()
+                # A section matches when it starts with the requested name (case-
+                # insensitive), so "## Implementation (iteration 2)" still counts.
+                in_section = title.lower().startswith(section.lower())
+                continue
+            item = re.match(r"^[ \t]*[-*][ \t]+\[[ ]\]\s+(.*)", line)
+            if in_section and item:
+                pending.append(line.strip())
+        return pending
+
     def ensure_plan_file(self) -> bool:
         """
         The planner writes the plan itself via the file tools; this only tracks a
         plan that already exists so progress shows up in the status bar. A missing
         or empty plan is never scraped from the transcript into markdown anymore.
         """
-        if self.plan_file.exists() and self.plan_file.stat().st_size:
+        if self.plan_file.exists() and not self.plan_file.stat().st_size:
+            # Present but blank — the planner has not (yet) written anything.
+            self.console.display_system(
+                f"Warning: {self.plan_path} exists but is empty."
+            )
+            return False
+        if self.plan_file.exists():
             self.track_file(self.plan_path)
             done, total = self.plan_progress()
             if total:
@@ -408,9 +444,31 @@ class SimpleSessionManager:
         self.save_history()
 
     def get_messages(self, phase: str):
-        message = [{"role": "system", "content": get_system_message(phase, self.plan_path)}]
-        message.extend(self.compress_history(reserve=len(get_system_message(phase, self.plan_path)) // 4))
+        message = [{"role": "system", "content": self._phase_system_message(phase)}]
+        reserve = len(message[0]["content"]) // 4 + 256  # headroom for the pending-items block
+        message.extend(self.compress_history(reserve=reserve))
         return message
+
+    def _phase_system_message(self, phase: str) -> str:
+        """System prompt for a phase plus its own work queue.
+
+        The Implementation and Testing agents are handed exactly their unchecked
+        items inline (from the plan file, parsed by `_pending_items`), so they do
+        not need to scan the whole plan just to find what is left.
+        """
+        base = get_system_message(phase, self.plan_path)
+        section = {"imp": "Implementation", "testing": "Testing"}.get(phase)
+        if phase in ("planner", "reviewer") or not section:
+            return base
+
+        pending = self._pending_items(section)
+        queue = "\n".join(pending) if pending else f"(no unchecked {section} items found)"
+        return (
+            f"{base}\n\n"
+            f"Your work queue — the currently unchecked {section} items in "
+            f"{self.plan_path}, already extracted for you:\n"
+            f"{queue}"
+        )
 
     # ---------------------------------------------------------- compression
 
@@ -482,12 +540,11 @@ class SimpleSessionManager:
                 _elide_payloads(block)
 
         # Tier 6: last resort — shed whole blocks from the front. Dropping a
-        # block at a time keeps every tool_calls/tool pair together.
-        while over() and len(blocks) > 2:
+        # block at a time keeps every tool_calls/tool pair together, and we stop
+        # before the opening goal is lost (it must survive to be re-read later).
+        while over() and len(blocks) > 3:
             # Keep the digest: it is the only trace of everything already shed.
             index = 2 if _is_digest(blocks[1]) else 1
-            if index >= len(blocks) - 1:
-                break
             del blocks[index]
 
         # Nothing left to give up but the newest turn's own bulk.

@@ -40,6 +40,33 @@ class AbstractManager(ABC):
         """Consume an LLM stream and return {"content": str|None, "tool_calls": list|None}."""
         pass
 
+    # ------------------------------------------------------------- input
+
+    def safe_get_user_input(self, prompt_label: str = "You", **kwargs) -> Optional[str]:
+        """
+        Calls :meth:`get_user_input`, converting any unexpected error (e.g. a
+        terminal redraw glitch such as an ``IndexError`` inside prompt_toolkit's
+        event loop) into a clean re-prompt instead of letting it kill the process.
+
+        Extra keyword arguments are forwarded to :meth:`get_user_input` so callers can
+        pass manager-specific options (e.g. ``multiline``) unchanged.
+
+        Returns:
+            The user's input, or ``None`` if no answer was ever obtained before this
+            method returned (managers that want a timeout can override with their own
+            version; the default here retries indefinitely).
+        """
+        while True:
+            try:
+                return self.get_user_input(prompt_label=prompt_label, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - any hiccup means "try again"
+                try:
+                    self.display_system(
+                        f"⚠️ Input prompt interrupted ({exc.__class__.__name__}), re-prompting..."
+                    )
+                except Exception:
+                    pass  # Never let the recovery print hide the loop.
+
     # ------------------------------------------------------------- rendering
 
     def display_error(self, text: str) -> None:
