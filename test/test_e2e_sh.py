@@ -62,6 +62,33 @@ def _build(root: Path, out_name: str = "sample.sh") -> Path:
     return out
 
 
+@pytest.fixture(scope="session")
+def standard_sample_script(tmp_path_factory) -> Path:
+    """Builds the standard (no-args) sample project's .sh ONCE for the whole
+    test session.
+
+    5 of this file's tests build byte-identical input (same requirements.txt,
+    same main.py/helpers.py from `_make_sample_project(root)`) — each full
+    build (fresh venv, `pip install requests`, tar+gzip the payload) costs
+    several real seconds, so doing it once per test was pure duplicated work.
+    Tests that need their own copy to run or mutate get one via
+    `_copy_script` (a plain file copy, microseconds) instead of rebuilding.
+    """
+    root = tmp_path_factory.mktemp("standard_proj") / "proj"
+    _make_sample_project(root)
+    return _build(root, out_name="sample.sh")
+
+
+def _copy_script(built: Path, dest_dir: Path, out_name: str = "sample.sh") -> Path:
+    """Copies a pre-built script into a test's own tmp_path so it can run or
+    mutate it in isolation without racing/clobbering the shared fixture (or
+    other tests using the same fixture in parallel)."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / out_name
+    shutil.copy2(built, dest)
+    return dest
+
+
 def _run_sh(script: Path, *args: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Run the generated .sh with a minimal environment (PATH only + HOME/XDG)."""
     env = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/root")}
@@ -76,10 +103,8 @@ def _run_sh(script: Path, *args: str, extra_env: dict[str, str] | None = None) -
 # 4.3 end-to-end: build + run in a clean environment, no network at runtime
 # ---------------------------------------------------------------------------
 
-def test_e2e_runs_in_clean_env_with_correct_output(tmp_path) -> None:
-    root = tmp_path / "proj"
-    _make_sample_project(root)
-    script = _build(root, out_name="sample.sh")
+def test_e2e_runs_in_clean_env_with_correct_output(tmp_path, standard_sample_script) -> None:
+    script = _copy_script(standard_sample_script, tmp_path)
 
     proc = _run_sh(script)
     assert proc.returncode == 0, f"stderr: {proc.stderr}"
@@ -125,10 +150,8 @@ def test_e2e_no_network_used_at_runtime(tmp_path) -> None:
 # 4.4 idempotency: second run reuses cache and skips extraction
 # ---------------------------------------------------------------------------
 
-def test_idempotent_second_run_reuses_cache(tmp_path) -> None:
-    root = tmp_path / "proj"
-    _make_sample_project(root)
-    script = _build(root, out_name="sample.sh")
+def test_idempotent_second_run_reuses_cache(tmp_path, standard_sample_script) -> None:
+    script = _copy_script(standard_sample_script, tmp_path)
 
     xdg = str(tmp_path / "xdg-cache")
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"), "XDG_CACHE_HOME": xdg}
@@ -186,10 +209,8 @@ def test_entry_args_reach_dollar_at(tmp_path) -> None:
     assert "OK\n" in proc.stdout + "\n"
 
 
-def test_broken_checksum_aborts_nonzero_with_message(tmp_path) -> None:
-    root = tmp_path / "proj"
-    _make_sample_project(root)
-    script = _build(root, out_name="sample.sh")
+def test_broken_checksum_aborts_nonzero_with_message(tmp_path, standard_sample_script) -> None:
+    script = _copy_script(standard_sample_script, tmp_path)
 
     # Corrupt exactly one byte of the embedded base64 payload (inside B64_CHUNKS).
     text = script.read_text()
@@ -213,10 +234,8 @@ def test_broken_checksum_aborts_nonzero_with_message(tmp_path) -> None:
     )
 
 
-def test_clear_cache_forces_reextraction(tmp_path) -> None:
-    root = tmp_path / "proj"
-    _make_sample_project(root)
-    script = _build(root, out_name="sample.sh")
+def test_clear_cache_forces_reextraction(tmp_path, standard_sample_script) -> None:
+    script = _copy_script(standard_sample_script, tmp_path)
 
     xdg = str(tmp_path / "xdg-cache")
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home"), "XDG_CACHE_HOME": xdg}
@@ -244,15 +263,13 @@ def test_clear_cache_forces_reextraction(tmp_path) -> None:
 # 4.6 CLI --help: build a real .sh, then confirm `shbuild --help` prints usage
 # ---------------------------------------------------------------------------
 
-def test_cli_help_prints_usage_after_real_build(tmp_path) -> None:
+def test_cli_help_prints_usage_after_real_build(standard_sample_script) -> None:
     """Build an actual standalone .sh through the same entry point the CLI uses,
     then invoke `shbuild --help` and assert it exits 0 with real usage text."""
     # 1. Prove we can produce a working build end-to-end first (uses build(),
-    #    the exact code path the console script funnels into).
-    root = tmp_path / "proj"
-    _make_sample_project(root)
-    script = _build(root, out_name="sample.sh")
-    assert script.is_file() and os.access(script, os.X_OK)
+    #    the exact code path the console script funnels into) — the session
+    #    fixture already exercised this exact path, so just confirm its result.
+    assert standard_sample_script.is_file() and os.access(standard_sample_script, os.X_OK)
 
     # 2. Run the CLI help as a real subprocess (the installed console-script
     #    target is `shbuild.cli:main`), with src/ on PYTHONPATH so it resolves

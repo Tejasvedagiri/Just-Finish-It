@@ -80,3 +80,77 @@ class TestPendingItems:
 
     def test_pending_items_empty_when_missing(self, manager):
         assert manager._pending_items("Implementation") == []
+
+
+class TestContextCache:
+    """A small JSON scratchpad the model can read/write for facts that would
+    otherwise be lost once older turns are compressed out of context — see
+    CONTEXT_CACHE_RULES. It must exist before the model ever asks for it, and
+    every phase's system message must tell the model where to find it."""
+
+    def test_context_cache_file_pre_created_empty(self, manager):
+        assert manager.context_cache_file.exists()
+        assert manager.context_cache_file.read_text().strip() == "{}"
+
+    def test_context_cache_path_lives_inside_jfi_folder(self, manager):
+        assert manager.context_cache_path.startswith(".JFI/")
+        assert manager.context_cache_file.name == "context.json"
+
+    def test_get_system_message_references_the_cache_path(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        for phase in ("planner", "imp", "testing", "reviewer"):
+            msg = get_system_message(phase, manager.plan_path, manager.context_cache_path)
+            assert manager.context_cache_path in msg
+            assert "CONTEXT CACHE" in msg
+
+    def test_phase_system_message_threads_context_cache_path(self, manager):
+        for phase in ("planner", "imp", "testing", "reviewer"):
+            msg = manager._phase_system_message(phase)
+            assert manager.context_cache_path in msg
+
+    def test_default_get_system_message_call_still_works(self):
+        """context_cache_path is optional (defaults to DEFAULT_CONTEXT_CACHE_PATH),
+        so existing callers that only pass plan_path keep working."""
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("imp", ".JFI/demo/plan.md")
+        assert isinstance(msg, str) and "context.json" in msg
+
+
+class TestReviewerSystemMessage:
+    """The reviewer phase must carry BOTH branches of the conditional review.md
+    instruction: do not generate it when the work is good; generate it (via
+    write_file) into .JFI/<session>/review.md when issues exist."""
+
+    def test_good_branch_instructs_not_to_generate_review_md(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("reviewer", manager.plan_path).lower()
+        assert "do not write or touch .jfi/demo/review.md" in msg
+        assert "pass" in msg  # the short 'Review: PASS' summary branch
+
+    def test_issues_branch_instructs_to_generate_review_md(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("reviewer", manager.plan_path).lower()
+        assert "write_file to create .jfi/demo/review.md" in msg
+        # The report must be concrete and actionable.
+        assert "line(s)" in msg or "file/line" in msg
+
+    def test_review_md_lives_next_to_plan(self, manager):
+        """The reviewer's review.md target is derived from the plan path — same folder."""
+        from pathlib import Path
+        from JFI.session.simple_session_manager import get_system_message
+
+        expected = str(Path(manager.plan_path).with_name("review.md"))
+        assert expected == ".JFI/demo/review.md"
+        msg = get_system_message("reviewer", manager.plan_path)
+        assert expected in msg  # the exact path, not a placeholder
+
+    def test_other_phases_do_not_mention_review_md(self, manager):
+        """Only the reviewer decides about review.md."""
+        from JFI.session.simple_session_manager import get_system_message
+
+        for phase in ("planner", "imp", "testing"):
+            assert "review.md" not in get_system_message(phase, manager.plan_path)

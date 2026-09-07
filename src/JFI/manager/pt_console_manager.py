@@ -20,7 +20,7 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension as D
 from prompt_toolkit.styles import Style
 
-from JFI.manager.abstract_manager import AbstractManager
+from JFI.manager.abstract_manager import AbstractManager, phase_display_name
 from JFI.manager.key_bindings import add_shift_enter_newline, teach_terminal_shift_enter
 from JFI.manager.theme_env import resolve_explicit_theme, theme_label
 
@@ -40,6 +40,9 @@ UI_STYLE_BASE: Dict[str, str] = {
     "header.loop": "bold ansiyellow",
     "header.tokens": "ansibrightblack",
     "header.tokens.warn": "bold ansired",
+    "tasktitle.phase": "bold ansimagenta",
+    "tasktitle.dim": "ansibrightblack",
+    "tasktitle": "ansiwhite",
     "rule": "ansibrightblack",
     "status": "ansibrightblack",
     "status.queue": "bold ansiyellow",
@@ -113,12 +116,10 @@ def _check_light_env() -> bool:
 def resolve_pt_theme() -> tuple[Dict[str, str], Optional[str]]:
     """Picks the live console's style overrides and reports how they were chosen.
 
-    Mirrors ``rich_console_manager.resolve_theme``'s contract (an explicit
-    THEME preset always wins; empty/"auto" falls back to COLORFGBG detection;
-    an unknown name logs a hint and falls back too, so a typo can never crash
-    startup) but returns prompt_toolkit style overrides instead of a Rich
-    palette — the two renderers don't share a color-name vocabulary, so each
-    keeps its own preset table.
+    An explicit THEME preset always wins; empty/"auto" falls back to
+    COLORFGBG detection; an unknown name logs a hint and falls back too, so a
+    typo can never crash startup (see ``theme_env.resolve_explicit_theme``
+    for the shared normalization/precedence rules).
     """
     explicit = resolve_explicit_theme(PT_THEME_PRESETS)
     if explicit is not None:
@@ -186,6 +187,7 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._awaiting: Optional[str] = None
         self._iteration = 1
         self._plan = None  # (ticked, total) checkbox progress
+        self._task: Optional[str] = None  # current plan item's text (imp/testing only)
         self._tokens = None  # (estimated tokens used, context window)
         self._tokens_read = 0  # cumulative prompt tokens sent this run
         self._tokens_written = 0  # cumulative completion tokens generated this run
@@ -194,6 +196,13 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._answers: "queue.Queue[str]" = queue.Queue()   # replies to a question
         self._forced: "queue.Queue[str]" = queue.Queue()    # jump the queue, run now
         self._queued: "queue.Queue[str]" = queue.Queue()    # run after the review phase
+        # Mirrors self._queued's contents under self._lock, purely so
+        # set_queue_store's on_change callback can report "everything
+        # currently queued" without peeking queue.Queue's internals from
+        # across threads (mutated from the UI thread in _on_accept, read from
+        # the worker thread in drain_queued_input/wait_for_queued_input).
+        self._queued_snapshot: List[str] = []
+        self._queue_on_change: Optional[Callable[[List[str]], None]] = None
         self._stop = threading.Event()
         self._app: Optional[Application] = None
         self._worker_error: Optional[BaseException] = None
@@ -225,7 +234,7 @@ class PromptToolkitConsoleManager(AbstractManager):
 
         root = HSplit([
             Window(FormattedTextControl(self._header_fragments), height=1),
-            Window(char="─", height=1, style="class:rule"),
+            Window(FormattedTextControl(self._task_line_fragments), height=1),
             self._out_window,
             # --- the three reserved lines -------------------------------
             Window(char="─", height=1, style="class:rule"),
@@ -389,13 +398,15 @@ class PromptToolkitConsoleManager(AbstractManager):
                 if i:
                     frags.append(("class:header.dim", " › "))
                 # Done wins over active: the phase we just ticked off is still
-                # the current one until the next phase starts.
+                # the current one until the next phase starts. Comparisons use
+                # the raw phase key; only the printed label is renamed.
+                label = phase_display_name(name)
                 if name in done:
-                    frags.append(("class:header.phase.done", f"✓ {name}"))
+                    frags.append(("class:header.phase.done", f"✓ {label}"))
                 elif name == phase:
-                    frags.append(("class:header.phase.active", f"▸ {name}"))
+                    frags.append(("class:header.phase.active", f"▸ {label}"))
                 else:
-                    frags.append(("class:header.phase", name))
+                    frags.append(("class:header.phase", label))
         if plan and plan[1]:
             ticked, total = plan
             style = "class:header.phase.done" if ticked == total else "class:header.loop"
@@ -417,6 +428,25 @@ class PromptToolkitConsoleManager(AbstractManager):
             ]
         return frags
 
+    def _task_line_fragments(self):
+        """The line right under the header: which phase is active and, for
+        imp/testing (the only phases with a checkbox work queue), the exact
+        item currently being worked. Falls back to a plain divider when idle
+        (no phase set), matching the look this line had before it did
+        anything — planner/reviewer show just the phase, since they have no
+        per-item task concept.
+        """
+        with self._lock:
+            phase, task = self._phase, self._task
+
+        if not phase:
+            return [("class:rule", "─" * self._width())]
+
+        frags = [("class:tasktitle.phase", f" ▸ {phase_display_name(phase).upper()}")]
+        if task:
+            frags += [("class:tasktitle.dim", "  ·  "), ("class:tasktitle", task)]
+        return frags
+
     def _status_fragments(self):
         with self._lock:
             phase, state, awaiting, follow = self._phase, self._state, self._awaiting, self._follow
@@ -434,7 +464,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             frags += [("class:status.wait", "⌨ waiting for your input")]
         else:
             tick = SPINNER[int(time.monotonic() * 10) % len(SPINNER)]
-            label = f"{phase} · {state}" if phase else state
+            label = f"{phase_display_name(phase)} · {state}" if phase else state
             frags += [("class:status.busy", f"{tick} {label}")]
 
         if not follow:
@@ -503,7 +533,16 @@ class PromptToolkitConsoleManager(AbstractManager):
             bits = []
             for key, value in args.items():
                 flat = " ".join(str(value).split())
-                bits.append(f"{key}={flat[:60]}{'…' if len(flat) > 60 else ''}")
+                # execute_command's command is worth seeing in full — with a
+                # long-running or backgrounded command especially, knowing
+                # exactly what's running matters more than staying short.
+                # Other tools' args (write_file's content, replace_in_file's
+                # old_string/new_string, ...) can be genuinely huge blobs, so
+                # those still truncate to keep the console from flooding.
+                if name == "execute_command" and key == "command":
+                    bits.append(f"{key}={flat}")
+                else:
+                    bits.append(f"{key}={flat[:60]}{'…' if len(flat) > 60 else ''}")
             preview = "  (" + ", ".join(bits) + ")"
         self._line("class:out.tool", f" ⚙️ {name}{preview}")
 
@@ -654,7 +693,12 @@ class PromptToolkitConsoleManager(AbstractManager):
 
     def drain_queued_input(self) -> List[str]:
         """The default queue, replayed as a new iteration after the review phase."""
-        return self._drain(self._queued)
+        items = self._drain(self._queued)
+        if items:
+            with self._lock:
+                self._queued_snapshot = []
+            self._notify_queue_change()
+        return items
 
     def wait_for_queued_input(self, poll: float = 0.2) -> List[str]:
         """
@@ -666,9 +710,39 @@ class PromptToolkitConsoleManager(AbstractManager):
         while not self._stop.is_set():
             items = self._drain(self._queued)
             if items:
+                with self._lock:
+                    self._queued_snapshot = []
+                self._notify_queue_change()
                 return items
             time.sleep(poll)
         return []
+
+    def _notify_queue_change(self) -> None:
+        """Reports self._queued_snapshot to whoever is persisting the queue
+        (see set_queue_store) — called on every add, drain, or promotion.
+        Best-effort: persistence must never break the live queue."""
+        callback = self._queue_on_change
+        if callback is None:
+            return
+        with self._lock:
+            snapshot = list(self._queued_snapshot)
+        try:
+            callback(snapshot)
+        except Exception:
+            pass
+
+    def set_queue_store(self, initial_items: List[str], on_change: Callable[[List[str]], None]) -> None:
+        with self._lock:
+            self._queue_on_change = on_change
+            for item in initial_items:
+                self._queued.put(item)
+            self._queued_snapshot = list(initial_items)
+        if initial_items:
+            self._line(
+                "class:out.system",
+                f" 📋 Restored {len(initial_items)} queued request(s) from before this run.",
+            )
+        self._invalidate()
 
     def pending_input_count(self) -> int:
         return self._queued.qsize()
@@ -678,12 +752,15 @@ class PromptToolkitConsoleManager(AbstractManager):
 
     def set_status(self, session: Optional[str] = None, phase: Optional[str] = None,
                    state: Optional[str] = None, phases: Optional[List[str]] = None,
-                   plan: Optional[tuple] = None, tokens: Optional[tuple] = None) -> None:
+                   plan: Optional[tuple] = None, tokens: Optional[tuple] = None,
+                   task: Optional[str] = None) -> None:
         with self._lock:
             if plan is not None:
                 self._plan = plan
             if tokens is not None:
                 self._tokens = tokens
+            if task is not None:
+                self._task = task
             if session is not None:
                 self._session = session
             if phase is not None:
@@ -709,6 +786,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             self._iteration = number
             self._done_phases = []
             self._phase = ""
+            self._task = None
             if phases is not None:
                 self._phases = list(phases)
         self._invalidate()
@@ -742,6 +820,9 @@ class PromptToolkitConsoleManager(AbstractManager):
         elif forced and not text:
             promoted = self._move_queue(self._queued, self._forced)
             if promoted:
+                with self._lock:
+                    self._queued_snapshot = []
+                self._notify_queue_change()
                 self._line("class:out.tool", f" ⚡ forcing {promoted} queued request(s) into the current turn")
             else:
                 self._line("class:out.system", " (nothing queued to force)")
@@ -750,6 +831,9 @@ class PromptToolkitConsoleManager(AbstractManager):
             self._line("class:out.tool", f" ⚡ forced ▸ {self._preview(text)}")
         else:
             self._queued.put(text)
+            with self._lock:
+                self._queued_snapshot.append(text)
+            self._notify_queue_change()
             self._line("class:out.system", f" ⏳ queued #{self._queued.qsize()} ▸ {self._preview(text)}")
 
         return False  # clear the input line

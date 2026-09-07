@@ -110,4 +110,52 @@ AVAILABLE_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "capture_screenshot",
+            "description": (
+                "Captures the primary monitor and saves it as an auto-numbered "
+                "screen-N.png inside `directory`. Does NOT show you the image — it only "
+                "writes the file. Call view_image on the returned path afterward to "
+                "actually see it. Fails cleanly (with a message telling you to skip the "
+                "step and continue) in a headless environment with no display."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "directory": {
+                        "type": "string",
+                        "description": (
+                            "Where to save the screenshot — pass your session's .JFI/<session> "
+                            "folder (the same directory your plan file lives in)."
+                        )
+                    }
+                },
+                "required": ["directory"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_image",
+            "description": (
+                "Reads an image file (png, jpg, jpeg, gif, or webp) and attaches it to the "
+                "conversation so you can see it on your next turn — e.g. a screenshot from "
+                "capture_screenshot, or an image already in the project. Unlike read_file, "
+                "this shows you the actual picture, not text."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The relative path to the image file."
+                    }
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
 ]

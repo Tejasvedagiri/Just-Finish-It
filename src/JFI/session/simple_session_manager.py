@@ -104,15 +104,35 @@ PLAN_FORMAT_RULES = """
       space inside the brackets to an x, so a targeted replace can find it.
 """
 
+CONTEXT_CACHE_RULES = """
+    CONTEXT CACHE (optional, persists across turns and phases):
+    - A small JSON file at {context_cache_path} holds facts worth remembering
+      that would otherwise be lost once older turns are compressed out of your
+      context: key decisions, discovered schema/API/config details, gotchas —
+      anything a later step or phase would otherwise have to re-derive.
+    - It already exists (starts as "{{}}"); read_file it whenever you need
+      context from earlier work, in this phase or an earlier one.
+    - To add or update a fact: read_file it first, then write_file the whole
+      file back with your fact merged in. It stays a small flat JSON object,
+      e.g. {{"db_schema": "users table: id, email, created_at"}}. Keep it
+      small — a handful of high-value facts, not a transcript — and never
+      remove another entry just because you didn't write it.
+"""
+
 
 # Default plan location: inside the .JFI session folder. The manager overrides this
 # with its own resolved path (see SimpleSessionManager.plan_path); it is only used as a
 # fallback when callers do not pass an explicit plan_path.
 DEFAULT_PLAN_PATH = ".JFI/plan.md"
+DEFAULT_CONTEXT_CACHE_PATH = ".JFI/context.json"
 
 
-def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH) -> str:
-    rules = PLAN_FORMAT_RULES.format(plan_path=plan_path)
+def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
+                       context_cache_path: str = DEFAULT_CONTEXT_CACHE_PATH) -> str:
+    rules = (
+        PLAN_FORMAT_RULES.format(plan_path=plan_path)
+        + CONTEXT_CACHE_RULES.format(context_cache_path=context_cache_path)
+    )
 
     if phase == "planner":
         return f"""
@@ -193,33 +213,51 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH) -> str:
         """
 
     elif phase == "reviewer":
+        review_path = str(Path(plan_path).with_name("review.md"))
         return f"""
-            You are an expert Reviewer Agent. You report on the finished work.
+            You are an expert Reviewer Agent. You evaluate the finished work and decide whether it
+            needs another iteration of planner → imp → testing → reviewer.
             You do NOT gate anything: you never ask for approval, never ask the user a question,
             and never wait for a reply.
             {rules}
 
-            1. read_file {plan_path} and inspect the files that were produced.
-            2. Write a short, concrete report: what was built, what was verified, and anything
-               that is still incomplete or looks wrong.
-            3. If an item is still "- [ ]" but is genuinely finished, tick it with replace_in_file.
-               If it is genuinely unfinished, just say so plainly in your report.
+            1. read_file {plan_path}, then inspect the files that were produced (and re-run any
+               tests or commands needed to judge them).
+            2. Decide: is the work good — every planned item genuinely done, verified, and free of
+               defects?
+            3. If the review is GOOD: do NOT write or touch {review_path}. Just output a short
+               "Review: PASS" summary in your reply (what was built, what was verified).
+            4. Only if problems exist (broken/unfinished work, failing tests, missing pieces):
+               use write_file to create {review_path} with concrete, actionable issue descriptions —
+               one numbered item per problem, each naming the file(s) and line(s) involved where
+               relevant, plus how to fix it. The next planner iteration will read that file and add
+               new plan items from it, so be specific.
 
-            When the report is written, output the exact phrase on its own line: REVIEWER_COMPLETE
+            When you are done (PASS summary written or {review_path} saved), output the exact phrase
+            on its own line: REVIEWER_COMPLETE
         """
 
     return ""
 
 
-def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_PATH, iteration: int = 1) -> str:
+def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_PATH, iteration: int = 1,
+                      review_path: Optional[str] = None) -> str:
     """The opening human turn that kicks off a phase."""
     if phase == "planner":
         if iteration > 1:
-            return (
+            trigger = (
                 f"Update the plan at {plan_path} so it covers the request above.\n"
                 f"Read it first, keep every '- [x]' line untouched, and append new '- [ ]' items "
                 f"for the new work, continuing the numbering."
             )
+            if review_path:
+                trigger += (
+                    f"\nThe previous iteration's review FAILED — its full report is quoted in the "
+                    f"feedback message above (the reviewer saved it to {review_path} and it has "
+                    f"since been archived). Add one new '- [ ]' item per issue to fix it — do NOT "
+                    f"touch any already-ticked '- [x]' lines."
+                )
+            return trigger
         return (
             f"My goal is: {goal}\n\n"
             f"Write the step-by-step plan to {plan_path} now, using the mandated '- [ ]' format."
@@ -240,8 +278,12 @@ def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_
         )
 
     if phase == "reviewer":
+        review_path = str(Path(plan_path).with_name("review.md"))
         return (
-            f"Testing is done. Review the final state against {plan_path} and write your report. "
+            f"Testing is done. Evaluate the finished work against {plan_path}. If it is good, do NOT "
+            f"write any file — just reply with a short 'Review: PASS' summary. Only if problems "
+            f"exist, write them to {review_path} as concrete, actionable issues (file/line references "
+            f"where relevant), which triggers another planner → imp → testing → reviewer iteration. "
             f"Do not ask for approval."
         )
 
@@ -270,11 +312,41 @@ def _tools_schema_tokens() -> int:
     return _TOOLS_SCHEMA_TOKENS_CACHE
 
 
+# view_image attaches an image as a multimodal `content` list (OpenAI's
+# vision format: [{"type": "image_url", ...}, ...]) instead of a plain
+# string. A naive `str(content)` on that list would stringify the raw
+# base64 payload — for a screenshot that's easily hundreds of thousands of
+# "tokens" by the char/4 estimate, wildly overshooting the model's real
+# per-image cost and forcing needless aggressive compression. Charge a fixed,
+# provider-agnostic estimate per image instead; providers vary (roughly
+# 85-1500 tokens depending on resolution/detail), so this is a deliberately
+# rough middle-ground, not a per-provider calculation.
+IMAGE_TOKEN_ESTIMATE = 800
+
+
+def _content_char_cost(content) -> int:
+    """Character-equivalent cost of one message's `content` for _estimate_tokens
+    (the caller applies the final //4). Handles both a plain string and the
+    multimodal list form (text parts counted normally, one flat charge per
+    image part)."""
+    if isinstance(content, list):
+        total = 0
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "image_url":
+                total += IMAGE_TOKEN_ESTIMATE * 4
+            elif part.get("type") == "text":
+                total += len(str(part.get("text") or ""))
+        return total
+    return len(str(content or ""))
+
+
 def _estimate_tokens(messages) -> int:
     """Cheap character-based estimate; good enough to drive a budget."""
     total = 0
     for message in messages:
-        total += len(str(message.get("content") or "")) + 8
+        total += _content_char_cost(message.get("content")) + 8
         for call in message.get("tool_calls") or []:
             function = call.get("function") or {}
             total += len(str(function.get("name") or ""))
@@ -336,7 +408,13 @@ def _trim_long_content(block) -> None:
     """
     for message in block:
         content = message.get("content")
-        if content:
+        if isinstance(content, list):
+            # Multimodal (image) content: never stringify it — str(list)
+            # would corrupt it into invalid API content, not a shorter
+            # version of it. The image is still on disk; re-run view_image
+            # if it's needed again, same tradeoff as an elided tool result.
+            message["content"] = [{"type": "text", "text": "[image elided to save context]"}]
+        elif content:
             message["content"] = _elide(str(content), TOOL_RESULT_HEAD, TOOL_RESULT_TAIL)
 
 
@@ -383,38 +461,61 @@ class SimpleSessionManager:
         # history_path — set by load_history(), advanced by save_history().
         self._flushed_count = 0
         self.history = self.load_history()
+        self._repair_dangling_tool_calls()
         self.metadata = self.load_metadata()
 
         # Path the agent passes to the file tools (they are sandboxed to cwd).
         self.plan_path = self._resolve_plan_path()
+
+        # A small persistent JSON scratchpad the model can read/write across
+        # turns and phases — see CONTEXT_CACHE_RULES. Pre-created empty so a
+        # read_file before anything's been remembered never errors.
+        self.context_cache_path = self._resolve_session_file_path("context.json")
+        self.ensure_context_cache_file()
 
         # Set by compress_history() every time it runs; see token_usage().
         self._last_sent_tokens = 0
 
     # ------------------------------------------------------------ plan file
 
-    def _resolve_plan_path(self) -> str:
+    def _resolve_session_file_path(self, filename: str) -> str:
         """
-        Single source of truth for the plan location: it always lives inside this
-        session's .JFI folder. The path is made cwd-relative when possible so it
-        works with the file tools (which are sandboxed to the working directory).
+        Single source of truth for locating a file inside this session's .JFI
+        folder (the plan, the context cache, ...): made cwd-relative when
+        possible so it works with the file tools (sandboxed to cwd).
         """
-        plan = (self.session_path / "plan.md").resolve()
+        target = (self.session_path / filename).resolve()
         cwd = Path.cwd().resolve()
-        if plan.is_relative_to(cwd):
-            return str(plan.relative_to(cwd))
-        # Session dir lives outside the tool sandbox; express it relative to cwd
-        # so the plan still lands in .JFI/<session>/plan.md.
+        if target.is_relative_to(cwd):
+            return str(target.relative_to(cwd))
+        # Session dir lives outside the tool sandbox; express it relative to
+        # cwd so the file still lands in .JFI/<session>/<filename>.
         self.console.display_system(
-            "Session path is outside the working directory — keeping the plan inside the "
-            ".JFI session folder."
+            "Session path is outside the working directory — keeping "
+            f"{filename} inside the .JFI session folder."
         )
-        return f".JFI/{self.session_id}/plan.md"
+        return f".JFI/{self.session_id}/{filename}"
+
+    def _resolve_plan_path(self) -> str:
+        return self._resolve_session_file_path("plan.md")
 
     @property
     def plan_file(self) -> Path:
         """Absolute location of the plan file (always inside this session's .JFI folder)."""
         return (self.session_path / "plan.md").resolve()
+
+    # -------------------------------------------------------- context cache
+
+    @property
+    def context_cache_file(self) -> Path:
+        """Absolute location of the context cache (see CONTEXT_CACHE_RULES)."""
+        return (self.session_path / "context.json").resolve()
+
+    def ensure_context_cache_file(self) -> None:
+        """Creates an empty context cache ("{}") if one doesn't exist yet, so
+        the model's first read_file on it never errors with "does not exist"."""
+        if not self.context_cache_file.exists():
+            self.context_cache_file.write_text("{}\n", encoding="utf-8")
 
     def plan_progress(self):
         """(ticked, total) task-list checkboxes in the plan file."""
@@ -451,6 +552,30 @@ class SimpleSessionManager:
             if in_section and item:
                 pending.append(line.strip())
         return pending
+
+    def current_task_title(self, phase: str, max_len: int = 140) -> Optional[str]:
+        """
+        The first unchecked item's descriptive text for `phase`'s section
+        (e.g. "1.1 Verify .env loading happens before theme resolution..."),
+        or None when the phase has no checkbox-driven task queue at all
+        (planner/reviewer just work on the plan/report directly) or nothing
+        is pending. Mirrors `_phase_system_message`'s own work-queue
+        extraction, so this is exactly the item the model was just handed as
+        its next one — for display in the console's status line, not the
+        model's own self-reported "[CURRENT TASK: ...]" text, which would
+        need parsing streamed output and could drift out of sync mid-turn.
+        """
+        section = {"imp": "Implementation", "testing": "Testing"}.get(phase)
+        if not section:
+            return None
+        pending = self._pending_items(section)
+        if not pending:
+            return None
+        match = re.match(r"^[ \t]*[-*][ \t]+\[[ ]\]\s*(.*)", pending[0])
+        title = match.group(1).strip() if match else pending[0]
+        if len(title) > max_len:
+            title = title[:max_len - 1].rstrip() + "…"
+        return title
 
     def ensure_plan_file(self) -> bool:
         """
@@ -502,6 +627,27 @@ class SimpleSessionManager:
             self.metadata["implemented_files"].append(file_path)
             self.save_metadata()
 
+    def load_queued_requests(self) -> list[str]:
+        """Plain-queued (not yet consumed) console input from a prior run of
+        this session, if any — see :meth:`save_queued_requests`."""
+        return list(self.metadata.get("queued_requests", []))
+
+    def save_queued_requests(self, items: list) -> None:
+        """
+        Persists the console's *current* queued-input contents to
+        metadata.json, called by the console every time that queue changes
+        (something typed in, or the whole queue drained/promoted).
+
+        The queue used to live only in the console's in-memory
+        ``queue.Queue`` — closing the process (even cleanly) lost anything
+        the user had queued but the pipeline hadn't reached the "review
+        landed, drain queue" point for yet. Persisting it here means
+        `console.set_queue_store(ssm.load_queued_requests(), ...)` on the
+        next resume can hand it right back.
+        """
+        self.metadata["queued_requests"] = list(items)
+        self.save_metadata()
+
     def get_project_state_summary(self) -> str:
         """Returns a string listing all files currently tracked in the project."""
         files = self.metadata.get("implemented_files", [])
@@ -552,6 +698,72 @@ class SimpleSessionManager:
 
         return []
 
+    def _repair_dangling_tool_calls(self) -> None:
+        """
+        Fixes a specific broken resume state: the session was killed or
+        crashed while runner.execute_tool_call's loop was mid-way through a
+        multi-tool-call turn — the assistant's tool-call message and each
+        tool's result are separate append_raw calls, so an interrupt can land
+        after the assistant message but before any (or all) of its results.
+        On resume the transcript then either ends with an assistant message
+        carrying tool_calls with no results at all, or has one further along
+        whose tool_calls only got SOME of their results recorded before the
+        interrupt. Either way, at least one tool_call_id from the most recent
+        assistant turn has no matching "role": "tool" reply anywhere after
+        it — and most OpenAI-compatible servers reject the very next request
+        outright with "Cannot continue an assistant message that contains
+        tool calls", so the session could never resume at all.
+
+        Synthesizes a failure tool-result for each unanswered tool_call_id
+        from that turn, which makes the transcript structurally valid again
+        and tells the model plainly what happened so it can check whether the
+        work actually landed before retrying or moving on. Persisted
+        immediately so the fix survives even if this run is interrupted again
+        before the next real save.
+        """
+        if not self.history:
+            return
+
+        # Walk back to the most recent assistant message, if any; a plain
+        # (non-tool-calls) reply after it, or no assistant message at all,
+        # means there is nothing to repair.
+        last_assistant = None
+        last_assistant_idx = None
+        for i in range(len(self.history) - 1, -1, -1):
+            if self.history[i].get("role") == "assistant":
+                last_assistant, last_assistant_idx = self.history[i], i
+                break
+        if last_assistant is None or not last_assistant.get("tool_calls"):
+            return
+
+        answered_ids = {
+            m.get("tool_call_id")
+            for m in self.history[last_assistant_idx + 1:]
+            if m.get("role") == "tool"
+        }
+        missing = [c for c in last_assistant["tool_calls"] if c.get("id") not in answered_ids]
+        if not missing:
+            return
+
+        self.console.display_system(
+            f"⚠️  Last run stopped mid-turn ({len(missing)} tool call(s) made but never "
+            "recorded a result) — synthesizing failure results so this session can resume."
+        )
+        for call in missing:
+            function = call.get("function") or {}
+            self.history.append({
+                "role": "tool",
+                "tool_call_id": call.get("id"),
+                "name": function.get("name", "unknown"),
+                "content": (
+                    "Error: this tool call was interrupted before its result was recorded "
+                    "(the previous run stopped mid-turn — killed, crashed, or force-quit). "
+                    "Treat it as not completed: verify whether the work was actually done "
+                    "(e.g. read_file the target) before retrying or moving on."
+                ),
+            })
+        self.save_history()
+
     def save_history(self):
         """
         Appends only the messages added since the last save, as one new gzip
@@ -593,7 +805,7 @@ class SimpleSessionManager:
         items inline (from the plan file, parsed by `_pending_items`), so they do
         not need to scan the whole plan just to find what is left.
         """
-        base = get_system_message(phase, self.plan_path)
+        base = get_system_message(phase, self.plan_path, self.context_cache_path)
         section = {"imp": "Implementation", "testing": "Testing"}.get(phase)
         if phase in ("planner", "reviewer") or not section:
             return base
@@ -630,7 +842,7 @@ class SimpleSessionManager:
         except ValueError:
             ratio = DEFAULT_CONTEXT_RATIO
         # The tool schemas are serialized into every request right alongside
-        # the messages (see ColibriLLMStream.send_message's `tools=`), so they
+        # the messages (see OpenAICompatableStream.send_message's `tools=`), so they
         # count against the same context window even though compress_history
         # never sees them. Without this, "compressed to fit" could still be
         # wrong by a few hundred tokens on a small CONTEXT_SIZE.

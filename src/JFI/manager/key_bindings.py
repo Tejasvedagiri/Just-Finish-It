@@ -1,13 +1,10 @@
-"""Shared prompt_toolkit key-binding setup for multiline input.
+"""prompt_toolkit key-binding setup for multiline input.
 
-Both console managers need the same thing: Enter submits, Shift+Enter (or the
-universally-reliable Alt+Enter fallback) inserts a newline instead. This used
-to be implemented twice — PromptToolkitConsoleManager taught the terminal
-parser both Shift+Enter escape-code encodings (CSI-u and xterm's
-modifyOtherKeys=2) plus Ctrl+Enter, while RichConsoleManager only hand-bound
-the CSI-u sequence as a literal key tuple, so it silently missed the
-modifyOtherKeys=2 encoding and Ctrl+Enter entirely. Centralizing it here means
-one fix covers both managers, and both interpret "Shift+Enter" identically.
+Enter submits, Shift+Enter (or the universally-reliable Alt+Enter fallback)
+inserts a newline instead. Getting Shift+Enter recognized at all needs the
+terminal parser taught both escape-code encodings (CSI-u and xterm's
+modifyOtherKeys=2) plus Ctrl+Enter — kept in its own module so
+PromptToolkitConsoleManager's own module stays focused on the UI itself.
 """
 
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
@@ -53,9 +50,7 @@ def add_shift_enter_newline(kb: KeyBindings) -> KeyBindings:
     """
     Binds Shift+Enter/Alt+Enter (via the terminal teaching above) and Ctrl+J
     to insert a newline into ``kb``, in place, and returns it. Does not bind
-    plain Enter — callers wire up their own submit behavior for that, since
-    PromptToolkitConsoleManager and RichConsoleManager each need slightly
-    different submit logic (paste detection vs. plain ``validate_and_handle``).
+    plain Enter — the caller wires up its own submit behavior for that.
     """
     teach_terminal_shift_enter()
 
