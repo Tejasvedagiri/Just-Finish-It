@@ -1,0 +1,113 @@
+# tools/schemas.py
+
+AVAILABLE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Writes code or text to a file. Automatically creates directories if needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The relative path to the file, e.g., 'src/main.py'"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The exact content or code to write into the file."
+                    }
+                },
+                "required": ["file_path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_command",
+            "description": "Executes a shell command on the terminal and returns the output.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The terminal command to run, e.g., 'pip install requests' or 'python test.py'"
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Reads the content of an existing file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The relative path to the file to read."
+                    }
+                },
+                "required": ["file_path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "append_to_file",
+            "description": (
+                "Appends content to the end of a file, creating it if needed. Use this to build "
+                "up a long document in several smaller calls instead of one oversized write_file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The relative path to the file, e.g., 'plan.md'"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The chunk of content to add at the end of the file."
+                    }
+                },
+                "required": ["file_path", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "replace_in_file",
+            "description": (
+                "Replaces one exact substring in a file, leaving the rest untouched. This is the "
+                "correct way to tick a checkbox (e.g. '- [ ] 1.1 Foo' -> '- [x] 1.1 Foo') or to "
+                "patch a few lines. Prefer this over rewriting a whole file with write_file. "
+                "old_string must match exactly once, including whitespace."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The relative path to the file to edit."
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "The exact existing text to replace. Must occur exactly once."
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The text to put in its place."
+                    }
+                },
+                "required": ["file_path", "old_string", "new_string"]
+            }
+        }
+    },
+]
