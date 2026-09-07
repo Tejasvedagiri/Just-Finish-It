@@ -17,6 +17,7 @@ from JFI.session.simple_session_manager import SimpleSessionManager, get_phase_t
 from JFI.tool.schemas import AVAILABLE_TOOLS
 from JFI.tool.file_tools import write_file, read_file, append_to_file, replace_in_file
 from JFI.tool.cmd_tools import execute_command
+from JFI.tool.image_tools import capture_screenshot, view_image
 
 # Dynamic mapping of tool names to their python functions
 TOOL_MAP = {
@@ -24,7 +25,14 @@ TOOL_MAP = {
     "read_file": read_file,
     "append_to_file": append_to_file,
     "replace_in_file": replace_in_file,
-    "execute_command": execute_command
+    "execute_command": execute_command,
+    "capture_screenshot": capture_screenshot,
+    # view_image returns (status_text, data_url) instead of a plain string —
+    # every other tool's TOOL_MAP entry returns str; see the isinstance(tuple)
+    # check in execute_tool_call, which is the one place that distinction
+    # matters. Kept in TOOL_MAP anyway so the generic "unknown tool" /
+    # signature-introspection error paths still cover it uniformly.
+    "view_image": view_image,
 }
 
 PHASES = ["planner", "imp", "testing", "reviewer"]
@@ -79,7 +87,7 @@ def _repair_directive(func_name: str, args: Dict[str, Any], result: str, attempt
                 "places. Extend old_string with the line above or below it so it matches once."
             )
 
-    if func_name in ("read_file", "write_file", "append_to_file") and "does not exist" in lowered:
+    if func_name in ("read_file", "write_file", "append_to_file", "view_image") and "does not exist" in lowered:
         return (
             "AUTO-RECTIFY: that path is wrong. Run execute_command with "
             "'ls -la .' (or the parent directory) to find the real path, then retry."
@@ -92,6 +100,13 @@ def _repair_directive(func_name: str, args: Dict[str, Any], result: str, attempt
             "re-run the identical command unchanged."
         )
 
+    if func_name == "capture_screenshot" and ("no display" in lowered or "not installed" in lowered):
+        return (
+            "AUTO-RECTIFY: no screenshot capability in this environment (no display, or the "
+            "'mss' package is missing) — retrying will not help. Skip this step, note the "
+            "blocker in the plan, and continue without a screenshot."
+        )
+
     return (
         f"AUTO-RECTIFY: the {func_name} call failed and nothing was changed. Diagnose the "
         "message above and issue a corrected call."
@@ -99,12 +114,15 @@ def _repair_directive(func_name: str, args: Dict[str, Any], result: str, attempt
 
 
 def execute_tool_call(console: AbstractManager, ssm: SimpleSessionManager,
-                      tool_call: Dict[str, Any], failures: Dict[tuple, int]) -> str:
+                      tool_call: Dict[str, Any], failures: Dict[tuple, int]) -> tuple[str, Optional[str]]:
     """
     Runs one tool call and turns any failure into actionable guidance.
 
     Every error path returns a string rather than raising, so a bad call costs a
-    turn instead of killing the run.
+    turn instead of killing the run. Returns (tool_result_text, image_data_url):
+    image_data_url is non-None only for a successful view_image call — the
+    caller appends it as a follow-up message so the model actually sees the
+    image (a tool result itself must be plain text on the wire).
     """
     func_name = tool_call["function"]["name"]
     args_str = tool_call["function"]["arguments"]
@@ -125,14 +143,14 @@ def execute_tool_call(console: AbstractManager, ssm: SimpleSessionManager,
             "This usually means you emitted too much text in one call. AUTO-RECTIFY: split the "
             "work up — write_file the first chunk, then append_to_file the rest, or use "
             "replace_in_file for a small edit."
-        )
+        ), None
 
     if not isinstance(args, dict):
         console.display_tool_call(func_name)
         return (
             f"Error: the arguments for {func_name} must be a JSON object, got "
             f"{type(args).__name__}. AUTO-RECTIFY: retry as {_expected_arguments(func_name)}."
-        )
+        ), None
 
     # --- a tool that doesn't exist ---
     if func_name not in TOOL_MAP:
@@ -140,20 +158,28 @@ def execute_tool_call(console: AbstractManager, ssm: SimpleSessionManager,
         return (
             f"Error: there is no tool called '{func_name}'. AUTO-RECTIFY: use one of "
             f"{', '.join(sorted(TOOL_MAP))} instead."
-        )
+        ), None
 
     console.display_tool_call(func_name, args)
 
     # --- wrong or missing arguments ---
+    image_data_url: Optional[str] = None
     try:
-        result = TOOL_MAP[func_name](**args)
+        raw_result = TOOL_MAP[func_name](**args)
     except TypeError as e:
-        result = (
+        raw_result = (
             f"Error: wrong arguments for {func_name} ({e}). "
             f"AUTO-RECTIFY: the signature is {_expected_arguments(func_name)}."
         )
     except Exception as e:
-        result = f"Error executing tool {func_name}: {e}"
+        raw_result = f"Error executing tool {func_name}: {e}"
+
+    # view_image is the one tool that returns (status_text, data_url) instead
+    # of a plain string; every other tool's result is used as-is.
+    if isinstance(raw_result, tuple):
+        result, image_data_url = raw_result
+    else:
+        result = raw_result
 
     # --- coach, then escalate, on repeated identical failures ---
     signature = (func_name, args_str)
@@ -162,12 +188,13 @@ def execute_tool_call(console: AbstractManager, ssm: SimpleSessionManager,
         attempt = failures[signature]
         console.display_error(f"{func_name} failed (attempt {attempt})")
         result = f"{result}\n\n{_repair_directive(func_name, args, result, attempt)}"
+        image_data_url = None
     else:
         failures.pop(signature, None)
         if func_name in ("write_file", "append_to_file", "replace_in_file"):
             ssm.track_file(args.get("file_path"))
 
-    return result
+    return result, image_data_url
 
 
 # ------------------------------------------------------------------ the queue
@@ -300,7 +327,7 @@ def run_phase(console: AbstractManager, llm: ColibriLLMStream, ssm: SimpleSessio
             console.set_status(state="running tools")
 
             for tool_call in tool_calls:
-                tool_result = execute_tool_call(console, ssm, tool_call, failures)
+                tool_result, image_data_url = execute_tool_call(console, ssm, tool_call, failures)
                 console.display_tool_result(tool_result)
 
                 ssm.append_raw({
@@ -309,6 +336,19 @@ def run_phase(console: AbstractManager, llm: ColibriLLMStream, ssm: SimpleSessio
                     "name": tool_call["function"]["name"],
                     "content": str(tool_result)
                 })
+
+                # view_image succeeded: the tool result above is plain text
+                # (a tool message can't carry image content), so the actual
+                # picture goes in as a follow-up user turn instead — that's
+                # what puts it in front of the model on its next inference.
+                if image_data_url:
+                    ssm.append_raw({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "(image attached — see the view_image result above for its path)"},
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                        ],
+                    })
 
             console.set_status(state="thinking", plan=ssm.plan_progress(), tokens=ssm.token_usage(),
                                task=ssm.current_task_title(phase) or "")

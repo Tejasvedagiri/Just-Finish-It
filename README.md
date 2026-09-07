@@ -3,8 +3,25 @@
 An autonomous, plan-driven coding agent. You give it a goal; it writes a step-by-step
 plan, then implements and tests the work itself — ticking off each step in its own
 workspace as it goes. The LLM does all of that by calling tools (`write_file`,
-`read_file`, `append_to_file`, `replace_in_file`, `execute_command`) against your
-project; JFI provides the loop, the terminal UI, and context management.
+`read_file`, `append_to_file`, `replace_in_file`, `execute_command`, `capture_screenshot`,
+`view_image`) against your project; JFI provides the loop, the terminal UI, and context
+management.
+
+### What to expect: tokens vs. capability
+
+JFI is deliberately **token-hungry**: each run issues many tool calls across four
+phases (plan → implement → test → review), replays a lot of context, and keeps an
+append-only transcript plus a per-session context cache — so a single session can
+burn through a large share of your token budget. In exchange it is engineered to
+run on **~31B-parameter models** (any OpenAI-compatible endpoint works) and still
+produce results that are close to what much larger frontier-class models achieve.
+If you want small-model quality without paying for frontier-scale inference, JFI's
+multi-phase loop is the trade: more tokens, better outcomes.
+
+> **TODO:** real-life evaluation — running JFI on a set of real-world tasks and
+> comparing its output against baseline/frontier models — is still pending. The
+> "close to frontier" claim above reflects internal observation so far, not yet a
+> benchmarked result.
 
 ## How a run works (phase workflow)
 
@@ -31,6 +48,38 @@ The plan itself lives inside a per-session workspace folder:
 plan plus small metadata about progress. The system messages handed to the model in
 each phase always reference this exact path, so plans are generated *in* the `.JFI`
 folder — never as a bare `./plan.md`.
+
+### Context cache
+
+Alongside the plan sits `.JFI/<session_id>/context.json` — a small, flat JSON file
+the model can read and write with the same file tools it already uses, for facts
+worth keeping across turns and phases (key decisions, discovered schema/API/config
+details, gotchas) that would otherwise be lost once older turns get compressed out
+of context. It starts as `{}` and every phase's system prompt tells the model where
+it is; nothing else manages its contents — the model reads it when it needs earlier
+context and rewrites it (via `read_file` then `write_file`) when it has something
+worth keeping.
+
+### Vision (screenshots and images)
+
+Two separate tools, since a tool result can only ever be plain text on the wire:
+
+- **`capture_screenshot(directory)`** grabs the primary monitor and saves it as an
+  auto-numbered PNG (`screen-1.png`, `screen-2.png`, ...) inside `directory` — the
+  model is told to pass its own `.JFI/<session_id>` folder. Needs a real display and
+  the `mss` package; in a headless/CI environment it fails with a plain error message
+  instead of crashing, and the model is instructed to skip the step and move on.
+- **`view_image(file_path)`** reads that PNG (or a JPEG/GIF/WebP) back and attaches
+  it to the conversation as an actual image the model can see on its next turn — not
+  just text about it, the way `read_file` would be. Internally this is the one tool
+  whose result isn't just a string: the runner appends a follow-up multimodal message
+  with the image content right after the tool result.
+
+Requires a model/endpoint with vision support. An 8MB size cap applies to both tools
+(some OpenAI-compatible servers reject oversized request bodies), and the context
+compressor charges a small flat token estimate per attached image (not proportional
+to the image's raw size) so a screenshot can't blow the context budget on its own —
+see [Configuration](#configuration-env) for `CONTEXT_SIZE`.
 
 ## Prerequisites
 
@@ -99,9 +148,11 @@ All configuration lives in a `.env` file in the project root, loaded via
 |---|---|---|
 | `OPENAI_URL` | yes | Base URL of an OpenAI-compatible endpoint, e.g. `http://127.0.0.1:1234/v1`. |
 | `OPENAI_API_KEY` | yes | API key for that endpoint (any non-empty string works with local servers). |
-| `MODEL` | no | Model name to request; defaults to a sensible built-in if unset. |
+| `MODEL` | no | Model name to request; defaults to `glm-5.3-flash-colibri` if unset. Any OpenAI-compatible model id works, including ~31B-parameter local models. |
+| `TEMPERATURE` | no | Sampling temperature for LLM calls. Default: 0.7. |
 | `CONTEXT_SIZE` | no | Context window of the model, in tokens. The session manager compresses history once the transcript would exceed `CONTEXT_SIZE * CONTEXT_COMPRESSION_RATIO`. Defaults: 32768. |
 | `CONTEXT_COMPRESSION_RATIO` | no | Fraction (0–1) at which compression kicks in. Default: 0.7. |
+| `SESSION_PATH` | no | Directory that the `.JFI/` session workspace is created under. Default: `.` (the project root), so sessions live in `<project>/.JFI/<session_id>/`. |
 | `THEME` | no | Console color theme, see below. Empty or unset = auto-detect terminal background. |
 
 ### Themes
@@ -149,17 +200,34 @@ THEME=dark-ocean
 | Path | Role |
 |---|---|
 | `JFI` | Repo-root executable launcher; prefers `.venv/bin/jfi`, falls back to the source tree. |
-| `src/JFI/runner.py` | CLI entry point (`jfi`) and the main agent loop. |
-| `src/JFI/session/simple_session_manager.py` | Session workspace, plan path resolution, phase triggers, context compression. |
+| `src/JFI/runner.py` | CLI entry point (`jfi`) and the main agent loop: wires up session, LLM and console, runs the phase pipeline on a worker thread. |
+| `src/JFI/session/simple_session_manager.py` | Session workspace (`.JFI/<session_id>/`), plan path resolution, phase triggers/completion, append-only gzip history, context cache and compression. |
 | `src/JFI/manager/pt_console_manager.py` | The terminal UI: full-screen prompt_toolkit app, status bar, theme presets, streaming display of LLM output. |
-| `src/JFI/llm/colibri_llm_stream.py` | OpenAI-compatible streaming client. |
-| `src/JFI/tool/file_tools.py`, `src/JFI/tool/cmd_tools.py` | The tools the LLM calls: file read/write/append/replace and shell execution. |
+| `src/JFI/manager/theme_env.py`, `src/JFI/manager/key_bindings.py` | Theme-preset resolution rules and the console's key bindings (extracted from the UI for testability). |
+| `src/JFI/llm/base_llm_stream.py`, `src/JFI/llm/colibri_llm_stream.py` | Abstract streaming LLM base class (model/temperature, YES-NO approval check) and the OpenAI-compatible streaming client it builds on. |
+| `src/JFI/tool/file_tools.py`, `src/JFI/tool/cmd_tools.py`, `src/JFI/tool/image_tools.py`, `src/JFI/tool/schemas.py` | The tools the LLM calls — file read/write/append/replace, shell execution, screenshot capture/viewing — plus their JSON schemas (`AVAILABLE_TOOLS`). |
+| `src/JFI/orchestrator/basic_orchestrator.py` | Minimal generic orchestrator (system prompt + message list) available for simpler agent loops. |
+
+Note: the repo also contains a separate `src/shbuild/` package (a standalone-`.sh`
+builder CLI); it is independent of JFI and not covered by this README.
+
+## Known limitations / TODO
+
+- **Real-life evaluation pending.** JFI has been exercised on internal tasks only; a
+  systematic comparison against baseline/frontier models on real-world tasks (with
+  measurable success rates) is still to be done. Treat the "frontier-close results on
+  ~31B-parameter models" claim as promising but not yet benchmarked.
+- **Token usage is high by design.** The four-phase loop, tool-call replays and
+  per-session context cache mean long sessions can consume a large token budget —
+  budget your endpoint accordingly (see "What to expect: tokens vs. capability").
 
 ## Tests
 
 ```bash
 uv run pytest
+# or, in an activated venv: .venv/bin/python -m pytest
 ```
 
-The test suite lives in `test/`; `.JFI/` is excluded from collection so your real
-session plans never interfere with it.
+The test suite lives in `test/` (16 test modules covering plan parsing, phase
+completion, context helpers, the session manager, themes and more); `.JFI/` is
+excluded from collection so your real session plans never interfere with it.

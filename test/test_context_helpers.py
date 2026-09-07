@@ -34,6 +34,92 @@ def test_estimate_tokens_counts_tool_call_payloads(make_manager):
 
 
 # ---------------------------------------------------------------------------
+# _estimate_tokens / _trim_long_content — multimodal (image) content safety
+#
+# view_image attaches an image as a multimodal `content` list ([{"type":
+# "image_url", ...}, ...]) instead of a plain string. Regression coverage for
+# two failure modes a naive str(content) would hit: (1) the token estimate
+# exploding to match the raw base64 payload length instead of a flat
+# per-image cost, and (2) compression corrupting the list into a broken
+# stringified mess instead of eliding it safely.
+# ---------------------------------------------------------------------------
+
+def _image_message(b64_len: int = 200_000) -> dict:
+    return {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "(image attached)"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * b64_len}},
+        ],
+    }
+
+
+def test_estimate_tokens_ignores_raw_base64_length_for_images():
+    from JFI.session.simple_session_manager import _estimate_tokens, IMAGE_TOKEN_ESTIMATE
+
+    tiny = _estimate_tokens([_image_message(b64_len=100)])
+    huge = _estimate_tokens([_image_message(b64_len=2_000_000)])
+
+    # A flat per-image charge regardless of payload size, not proportional to
+    # base64 length (which would run into the hundreds of thousands here).
+    assert tiny == huge
+    assert abs(tiny - IMAGE_TOKEN_ESTIMATE) < 50
+
+
+def test_estimate_tokens_counts_text_parts_in_multimodal_content():
+    from JFI.session.simple_session_manager import _estimate_tokens
+
+    short = _estimate_tokens([{
+        "role": "user",
+        "content": [{"type": "text", "text": "hi"}],
+    }])
+    long_ = _estimate_tokens([{
+        "role": "user",
+        "content": [{"type": "text", "text": "hi" * 2000}],
+    }])
+    assert long_ > short
+
+
+def test_trim_long_content_never_stringifies_image_content(make_manager):
+    """Regression: str(content) on a multimodal list would corrupt it into a
+    broken Python-repr string — invalid API content, not a shorter version."""
+    from JFI.session.simple_session_manager import _trim_long_content
+
+    block = [_image_message()]
+    _trim_long_content(block)
+
+    content = block[0]["content"]
+    assert isinstance(content, list)
+    assert all(isinstance(part, dict) and "type" in part for part in content)
+
+
+def test_compress_history_handles_image_messages_without_corruption(make_manager):
+    """End-to-end: a session with an attached image, compressed under a tight
+    budget, must still produce only well-formed messages — never a message
+    whose content is a mangled string."""
+    ssm = make_manager("images")
+    ssm.add_message("user", "goal: check the UI looks right")
+    ssm.append_raw(_image_message())
+    for i in range(8):
+        ssm.append_raw({"role": "assistant", "content": "a" * 30000})
+        ssm.add_message("user", "continue")
+    ssm.add_message("user", "final live turn")
+
+    from JFI.session.simple_session_manager import _estimate_tokens
+
+    before = _estimate_tokens(ssm.history)
+    view = ssm.compress_history(reserve=100)
+    after = _estimate_tokens(view)
+
+    assert after < before
+    for message in view:
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                assert isinstance(part, dict) and "type" in part, f"corrupted content part: {part!r}"
+
+
+# ---------------------------------------------------------------------------
 # _elide
 # ---------------------------------------------------------------------------
 

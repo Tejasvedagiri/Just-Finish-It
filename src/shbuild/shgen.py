@@ -79,8 +79,14 @@ def _deterministic_tar(payload_dir: Path, archive_path: Path) -> None:
     # bare ``w:gz`` would embed the current time in the gzip header.
     import gzip
 
+    # compresslevel=6 (gzip's own CLI default) instead of GzipFile's default
+    # of 9: on a real venv payload (Python interpreter + .so files + .pyc,
+    # already dense binary content) level 9 measured ~4-5x slower than level
+    # 6 for a <1% smaller archive (73.5MB vs 73.9MB on a 189MB payload) — pure
+    # waste, since gzip's higher levels buy real savings on text-like data,
+    # not this. This is what made shbuild builds (and their tests) slow.
     buf = io.BytesIO()
-    gz = gzip.GzipFile(fileobj=buf, mode="wb", mtime=fixed_mtime)
+    gz = gzip.GzipFile(fileobj=buf, mode="wb", mtime=fixed_mtime, compresslevel=6)
     with tarfile.open(fileobj=gz, mode="w") as tf:
         for rel, entry in sorted(members, key=lambda m: m[0]):
             info = tf.gettarinfo(str(entry), arcname=rel)

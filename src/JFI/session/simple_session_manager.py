@@ -104,15 +104,35 @@ PLAN_FORMAT_RULES = """
       space inside the brackets to an x, so a targeted replace can find it.
 """
 
+CONTEXT_CACHE_RULES = """
+    CONTEXT CACHE (optional, persists across turns and phases):
+    - A small JSON file at {context_cache_path} holds facts worth remembering
+      that would otherwise be lost once older turns are compressed out of your
+      context: key decisions, discovered schema/API/config details, gotchas —
+      anything a later step or phase would otherwise have to re-derive.
+    - It already exists (starts as "{{}}"); read_file it whenever you need
+      context from earlier work, in this phase or an earlier one.
+    - To add or update a fact: read_file it first, then write_file the whole
+      file back with your fact merged in. It stays a small flat JSON object,
+      e.g. {{"db_schema": "users table: id, email, created_at"}}. Keep it
+      small — a handful of high-value facts, not a transcript — and never
+      remove another entry just because you didn't write it.
+"""
+
 
 # Default plan location: inside the .JFI session folder. The manager overrides this
 # with its own resolved path (see SimpleSessionManager.plan_path); it is only used as a
 # fallback when callers do not pass an explicit plan_path.
 DEFAULT_PLAN_PATH = ".JFI/plan.md"
+DEFAULT_CONTEXT_CACHE_PATH = ".JFI/context.json"
 
 
-def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH) -> str:
-    rules = PLAN_FORMAT_RULES.format(plan_path=plan_path)
+def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
+                       context_cache_path: str = DEFAULT_CONTEXT_CACHE_PATH) -> str:
+    rules = (
+        PLAN_FORMAT_RULES.format(plan_path=plan_path)
+        + CONTEXT_CACHE_RULES.format(context_cache_path=context_cache_path)
+    )
 
     if phase == "planner":
         return f"""
@@ -292,11 +312,41 @@ def _tools_schema_tokens() -> int:
     return _TOOLS_SCHEMA_TOKENS_CACHE
 
 
+# view_image attaches an image as a multimodal `content` list (OpenAI's
+# vision format: [{"type": "image_url", ...}, ...]) instead of a plain
+# string. A naive `str(content)` on that list would stringify the raw
+# base64 payload — for a screenshot that's easily hundreds of thousands of
+# "tokens" by the char/4 estimate, wildly overshooting the model's real
+# per-image cost and forcing needless aggressive compression. Charge a fixed,
+# provider-agnostic estimate per image instead; providers vary (roughly
+# 85-1500 tokens depending on resolution/detail), so this is a deliberately
+# rough middle-ground, not a per-provider calculation.
+IMAGE_TOKEN_ESTIMATE = 800
+
+
+def _content_char_cost(content) -> int:
+    """Character-equivalent cost of one message's `content` for _estimate_tokens
+    (the caller applies the final //4). Handles both a plain string and the
+    multimodal list form (text parts counted normally, one flat charge per
+    image part)."""
+    if isinstance(content, list):
+        total = 0
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "image_url":
+                total += IMAGE_TOKEN_ESTIMATE * 4
+            elif part.get("type") == "text":
+                total += len(str(part.get("text") or ""))
+        return total
+    return len(str(content or ""))
+
+
 def _estimate_tokens(messages) -> int:
     """Cheap character-based estimate; good enough to drive a budget."""
     total = 0
     for message in messages:
-        total += len(str(message.get("content") or "")) + 8
+        total += _content_char_cost(message.get("content")) + 8
         for call in message.get("tool_calls") or []:
             function = call.get("function") or {}
             total += len(str(function.get("name") or ""))
@@ -358,7 +408,13 @@ def _trim_long_content(block) -> None:
     """
     for message in block:
         content = message.get("content")
-        if content:
+        if isinstance(content, list):
+            # Multimodal (image) content: never stringify it — str(list)
+            # would corrupt it into invalid API content, not a shorter
+            # version of it. The image is still on disk; re-run view_image
+            # if it's needed again, same tradeoff as an elided tool result.
+            message["content"] = [{"type": "text", "text": "[image elided to save context]"}]
+        elif content:
             message["content"] = _elide(str(content), TOOL_RESULT_HEAD, TOOL_RESULT_TAIL)
 
 
@@ -410,33 +466,55 @@ class SimpleSessionManager:
         # Path the agent passes to the file tools (they are sandboxed to cwd).
         self.plan_path = self._resolve_plan_path()
 
+        # A small persistent JSON scratchpad the model can read/write across
+        # turns and phases — see CONTEXT_CACHE_RULES. Pre-created empty so a
+        # read_file before anything's been remembered never errors.
+        self.context_cache_path = self._resolve_session_file_path("context.json")
+        self.ensure_context_cache_file()
+
         # Set by compress_history() every time it runs; see token_usage().
         self._last_sent_tokens = 0
 
     # ------------------------------------------------------------ plan file
 
-    def _resolve_plan_path(self) -> str:
+    def _resolve_session_file_path(self, filename: str) -> str:
         """
-        Single source of truth for the plan location: it always lives inside this
-        session's .JFI folder. The path is made cwd-relative when possible so it
-        works with the file tools (which are sandboxed to the working directory).
+        Single source of truth for locating a file inside this session's .JFI
+        folder (the plan, the context cache, ...): made cwd-relative when
+        possible so it works with the file tools (sandboxed to cwd).
         """
-        plan = (self.session_path / "plan.md").resolve()
+        target = (self.session_path / filename).resolve()
         cwd = Path.cwd().resolve()
-        if plan.is_relative_to(cwd):
-            return str(plan.relative_to(cwd))
-        # Session dir lives outside the tool sandbox; express it relative to cwd
-        # so the plan still lands in .JFI/<session>/plan.md.
+        if target.is_relative_to(cwd):
+            return str(target.relative_to(cwd))
+        # Session dir lives outside the tool sandbox; express it relative to
+        # cwd so the file still lands in .JFI/<session>/<filename>.
         self.console.display_system(
-            "Session path is outside the working directory — keeping the plan inside the "
-            ".JFI session folder."
+            "Session path is outside the working directory — keeping "
+            f"{filename} inside the .JFI session folder."
         )
-        return f".JFI/{self.session_id}/plan.md"
+        return f".JFI/{self.session_id}/{filename}"
+
+    def _resolve_plan_path(self) -> str:
+        return self._resolve_session_file_path("plan.md")
 
     @property
     def plan_file(self) -> Path:
         """Absolute location of the plan file (always inside this session's .JFI folder)."""
         return (self.session_path / "plan.md").resolve()
+
+    # -------------------------------------------------------- context cache
+
+    @property
+    def context_cache_file(self) -> Path:
+        """Absolute location of the context cache (see CONTEXT_CACHE_RULES)."""
+        return (self.session_path / "context.json").resolve()
+
+    def ensure_context_cache_file(self) -> None:
+        """Creates an empty context cache ("{}") if one doesn't exist yet, so
+        the model's first read_file on it never errors with "does not exist"."""
+        if not self.context_cache_file.exists():
+            self.context_cache_file.write_text("{}\n", encoding="utf-8")
 
     def plan_progress(self):
         """(ticked, total) task-list checkboxes in the plan file."""
@@ -639,7 +717,7 @@ class SimpleSessionManager:
         items inline (from the plan file, parsed by `_pending_items`), so they do
         not need to scan the whole plan just to find what is left.
         """
-        base = get_system_message(phase, self.plan_path)
+        base = get_system_message(phase, self.plan_path, self.context_cache_path)
         section = {"imp": "Implementation", "testing": "Testing"}.get(phase)
         if phase in ("planner", "reviewer") or not section:
             return base
