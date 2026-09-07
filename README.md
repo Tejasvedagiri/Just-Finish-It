@@ -163,7 +163,7 @@ Just-Finish-It/
 │   │                            #   • collect_next_iteration() / review_outcome() — the no-prompt loop back to planner after a failed review or queued request
 │   ├── llm/
 │   │   ├── base_llm_stream.py   # BaseLLMStream: MODEL/TEMPERATURE from .env, abstract send_message/close
-│   │   └── colibri_llm_stream.py# ColibriLLMStream: any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, …)
+│   │   └── openai_compatable_stream.py# OpenAICompatableStream: any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, …)
 │   ├── session/
 │   │   └── simple_session_manager.py  # the heart of statefulness: history.json (append-only), plan.md parsing
 │   │                                  #   • phase completion detection (per-phase COMPLETE markers + checkbox tracking)

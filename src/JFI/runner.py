@@ -8,7 +8,7 @@ from dotenv import find_dotenv, load_dotenv
 from openai import APIConnectionError, APIStatusError
 
 # LLM and Console Management
-from JFI.llm.colibri_llm_stream import ColibriLLMStream
+from JFI.llm.openai_compatable_stream import OpenAICompatableStream
 from JFI.manager.abstract_manager import AbstractManager, phase_display_name
 from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
 
@@ -357,7 +357,7 @@ def collect_next_iteration(console: AbstractManager, review_path: Optional[str] 
 
 # ----------------------------------------------------------------- the phases
 
-def run_phase(console: AbstractManager, llm: ColibriLLMStream, ssm: SimpleSessionManager,
+def run_phase(console: AbstractManager, llm: OpenAICompatableStream, ssm: SimpleSessionManager,
               phase: str) -> bool:
     """
     Drives one phase to completion. Returns False if the run should stop early
@@ -464,7 +464,7 @@ def run_phase(console: AbstractManager, llm: ColibriLLMStream, ssm: SimpleSessio
     return False
 
 
-def run_pipeline(console: AbstractManager, llm: ColibriLLMStream) -> None:
+def run_pipeline(console: AbstractManager, llm: OpenAICompatableStream) -> None:
     console.set_status(phases=PHASES, state="waiting")
     console.display_rule("Just Finish It — Generic Autonomous Mode 🤖")
     console.display_system(
@@ -564,7 +564,7 @@ def main():
     load_dotenv(find_dotenv())
 
     console = PromptToolkitConsoleManager()
-    llm = ColibriLLMStream()
+    llm = OpenAICompatableStream()
 
     try:
         # The console owns the terminal and runs the pipeline on a worker

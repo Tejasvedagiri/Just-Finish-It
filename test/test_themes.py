@@ -145,10 +145,10 @@ def test_main_loads_dotenv_before_console(monkeypatch):
     monkeypatch.setattr(ptm.PromptToolkitConsoleManager, "__init__", spy_init)
 
     monkeypatch.setattr(
-        runner.ColibriLLMStream, "close", lambda self: None
+        runner.OpenAICompatableStream, "close", lambda self: None
     )
     fake_llm = type("FakeLLM", (), {"close": staticmethod(lambda *a, **k: None)})()
-    monkeypatch.setattr(runner, "ColibriLLMStream", lambda: fake_llm)
+    monkeypatch.setattr(runner, "OpenAICompatableStream", lambda: fake_llm)
 
     def no_pipeline(console, llm):  # noqa: ANN001 - signature matches run_pipeline
         pass

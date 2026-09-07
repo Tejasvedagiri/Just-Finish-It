@@ -10,7 +10,7 @@ def initial_service():
     )
 
 
-class ColibriLLMStream(BaseLLMStream):
+class OpenAICompatableStream(BaseLLMStream):
     def __init__(self):
         super().__init__()
         self.stream_service = initial_service()

@@ -842,7 +842,7 @@ class SimpleSessionManager:
         except ValueError:
             ratio = DEFAULT_CONTEXT_RATIO
         # The tool schemas are serialized into every request right alongside
-        # the messages (see ColibriLLMStream.send_message's `tools=`), so they
+        # the messages (see OpenAICompatableStream.send_message's `tools=`), so they
         # count against the same context window even though compress_history
         # never sees them. Without this, "compressed to fit" could still be
         # wrong by a few hundred tokens on a small CONTEXT_SIZE.
