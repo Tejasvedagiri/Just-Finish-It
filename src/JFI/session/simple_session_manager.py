@@ -461,6 +461,7 @@ class SimpleSessionManager:
         # history_path — set by load_history(), advanced by save_history().
         self._flushed_count = 0
         self.history = self.load_history()
+        self._repair_dangling_tool_calls()
         self.metadata = self.load_metadata()
 
         # Path the agent passes to the file tools (they are sandboxed to cwd).
@@ -626,6 +627,27 @@ class SimpleSessionManager:
             self.metadata["implemented_files"].append(file_path)
             self.save_metadata()
 
+    def load_queued_requests(self) -> list[str]:
+        """Plain-queued (not yet consumed) console input from a prior run of
+        this session, if any — see :meth:`save_queued_requests`."""
+        return list(self.metadata.get("queued_requests", []))
+
+    def save_queued_requests(self, items: list) -> None:
+        """
+        Persists the console's *current* queued-input contents to
+        metadata.json, called by the console every time that queue changes
+        (something typed in, or the whole queue drained/promoted).
+
+        The queue used to live only in the console's in-memory
+        ``queue.Queue`` — closing the process (even cleanly) lost anything
+        the user had queued but the pipeline hadn't reached the "review
+        landed, drain queue" point for yet. Persisting it here means
+        `console.set_queue_store(ssm.load_queued_requests(), ...)` on the
+        next resume can hand it right back.
+        """
+        self.metadata["queued_requests"] = list(items)
+        self.save_metadata()
+
     def get_project_state_summary(self) -> str:
         """Returns a string listing all files currently tracked in the project."""
         files = self.metadata.get("implemented_files", [])
@@ -675,6 +697,72 @@ class SimpleSessionManager:
                 self.console.display_system(f"Error loading history: {e}. Starting fresh.")
 
         return []
+
+    def _repair_dangling_tool_calls(self) -> None:
+        """
+        Fixes a specific broken resume state: the session was killed or
+        crashed while runner.execute_tool_call's loop was mid-way through a
+        multi-tool-call turn — the assistant's tool-call message and each
+        tool's result are separate append_raw calls, so an interrupt can land
+        after the assistant message but before any (or all) of its results.
+        On resume the transcript then either ends with an assistant message
+        carrying tool_calls with no results at all, or has one further along
+        whose tool_calls only got SOME of their results recorded before the
+        interrupt. Either way, at least one tool_call_id from the most recent
+        assistant turn has no matching "role": "tool" reply anywhere after
+        it — and most OpenAI-compatible servers reject the very next request
+        outright with "Cannot continue an assistant message that contains
+        tool calls", so the session could never resume at all.
+
+        Synthesizes a failure tool-result for each unanswered tool_call_id
+        from that turn, which makes the transcript structurally valid again
+        and tells the model plainly what happened so it can check whether the
+        work actually landed before retrying or moving on. Persisted
+        immediately so the fix survives even if this run is interrupted again
+        before the next real save.
+        """
+        if not self.history:
+            return
+
+        # Walk back to the most recent assistant message, if any; a plain
+        # (non-tool-calls) reply after it, or no assistant message at all,
+        # means there is nothing to repair.
+        last_assistant = None
+        last_assistant_idx = None
+        for i in range(len(self.history) - 1, -1, -1):
+            if self.history[i].get("role") == "assistant":
+                last_assistant, last_assistant_idx = self.history[i], i
+                break
+        if last_assistant is None or not last_assistant.get("tool_calls"):
+            return
+
+        answered_ids = {
+            m.get("tool_call_id")
+            for m in self.history[last_assistant_idx + 1:]
+            if m.get("role") == "tool"
+        }
+        missing = [c for c in last_assistant["tool_calls"] if c.get("id") not in answered_ids]
+        if not missing:
+            return
+
+        self.console.display_system(
+            f"⚠️  Last run stopped mid-turn ({len(missing)} tool call(s) made but never "
+            "recorded a result) — synthesizing failure results so this session can resume."
+        )
+        for call in missing:
+            function = call.get("function") or {}
+            self.history.append({
+                "role": "tool",
+                "tool_call_id": call.get("id"),
+                "name": function.get("name", "unknown"),
+                "content": (
+                    "Error: this tool call was interrupted before its result was recorded "
+                    "(the previous run stopped mid-turn — killed, crashed, or force-quit). "
+                    "Treat it as not completed: verify whether the work was actually done "
+                    "(e.g. read_file the target) before retrying or moving on."
+                ),
+            })
+        self.save_history()
 
     def save_history(self):
         """

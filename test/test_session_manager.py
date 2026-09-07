@@ -155,6 +155,89 @@ def test_legacy_pickle_history_is_migrated_on_load(make_manager):
     ]
 
 
+class TestDanglingToolCallRepair:
+    """Regression for a real crash-on-resume bug: killing/crashing the
+    process between the assistant's tool-call message being saved and its
+    tool result being appended leaves a transcript that most OpenAI-
+    compatible servers reject outright on the very next request with
+    "Cannot continue an assistant message that contains tool calls" — the
+    session could never resume at all until this repair runs on load."""
+
+    def test_repairs_assistant_message_with_zero_recorded_results(self, make_manager):
+        ssm = make_manager("crash1")
+        ssm.add_message("user", "goal")
+        ssm.append_raw({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "call_1", "type": "function",
+                             "function": {"name": "write_file", "arguments": "{}"}}],
+        })
+        # Process dies here — no tool result ever recorded.
+
+        resumed = make_manager("crash1")
+        assert resumed.history[-1]["role"] == "tool"
+        assert resumed.history[-1]["tool_call_id"] == "call_1"
+        assert "interrupted" in resumed.history[-1]["content"]
+
+    def test_repairs_only_the_unanswered_call_in_a_partial_turn(self, make_manager):
+        """Multiple tool calls in one turn; only some got results before the
+        crash. The repair must fill in exactly the missing ones and leave
+        the already-recorded result untouched."""
+        ssm = make_manager("crash2")
+        ssm.add_message("user", "goal")
+        ssm.append_raw({
+            "role": "assistant", "content": "",
+            "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": "{}"}},
+                {"id": "call_2", "type": "function", "function": {"name": "read_file", "arguments": "{}"}},
+            ],
+        })
+        ssm.append_raw({"role": "tool", "tool_call_id": "call_1", "name": "write_file", "content": "Success"})
+        # Crash here — call_2's result never recorded.
+
+        resumed = make_manager("crash2")
+        tool_msgs = {m["tool_call_id"]: m for m in resumed.history if m.get("role") == "tool"}
+        assert set(tool_msgs) == {"call_1", "call_2"}
+        assert tool_msgs["call_1"]["content"] == "Success"
+        assert "interrupted" in tool_msgs["call_2"]["content"]
+
+    def test_repair_is_idempotent_across_repeated_resumes(self, make_manager):
+        ssm = make_manager("crash3")
+        ssm.add_message("user", "goal")
+        ssm.append_raw({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "call_1", "type": "function",
+                             "function": {"name": "write_file", "arguments": "{}"}}],
+        })
+
+        make_manager("crash3")  # first resume: repairs it
+        third = make_manager("crash3")  # second resume: must not double-repair
+        tool_msgs = [m for m in third.history if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+
+    def test_no_repair_needed_when_last_turn_completed_normally(self, make_manager):
+        ssm = make_manager("clean")
+        ssm.add_message("user", "goal")
+        ssm.append_raw({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "call_1", "type": "function",
+                             "function": {"name": "write_file", "arguments": "{}"}}],
+        })
+        ssm.append_raw({"role": "tool", "tool_call_id": "call_1", "name": "write_file", "content": "Success"})
+        ssm.add_message("assistant", "all done")
+
+        resumed = make_manager("clean")
+        assert [m.get("content") for m in resumed.history] == [
+            "goal", "", "Success", "all done"
+        ]
+
+    def test_no_repair_when_history_has_no_assistant_message(self, make_manager):
+        ssm = make_manager("nomessages")
+        ssm.add_message("user", "goal")
+
+        resumed = make_manager("nomessages")
+        assert [m.get("content") for m in resumed.history] == ["goal"]
+
+
 def test_add_messages_appends_batch(make_manager):
     ssm = make_manager("batch")
     ssm.add_messages([{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}])

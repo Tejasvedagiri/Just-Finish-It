@@ -1,13 +1,15 @@
 import inspect
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import find_dotenv, load_dotenv
+from openai import APIConnectionError, APIStatusError
 
 # LLM and Console Management
 from JFI.llm.colibri_llm_stream import ColibriLLMStream
-from JFI.manager.abstract_manager import AbstractManager
+from JFI.manager.abstract_manager import AbstractManager, phase_display_name
 from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
 
 # Session Management
@@ -42,6 +44,66 @@ EXIT_WORDS = {"exit", "done", "quit", "no", "nothing"}
 # How many times the same failing call is coached before we tell the model to
 # abandon that approach entirely.
 FAILURE_RETRY_LIMIT = 3
+
+# How many times a transient LLM-server failure (connection drop, 5xx) is
+# retried before giving up on this turn — see _is_retryable_llm_error.
+LLM_RETRY_LIMIT = 2
+LLM_RETRY_DELAY_SECONDS = 3.0
+
+
+# ------------------------------------------------------------------ LLM errors
+
+def _is_retryable_llm_error(e: Exception) -> bool:
+    """
+    Worth retrying: a network-level failure (server down/restarting, a
+    dropped connection) or a 5xx-class server error — both are typically
+    transient on a local LLM server. NOT a 4xx client error: retrying an
+    identical request the server already rejected (bad request, auth,
+    context-length) won't produce a different result.
+    """
+    if isinstance(e, APIConnectionError):
+        return True
+    if isinstance(e, APIStatusError):
+        return e.status_code >= 500
+    return False
+
+
+def _format_llm_error(e: Exception) -> str:
+    """
+    Turns an LLM call failure into a message worth reading.
+
+    The openai SDK embeds the raw response body verbatim into str(e) when a
+    server error isn't valid JSON (see its _make_status_error_from_response):
+    a server crash that falls back to a framework's generic HTML error page
+    — nginx, Flask, Werkzeug, whatever's fronting the model — dumps that
+    whole page into the exception message instead of a clean API error. That
+    HTML page is what a raw `f"...: {e}"` was printing verbatim. Detected via
+    status_code/response (present on openai.APIStatusError and its
+    subclasses), not by string-sniffing the message.
+    """
+    status_code = getattr(e, "status_code", None)
+    response = getattr(e, "response", None)
+    body_text = getattr(response, "text", None) if response is not None else None
+
+    if status_code is not None and body_text and body_text.strip()[:15].lower().lstrip().startswith(("<!doctype", "<html")):
+        preview = " ".join(body_text.split())[:200]
+        ellipsis = "…" if len(body_text) > 200 else ""
+        return (
+            f"HTTP {status_code} — the server returned an HTML error page instead of a "
+            f"proper API error. This is almost always a crash or restart on the LLM "
+            f"server's own side, not something this request caused; check its logs. "
+            f"Preview: {preview}{ellipsis}"
+        )
+    return str(e)
+
+
+def _interruptible_sleep(console: AbstractManager, seconds: float, poll: float = 0.2) -> None:
+    """time.sleep(seconds), but checks console.should_stop() every `poll`
+    seconds so Ctrl+C during a retry delay is responsive instead of waiting
+    out the full delay first."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and not console.should_stop():
+        time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
 
 
 # --------------------------------------------------------------- tool running
@@ -243,15 +305,19 @@ def collect_next_iteration(console: AbstractManager, review_path: Optional[str] 
     """
     Decides what happens once the review phase has landed.
 
-    Nothing here asks for approval. A generated review.md takes priority over
-    anything queued (the failed review must be fixed first); otherwise queued
-    requests start the next pass immediately, and with an empty queue the
-    pipeline idles with the input line live, so feeding it more work stays
-    optional. Returns a (feedback, review_path) tuple — feedback is None to end
-    the run; review_path is set only for a failed-review re-iteration.
+    A failed review (review.md present) and anything the user queued while
+    the run was in flight are no longer mutually exclusive: both fold into
+    the SAME next iteration's feedback when both are present, instead of a
+    review failure starving queued follow-ups until some later iteration
+    happens to pass cleanly. Nothing here asks for approval; with neither
+    signal present, the pipeline idles with the input line live so feeding
+    it more work stays optional. Returns a (feedback, review_path) tuple —
+    feedback is None to end the run; review_path is set only when this
+    iteration was (at least partly) triggered by a failed review, for the
+    caller's loop-guard counter and to enrich the next planner trigger.
     """
-    feedback = review_outcome(review_path) if review_path else None
-    if feedback:
+    review_feedback = review_outcome(review_path) if review_path else None
+    if review_feedback:
         console.display_rule("🔁 REVIEW FAILED — SCHEDULING ANOTHER FULL ITERATION")
         # Remove the stale report so it cannot re-trigger a loop on its own;
         # only a freshly written review.md may schedule another iteration.
@@ -259,26 +325,34 @@ def collect_next_iteration(console: AbstractManager, review_path: Optional[str] 
             Path(review_path).unlink()
         except OSError:
             pass
-        return feedback, review_path
 
     queued = console.drain_queued_input()
-
-    if not queued:
+    if not queued and not review_feedback:
         console.set_status(phase="", state="idle · queue empty", task="")
         console.display_rule("✅ PIPELINE COMPLETE — IDLE (queue anything to continue)")
         queued = console.wait_for_queued_input()
 
-    if not queued:
-        return None, None  # stopped, or the console has no queue at all
+    requests = [q for q in (queued or []) if q.strip().lower() not in EXIT_WORDS]
+    if not review_feedback and not requests:
+        return None, None  # stopped, nothing queued, and the review passed
 
-    requests = [q for q in queued if q.strip().lower() not in EXIT_WORDS]
-    if not requests:
-        return None, None
+    parts = []
+    if review_feedback:
+        parts.append(review_feedback)
+    if requests:
+        console.display_rule(f"▶  RUNNING {len(requests)} QUEUED REQUEST(S)")
+        for request in requests:
+            console.display_user(request)
+        queued_block = "\n".join(f"- {request}" for request in requests)
+        if review_feedback:
+            queued_block = (
+                "ADDITIONALLY, the user queued these requests while this run was in "
+                "flight — fold them in as new plan items alongside any review fixes "
+                f"above:\n{queued_block}"
+            )
+        parts.append(queued_block)
 
-    console.display_rule(f"▶  RUNNING {len(requests)} QUEUED REQUEST(S)")
-    for request in requests:
-        console.display_user(request)
-    return "\n".join(f"- {request}" for request in requests), None
+    return "\n\n".join(parts), (review_path if review_feedback else None)
 
 
 # ----------------------------------------------------------------- the phases
@@ -291,23 +365,34 @@ def run_phase(console: AbstractManager, llm: ColibriLLMStream, ssm: SimpleSessio
     """
     console.set_status(phase=phase, state="thinking", plan=ssm.plan_progress(), tokens=ssm.token_usage(),
                        task=ssm.current_task_title(phase) or "")
-    console.display_rule(f"PHASE: {phase.upper()}")
+    console.display_rule(f"PHASE: {phase_display_name(phase).upper()}")
 
     failures: Dict[tuple, int] = {}
 
     while not console.should_stop():
         drain_forced_input(console, ssm)
 
-        try:
-            messages = ssm.get_messages(phase)
-            response = llm.send_message(messages, tools=AVAILABLE_TOOLS)
-            parsed_response = console.print_agent_response(
-                response, prompt_tokens_estimate=ssm.estimate_request_tokens(messages)
-            )
-        except Exception as e:
-            console.display_error(f"LLM request failed: {e}")
-            console.display_system("Progress is saved — rerun with the same session name to resume.")
-            return False
+        messages = ssm.get_messages(phase)
+        attempt = 0
+        while True:
+            try:
+                response = llm.send_message(messages, tools=AVAILABLE_TOOLS)
+                parsed_response = console.print_agent_response(
+                    response, prompt_tokens_estimate=ssm.estimate_request_tokens(messages)
+                )
+                break
+            except Exception as e:
+                attempt += 1
+                if _is_retryable_llm_error(e) and attempt <= LLM_RETRY_LIMIT and not console.should_stop():
+                    console.display_error(
+                        f"LLM request failed (attempt {attempt}/{LLM_RETRY_LIMIT + 1}): "
+                        f"{_format_llm_error(e)} — retrying in {LLM_RETRY_DELAY_SECONDS:.0f}s..."
+                    )
+                    _interruptible_sleep(console, LLM_RETRY_DELAY_SECONDS)
+                    continue
+                console.display_error(f"LLM request failed: {_format_llm_error(e)}")
+                console.display_system("Progress is saved — rerun with the same session name to resume.")
+                return False
 
         content = parsed_response.get("content")
         tool_calls = parsed_response.get("tool_calls")
@@ -396,6 +481,10 @@ def run_pipeline(console: AbstractManager, llm: ColibriLLMStream) -> None:
     # 2. Initialize Session Manager once
     ssm = SimpleSessionManager(console, session_name)
     console.start_session_log(ssm.session_path / "run.log")
+    # Requests queued but never drained before the process closed (killed,
+    # crashed, or just quit) live in metadata.json — hand them back now, and
+    # persist the queue from here on so this doesn't happen again.
+    console.set_queue_store(ssm.load_queued_requests(), ssm.save_queued_requests)
 
     if ssm.is_resuming:
         console.display_system(f"📁 Resuming existing session '{session_name}'...")

@@ -16,9 +16,13 @@ class _FakeConsole:
     def __init__(self, queued=None):
         self.queued = list(queued or [])
         self.rules = []
+        self.users = []
 
     def display_rule(self, label=""):
         self.rules.append(label)
+
+    def display_user(self, text):
+        self.users.append(text)
 
     def set_status(self, **kwargs):
         pass
@@ -107,3 +111,80 @@ class TestLoopCap:
         from JFI.runner import MAX_REVIEW_ITERATIONS
 
         assert isinstance(MAX_REVIEW_ITERATIONS, int) and MAX_REVIEW_ITERATIONS > 0
+
+
+class TestReviewAndQueueCombined:
+    """A failed review and queued follow-ups used to be mutually exclusive:
+    collect_next_iteration returned as soon as it saw review.md, without ever
+    draining the queue — anything queued during that run sat untouched until
+    some later iteration happened to pass review cleanly. Both now fold into
+    the SAME next iteration when both are present."""
+
+    def test_review_failure_and_queued_requests_both_included(self, tmp_path):
+        from JFI.runner import collect_next_iteration
+
+        p = tmp_path / "review.md"
+        p.write_text("issue A: broken import in foo.py", encoding="utf-8")
+        console = _FakeConsole(queued=["also add a login page", "and write tests for it"])
+
+        feedback, review_feedback = collect_next_iteration(console, review_path=str(p))
+
+        assert feedback is not None
+        assert "issue A: broken import in foo.py" in feedback
+        assert "also add a login page" in feedback
+        assert "and write tests for it" in feedback
+        # Still correctly identified as a review-triggered iteration (loop
+        # guard, planner-trigger enrichment) even though the queue also fed in.
+        assert review_feedback == str(p)
+
+    def test_queue_is_drained_even_when_review_failed(self, tmp_path):
+        """Regression: the queue used to never even be checked on the fail
+        path, so queued items stayed queued indefinitely."""
+        from JFI.runner import collect_next_iteration
+
+        p = tmp_path / "review.md"
+        p.write_text("issue A", encoding="utf-8")
+        console = _FakeConsole(queued=["do this too"])
+
+        collect_next_iteration(console, review_path=str(p))
+
+        assert console.queued == []  # drained, not left sitting
+
+    def test_review_failure_alone_unaffected_by_empty_queue(self, tmp_path):
+        from JFI.runner import collect_next_iteration
+
+        p = tmp_path / "review.md"
+        p.write_text("issue A", encoding="utf-8")
+        console = _FakeConsole(queued=[])
+
+        feedback, review_feedback = collect_next_iteration(console, review_path=str(p))
+
+        assert feedback is not None and "REVIEW FAILED" in feedback
+        assert "ADDITIONALLY" not in feedback  # nothing queued, no second block
+        assert review_feedback == str(p)
+
+    def test_queue_alone_still_works_when_review_passed(self, tmp_path):
+        """No review.md at all — pure queued-follow-up path, unaffected."""
+        from JFI.runner import collect_next_iteration
+
+        path = str(tmp_path / "review.md")  # never created
+        console = _FakeConsole(queued=["one more thing"])
+
+        feedback, review_feedback = collect_next_iteration(console, review_path=path)
+
+        assert feedback == "- one more thing"
+        assert review_feedback is None
+
+    def test_review_failure_with_only_exit_words_queued_still_proceeds(self, tmp_path):
+        """A genuine review failure isn't silently dropped just because the
+        user's only queued item happened to be an exit word."""
+        from JFI.runner import collect_next_iteration
+
+        p = tmp_path / "review.md"
+        p.write_text("issue A", encoding="utf-8")
+        console = _FakeConsole(queued=["exit"])
+
+        feedback, review_feedback = collect_next_iteration(console, review_path=str(p))
+
+        assert feedback is not None and "REVIEW FAILED" in feedback
+        assert review_feedback == str(p)

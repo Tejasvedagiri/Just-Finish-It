@@ -1,6 +1,25 @@
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional
 
+# Human-friendly titles for the internal phase keys — display only. The keys
+# themselves (PHASES in runner.py, completion markers like "IMP_COMPLETE" the
+# model emits and phase_completed() parses, TOOL_MAP, ...) are unaffected: a
+# resumed session's past transcript still has the old markers in it, so
+# renaming those would break resuming, not just relabel the UI.
+PHASE_DISPLAY_NAMES: Dict[str, str] = {
+    "planner": "Plan",
+    "imp": "Implement",
+    "testing": "Test",
+    "reviewer": "Review",
+}
+
+
+def phase_display_name(phase: str) -> str:
+    """Title for `phase` in anything user-visible (header breadcrumb, phase
+    divider, status line, ...). Falls back to Title Case for an unrecognized
+    key rather than raising, so a typo/future phase never crashes display."""
+    return PHASE_DISPLAY_NAMES.get(phase, phase.title() if phase else phase)
+
 
 class AbstractManager(ABC):
     """
@@ -99,6 +118,20 @@ class AbstractManager(ABC):
     def wait_for_queued_input(self, poll: float = 0.2) -> List[str]:
         """Block until the user queues work. Returns [] when unsupported."""
         return []
+
+    def set_queue_store(self, initial_items: List[str], on_change: Callable[[List[str]], None]) -> None:
+        """
+        Wires persistent storage for the plain-queued-input line.
+
+        `initial_items` seeds the live queue immediately (e.g. requests the
+        user queued in a prior run of this session that the pipeline never
+        got around to draining before the process closed); `on_change` is
+        called with the queue's full current contents every time it changes
+        (something typed in, or the whole queue drained/promoted), so the
+        caller can persist it. No-op default for managers with no queue to
+        back.
+        """
+        pass
 
     def pending_input_count(self) -> int:
         return 0
