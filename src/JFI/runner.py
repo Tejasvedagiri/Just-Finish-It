@@ -24,6 +24,7 @@ from JFI.tool.file_tools import write_file, read_file, append_to_file, replace_i
 from JFI.tool.cmd_tools import execute_command, make_gated_execute_command
 from JFI.tool.context_tools import make_context_tools
 from JFI.tool.image_tools import capture_screenshot, view_image
+from JFI.tool.llm_tools import make_ask_llm
 from JFI.tool.web_tools import fetch_webpage_images
 
 # Dynamic mapping of tool names to their python functions
@@ -45,6 +46,10 @@ TOOL_MAP = {
     # execute_command above — these defaults only matter before a session
     # exists (import time, direct testing).
     **make_context_tools(DEFAULT_CONTEXT_CACHE_PATH),
+    # Rebound to the active phase's own LLM stream in run_phase (a phase can
+    # have its own model/endpoint — see PHASE_ENV_PREFIX) — this default
+    # only matters before any phase has run.
+    "ask_llm": lambda prompt="": "Error: ask_llm is not available yet — no phase is currently running.",
 }
 
 PHASES = ["planner", "imp", "testing", "reviewer"]
@@ -454,6 +459,10 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
     per-phase override, so this indexing is a no-op in the common case.
     """
     llm = llms[phase]
+    # ask_llm delegates to whatever model this phase itself is using — a
+    # phase with its own .env override (PLANNER_MODEL, etc.) gets an ask_llm
+    # backed by that same model, not always the shared default.
+    TOOL_MAP["ask_llm"] = make_ask_llm(llm)
     console.set_status(phase=phase, state="thinking", plan=ssm.plan_progress(),
                        phase_plan=ssm.phase_progress(phase), tokens=ssm.token_usage(),
                        task=ssm.current_task_title(phase) or "")

@@ -241,4 +241,29 @@ AVAILABLE_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_llm",
+            "description": (
+                "Asks a fresh, single-turn LLM call anything — write a description, brainstorm "
+                "names, clarify an ambiguous requirement, summarize a chunk of text, or handle "
+                "any other one-off text task that doesn't need a dedicated tool. This call is "
+                "STATELESS: it has NO access to your conversation, the plan file, or any files "
+                "on disk — put everything it needs directly in the prompt. Do NOT use this for "
+                "file operations, running commands, or anything another tool already does "
+                "directly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The full, self-contained question or instruction to send."
+                    }
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
 ]

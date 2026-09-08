@@ -211,7 +211,8 @@ Just-Finish-It/
 │       ├── cmd_tools.py         # execute_command, gated by CmdApprovalGate — see [Command approval](#command-approval)
 │       ├── context_tools.py     # context_save / context_lookup — the model's fact store, see [Context cache](#context-cache)
 │       ├── image_tools.py       # capture_screenshot / view_image — the one tool pair that returns an image to the model, not just text
-│       └── web_tools.py         # fetch_webpage_images — downloads a page's images to disk (view_image shows them, same as a screenshot)
+│       ├── web_tools.py         # fetch_webpage_images — downloads a page's images to disk (view_image shows them, same as a screenshot)
+│       └── llm_tools.py         # ask_llm — a stateless one-off LLM call for text work with no dedicated tool
 │
 ├── src/build_binary/             # `uv run build` — PyInstaller onefile packaging of src/JFI/runner.py
 │   └── __init__.py
@@ -262,6 +263,7 @@ It's meant to stay small — a handful of high-value facts, not a transcript.
 | `capture_screenshot` | Snapshot the monitor to disk — used by the testing phase for visual verification where possible (fails cleanly with a "skip this step" hint if there's no display). |
 | `fetch_webpage_images` | Fetch a web page (http/https only) and download the images it references — Open Graph/Twitter preview image first, then every `<img>` tag — to disk, auto-numbered. Same "writes files, doesn't show you anything" design as `capture_screenshot`. |
 | `view_image`       | Attach an image file into the model's next turn (the only tool whose result becomes an actual image message, not just text) — this is how the agent can actually *see* screenshots it captured or images `fetch_webpage_images` downloaded. |
+| `ask_llm`          | A general-purpose escape hatch: sends `prompt` as a fresh, **stateless** single-turn LLM call (no tools, no conversation history, no plan/file access) and returns the reply. For one-off text work — a description, a clarification, a rephrase, brainstorming a name — that doesn't warrant its own dedicated tool. Uses whatever model the calling phase itself is configured for (see [per-phase models](#configuration-env) above). |
 
 Every failed call gets a concrete `AUTO-RECTIFY:` instruction naming the exact tool/argument to change, and after 3 identical failures JFI tells the model to abandon that approach rather than loop — the difference between "retry forever" and "fix or move on."
 
