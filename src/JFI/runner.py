@@ -1,5 +1,6 @@
 import inspect
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -448,6 +449,51 @@ def collect_next_iteration(console: AbstractManager, review_path: Optional[str] 
 
 # ----------------------------------------------------------------- the phases
 
+def _show_stream_prompts() -> bool:
+    """SHOW_STREAM_PROMPTS=1 (or true/yes/on) in .env: dump the exact
+    messages sent to the LLM every turn — see dump_prompt. Read fresh each
+    call rather than cached: it's checked once per turn at most, never in a
+    hot loop, and a live .env edit (e.g. via Ctrl+N into a fresh process)
+    should still take effect without a restart being required."""
+    return os.environ.get("SHOW_STREAM_PROMPTS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def dump_prompt(console: AbstractManager, phase: str, messages: List[Dict[str, Any]]) -> None:
+    """
+    SHOW_STREAM_PROMPTS=1: prints every message about to be sent to the LLM
+    this turn, in full — deliberately untruncated, unlike
+    display_tool_result's 8-line/width-capped preview elsewhere in the
+    console. Meant for prompt-engineering and context-compression
+    debugging, where seeing exactly what the model is about to see (all of
+    it) is the entire point.
+    """
+    console.display_rule(f"PROMPT SENT — {phase_display_name(phase).upper()} ({len(messages)} message(s))")
+    for i, message in enumerate(messages, 1):
+        header = f"[{i}] {message.get('role', '?')}"
+        tool_calls = message.get("tool_calls") or []
+        if tool_calls:
+            names = ", ".join(tc.get("function", {}).get("name", "?") for tc in tool_calls)
+            header += f"  (tool_calls: {names})"
+        if message.get("tool_call_id"):
+            header += f"  (tool_call_id: {message['tool_call_id']})"
+        console.display_system(header)
+
+        content = message.get("content")
+        if isinstance(content, list):
+            # Multimodal content (view_image's follow-up user turn): show the
+            # text parts in full, note images without dumping raw base64.
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    console.display_system(str(part.get("text") or ""))
+                elif part.get("type") == "image_url":
+                    console.display_system("(image attached)")
+        elif content:
+            console.display_system(str(content))
+    console.display_rule("END PROMPT")
+
+
 def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream], ssm: SimpleSessionManager,
               phase: str) -> bool:
     """
@@ -491,6 +537,8 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
         # thinking out loud, an auto-nudge reply, ...) would otherwise leave
         # ctx showing a stale figure from several turns back.
         console.set_status(tokens=ssm.token_usage())
+        if _show_stream_prompts():
+            dump_prompt(console, phase, messages)
         attempt = 0
         while True:
             try:

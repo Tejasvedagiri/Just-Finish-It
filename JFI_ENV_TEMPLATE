@@ -62,6 +62,14 @@ MODEL=qwen3:8b
 # REVIEWER_OPENAI_API_KEY=sk-your-real-key
 # REVIEWER_TEMPERATURE=0.3
 
+# --- Debugging -----------------------------------------------------------
+
+# Prints every message sent to the LLM each turn, in full -- no truncation
+# anywhere, unlike the normal tool-result preview. Verbose by design; meant
+# for prompt-engineering and context-compression debugging, not everyday
+# runs. Accepts 1/true/yes/on.
+# SHOW_STREAM_PROMPTS=1
+
 # --- Advanced ------------------------------------------------------------
 
 # Where the JFI/ session folder is created, relative to. Defaults to the
