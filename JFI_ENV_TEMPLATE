@@ -1,0 +1,69 @@
+# Copy this file to .env and fill in your own values.
+# See README.md -> "Configuration (.env)" for the full explanation of each setting.
+
+# --- Required ---------------------------------------------------------------
+
+# Base URL of any OpenAI-compatible chat API.
+# Examples: http://127.0.0.1:11434/v1 (Ollama), http://127.0.0.1:8080/v1 (llama.cpp),
+#           http://127.0.0.1:8000/v1 (vLLM), https://api.openai.com/v1
+OPENAI_URL=http://127.0.0.1:11434/v1
+
+# API key for that server. Local servers usually accept any non-empty string.
+OPENAI_API_KEY=ollama
+
+# Model name as the server expects it, e.g. qwen3:8b, gemma-4:31b, qwen3.5:35b-a3b
+MODEL=qwen3:8b
+
+# --- Optional ----------------------------------------------------------------
+
+# Sampling temperature. Defaults to 0.7 if unset.
+# TEMPERATURE=0.7
+
+# Context window of the served model, in tokens. History is compressed once a
+# request would exceed CONTEXT_SIZE * CONTEXT_COMPRESSION_RATIO. Size it to
+# what fits on your machine: 4096-16384 for an ~8GB setup with a small model,
+# 32768+ for 27B/31B runs. Defaults to 32768 if unset.
+# CONTEXT_SIZE=32768
+
+# Headroom left for the model's own reply when deciding whether to compress
+# history. Defaults to 0.7 if unset.
+# CONTEXT_COMPRESSION_RATIO=0.7
+
+# Live-console color preset. Leave unset (or "auto") to detect your terminal's
+# background automatically. See README.md -> "Themes" for the full list (20
+# presets) or how to supply your own colors as inline JSON.
+# THEME=dark-ocean
+
+# --- Optional: a different model/endpoint per phase --------------------------
+#
+# Each of OPENAI_URL / OPENAI_API_KEY / MODEL / TEMPERATURE can be overridden
+# per phase by prefixing it PLANNER_, IMP_, TESTING_, or REVIEWER_. Any phase
+# left unset falls back to the shared settings above, so uncomment only the
+# phases (and only the settings within them) you actually want to route
+# elsewhere — e.g. a cheap/fast model for testing, a stronger one for review.
+
+# PLANNER_MODEL=qwen3:8b
+# PLANNER_OPENAI_URL=http://127.0.0.1:11434/v1
+# PLANNER_OPENAI_API_KEY=ollama
+# PLANNER_TEMPERATURE=0.7
+
+# IMP_MODEL=qwen3:8b
+# IMP_OPENAI_URL=http://127.0.0.1:11434/v1
+# IMP_OPENAI_API_KEY=ollama
+# IMP_TEMPERATURE=0.7
+
+# TESTING_MODEL=qwen3:8b
+# TESTING_OPENAI_URL=http://127.0.0.1:11434/v1
+# TESTING_OPENAI_API_KEY=ollama
+# TESTING_TEMPERATURE=0.7
+
+# REVIEWER_MODEL=gpt-4.1
+# REVIEWER_OPENAI_URL=https://api.openai.com/v1
+# REVIEWER_OPENAI_API_KEY=sk-your-real-key
+# REVIEWER_TEMPERATURE=0.3
+
+# --- Advanced ------------------------------------------------------------
+
+# Where the JFI/ session folder is created, relative to. Defaults to the
+# current working directory ("."); most people never need to set this.
+# SESSION_PATH=.

@@ -4,7 +4,7 @@
 
 What makes it different from "just an autonomous mode" is that all of its state lives on disk:
 
-- A **persisted plan file** (`JFI/readme/plan.md`) in strict `- [ ] N.M` / `- [x] N.M` checkbox form — the single source of truth for what's done, re-read by every phase and every restart.
+- A **persisted plan file** (`JFI/readme/plan.md`) — a strict, recursively-broken-down *tree*, where every task is split into the smallest doable pieces and only the leaves (the ones not split further) carry a `- [ ] N.M.…` / `- [x] N.M.…` checkbox; parents stay plain, checkbox-less bullets. The single source of truth for what's done, re-read by every phase and every restart.
 - A **context cache** (a small JSON fact store) that survives turns and phases, so key decisions and discovered details don't have to be re-derived after history compression.
 - An append-only session transcript (`history.json`) plus a live `run.log`, which is what makes resuming mid-session — even mid-phase — reliable.
 
@@ -18,7 +18,7 @@ Every JFI session runs the same four phases in order:
 
 | Phase     | What it does                                                                                          |
 |-----------|--------------------------------------------------------------------------------------------------------|
-| **planner**   | Writes a step-by-step plan to `JFI/readme/plan.md`, every item as a `- [ ] N.M` checkbox.             |
+| **planner**   | Writes a step-by-step plan to `JFI/readme/plan.md` as a tree, recursing each task into the smallest doable pieces — only the leaves get a `- [ ] N.M.…` checkbox. |
 | **imp**       | Implements the code, ticking each box with `replace_in_file` *immediately* after finishing that one item — never batched. |
 | **testing**   | Runs the test suite and fixes failures.                                                                |
 | **reviewer**  | Signs off (`REVIEWER_COMPLETE`) or writes a `review.md` report, which automatically schedules another full iteration. Up to 3 failed-review loops per session before JFI stops so a bad cycle is visible instead of looping forever. |
@@ -59,7 +59,9 @@ Then answer two prompts: **session name** and **goal**, and let it work.
 | `MODEL`             | Model name                                         | `gemma-4:31b`, `qwen3.5:35b-a3b`, …        |
 | `TEMPERATURE`       | Sampling temperature                               | `0.7`                                      |
 | `CONTEXT_SIZE` *(optional)* | Context window of the served model, in tokens — history is compressed once a request would exceed `CONTEXT_SIZE × CONTEXT_COMPRESSION_RATIO`. Size it to what *fits on your machine*: 4096–16384 for an ~8GB setup with a small model, 32768+ for 27B/31B runs. Defaults to 32768 if unset. | `32768`              |
+| `CONTEXT_COMPRESSION_RATIO` *(optional)* | Headroom left for the model's own reply when deciding whether to compress history. Defaults to `0.7` if unset. | `0.7` |
 | `THEME` *(optional)*| Live-console color preset — see [Themes](#themes)  | `dark-ocean`, `light-paper`, or empty for auto-detect |
+| `SESSION_PATH` *(optional, advanced)* | Where the `JFI/` session folder is created, relative to. Defaults to the current working directory. | `.` |
 
 Every one of `OPENAI_URL` / `OPENAI_API_KEY` / `MODEL` / `TEMPERATURE` can also be set **per phase**, prefixed `PLANNER_`, `IMP_`, `TESTING_`, or `REVIEWER_` (e.g. `REVIEWER_MODEL=gpt-4.1`, `IMP_OPENAI_URL=http://127.0.0.1:8080/v1`). A phase with no prefixed override falls back to the shared, unprefixed setting — so the default (unset) behavior is exactly one model for every phase, and you only add prefixed lines for the phases you actually want to route elsewhere (e.g. a cheap/fast model for `testing`, a stronger one for `reviewer`).
 
