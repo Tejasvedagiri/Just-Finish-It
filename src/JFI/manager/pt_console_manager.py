@@ -780,6 +780,32 @@ class PromptToolkitConsoleManager(AbstractManager):
         if self._app is not None:
             self._app.invalidate()
 
+    def _apply_title(self) -> None:
+        """
+        Pushes the terminal's own tab/window title (OSC 2 — supported by
+        essentially every modern terminal) so it shows the session and its
+        live progress instead of just the launch command. Called only from
+        the handful of methods that actually change session/phase/progress
+        state (set_status, mark_phase_done, start_iteration) — not from the
+        much hotter _invalidate (called on every streamed character), which
+        would spam the terminal with redundant title writes for no benefit.
+        """
+        if self._app is None:
+            return
+        with self._lock:
+            session, phase = self._session, self._phase
+            phase_plan, plan = self._phase_plan, self._plan
+
+        parts = [session or self.title]
+        if phase:
+            label = phase_display_name(phase)
+            progress = phase_plan if phase_plan and phase_plan[1] else plan
+            parts.append(f"{label} {progress[0]}/{progress[1]}" if progress and progress[1] else label)
+        try:
+            self._app.output.set_title(" · ".join(parts))
+        except Exception:
+            pass  # cosmetic only — never worth crashing or even logging over
+
     def _write(self, style: str, text: str) -> None:
         """Appends text to the AI space, merging into the previous block."""
         if not text:
@@ -1142,12 +1168,14 @@ class PromptToolkitConsoleManager(AbstractManager):
             if phases is not None:
                 self._phases = list(phases)
         self._invalidate()
+        self._apply_title()
 
     def mark_phase_done(self, phase: str) -> None:
         with self._lock:
             if phase not in self._done_phases:
                 self._done_phases.append(phase)
         self._invalidate()
+        self._apply_title()
 
     def start_iteration(self, number: int, phases: Optional[List[str]] = None) -> None:
         """
@@ -1162,6 +1190,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             if phases is not None:
                 self._phases = list(phases)
         self._invalidate()
+        self._apply_title()
 
     def should_stop(self) -> bool:
         return self._stop.is_set()
@@ -1275,6 +1304,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             color_depth=self._resolve_color_depth(),
         )
         app = self._app
+        self._apply_title()
 
         def target() -> None:
             try:

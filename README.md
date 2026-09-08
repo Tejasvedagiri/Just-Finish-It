@@ -35,6 +35,8 @@ The plan file is the single source of truth across phases *and* across restarts 
 
 The whole transcript is also written to `JFI/readme/<session>/run.log` as it happens (`tail -f` friendly), and every file the agent touches is tracked so a project-state summary can be folded into later iterations.
 
+The terminal's own tab/window title tracks the same thing (session name plus live progress, e.g. `story · Implement 8/18`) so you can tell which run needs attention without switching to it — most terminals show this in the tab bar.
+
 ---
 
 ## Quick start — `JFI` launcher (interactive)
