@@ -20,6 +20,7 @@ from JFI.tool.schemas import AVAILABLE_TOOLS
 from JFI.tool.file_tools import write_file, read_file, append_to_file, replace_in_file
 from JFI.tool.cmd_tools import execute_command, make_gated_execute_command
 from JFI.tool.image_tools import capture_screenshot, view_image
+from JFI.tool.web_tools import fetch_webpage_images
 
 # Dynamic mapping of tool names to their python functions
 TOOL_MAP = {
@@ -29,6 +30,7 @@ TOOL_MAP = {
     "replace_in_file": replace_in_file,
     "execute_command": execute_command,
     "capture_screenshot": capture_screenshot,
+    "fetch_webpage_images": fetch_webpage_images,
     # view_image returns (status_text, data_url) instead of a plain string —
     # every other tool's TOOL_MAP entry returns str; see the isinstance(tuple)
     # check in execute_tool_call, which is the one place that distinction

@@ -158,4 +158,39 @@ AVAILABLE_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_webpage_images",
+            "description": (
+                "Fetches a web page (http/https only) and downloads the images it references "
+                "— the Open Graph/Twitter preview image first, then every <img> tag, in page "
+                "order — into `directory` as auto-numbered files (web-1.png, web-2.jpg, ...). "
+                "Does NOT show you the image — like capture_screenshot, it only writes files "
+                "and reports where. Call view_image on one of the returned paths afterward to "
+                "actually see it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The page URL to fetch, e.g. 'https://example.com/article'."
+                    },
+                    "directory": {
+                        "type": "string",
+                        "description": (
+                            "Where to save downloaded images — pass your session's "
+                            ".JFI/<session> folder (the same directory your plan file lives in)."
+                        )
+                    },
+                    "max_images": {
+                        "type": "integer",
+                        "description": "Maximum number of images to download (default 5, capped at 20)."
+                    }
+                },
+                "required": ["url", "directory"]
+            }
+        }
+    },
 ]

@@ -94,12 +94,53 @@ TOOL_RESULT_TAIL = 400
 PLAN_FORMAT_RULES = """
     PLAN FILE FORMAT (mandatory, no exceptions):
     - The plan file is exactly: {plan_path}
+<<<<<<< Updated upstream
     - Every actionable item MUST be a GitHub task-list line and nothing else:
           - [ ] 1.1 Short description of the step
       Not started is "- [ ] ", finished is "- [x] ".
       NEVER use any other marker for progress: no U+2610 ballot boxes, no emoji
       ticks, no tables of checkboxes. Only "- [ ]" and "- [x]".
     - Numbering: sections are 1, 2, 3 ...; steps inside them are 1.1, 1.2 ...
+=======
+    - The plan is a TREE, not a flat list. Every task must be broken down into
+      the smallest possible pieces: a task becomes subtasks, and any subtask
+      that is still not a single, small, directly-doable action becomes
+      subtasks of its own — recurse as many levels as it takes (2, 3, 4+).
+      There is no fixed depth; stop nesting a branch only once its leaf items
+      are each small enough to finish and verify in one focused step (touch
+      one file/function, run one command, write one test — not "build the
+      login page").
+    - Only LEAF items (the ones you did NOT break down further) get a
+      checkbox. Every leaf MUST be a GitHub task-list line and nothing else:
+          - [ ] 1.1.1 Short description of the smallest step
+      Not started is "- [ ] ", finished is "- [x] ". A third marker, "- [○] ",
+      means the USER skipped that item directly (Ctrl+K) — never something you
+      write yourself. A skipped item is intentionally left undone: never redo
+      it, never revert it to "- [ ] ", and never flag it as a defect or missing
+      work — treat it exactly like a finished item when judging what's left.
+      NEVER use any other marker for progress: no U+2610 ballot boxes, no emoji
+      ticks, no tables of checkboxes. Only "- [ ]", "- [x]", and "- [○]".
+    - Parent tasks (any task you broke into subtasks) are plain bullets with
+      NO checkbox — just "- 1.1 Description", indented one level per depth.
+      This matters mechanically, not just visually: every phase's work queue
+      is every checkbox line in file order, so a checkbox on a parent would
+      hand the implementer a fake "task" like "1. Build the login page"
+      alongside its own real subtasks, and it would try to do both.
+    - Numbering: sections are 1, 2, 3 ...; each level of breakdown below a
+      section appends one more ".N" (1.1, then 1.1.1, then 1.1.1.1, ...), so a
+      leaf's number shows its full path from the section root. Example, for
+      section 1 (Implementation):
+          - 1.1 Add user login
+            - 1.1.1 Backend endpoint
+              - [ ] 1.1.1.1 Add POST /login route handler
+              - [ ] 1.1.1.2 Validate credentials against the users table
+              - [ ] 1.1.1.3 Issue a session token on success
+            - [ ] 1.1.2 Frontend form (small enough as one leaf — no further split needed)
+          - [ ] 1.2 A second task that was already small enough as one leaf
+    - A task with only one obvious, already-small action underneath it can
+      stay a single leaf — don't split for the sake of splitting. The goal is
+      the smallest task that is still genuinely one task, not maximum depth.
+>>>>>>> Stashed changes
     - Item text must stay byte-identical when you tick it: change only the
       space inside the brackets to an x, so a targeted replace can find it.
 """
@@ -147,13 +188,23 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                    # <Project Title>
                    ## Context and Prerequisites
                    ## Implementation
-                   - [ ] 1.1 ...
-                   - [ ] 1.2 ...
+                   - 1.1 First high-level task
+                     - [ ] 1.1.1 Smallest step under it (leaf — no checkbox above it)
+                     - 1.1.2 Still too big to do in one step
+                       - [ ] 1.1.2.1 Smallest step
+                       - [ ] 1.1.2.2 Smallest step
+                   - [ ] 1.2 Second high-level task (already small enough as one leaf)
                    ## Testing
                    - [ ] 2.1 ...
+               For EVERY task you add, ask "can I do this correctly in one focused step?" If
+               not, break it into subtasks and ask the same question of each one — recurse
+               until every leaf is genuinely that small. Only leaves get a checkbox; every
+               parent you broke down stays an unchecked, un-checkboxed bullet (see PLAN FILE
+               FORMAT above for exactly why).
             2. If {plan_path} ALREADY EXISTS, read_file it first. Every "- [x]" line is work that
-               is already finished: leave those lines exactly as they are. Add new "- [ ]" items
-               for the new request, continuing the existing numbering.
+               is already finished: leave those lines exactly as they are. Add new tasks for the
+               new request the same way — break each down into the smallest leaves before adding
+               any checkboxes — continuing the existing numbering.
             3. Do NOT implement anything in this phase. Write the plan file only.
             4. Never ask the user a question and never wait for approval.
 

@@ -100,6 +100,7 @@ Then point the `.env` at it:
 
 ## Themes
 
+<<<<<<< Updated upstream
 The live console supports six named presets (three dark, three light), selectable via `THEME=` in `.env`:
 
 | Preset           | Look                                                                  |
@@ -110,8 +111,36 @@ The live console supports six named presets (three dark, three light), selectabl
 | `light-default`  | Classic black/blue/green on white.                                      |
 | `light-sunrise`  | Warm magenta/maroon on light.                                           |
 | `light-paper`    | Soft muted green/blue, "paper" feel — the most contrast-friendly light option. |
+=======
+The live console supports twenty named presets, selectable via `THEME=` in `.env`. Every preset but `dark-default` also paints the terminal's actual background — not just the message text — so it looks right regardless of what your terminal profile's own background happens to be:
+
+| Preset                 | Look                                                                  |
+|------------------------|------------------------------------------------------------------------|
+| `dark-default`         | ANSI-color baseline — inherits your terminal's own palette and background. |
+| `dark-ocean`           | Fixed blue/teal-on-dark, deep navy background.                       |
+| `dark-mono`            | Pure grayscale on near-black.                                        |
+| `light-default`        | Classic black/blue/green on white.                                    |
+| `light-sunrise`        | Warm magenta/maroon on a cream background.                            |
+| `light-paper`          | Soft muted green/blue, "paper" feel — the most contrast-friendly light option. |
+| `catppuccin-mocha`     | [Catppuccin](https://github.com/catppuccin/catppuccin)'s flagship dark flavor. |
+| `catppuccin-macchiato` | Catppuccin, one step lighter than Mocha.                               |
+| `catppuccin-frappe`    | Catppuccin's softest dark flavor.                                      |
+| `catppuccin-latte`     | Catppuccin's light flavor.                                             |
+| `tokyo-night`          | [Tokyo Night](https://github.com/enkia/tokyo-night-vscode-theme) — blue/green/violet on deep indigo. |
+| `dracula`              | [Dracula](https://draculatheme.com/) — cyan/green/pink on its classic near-black purple. |
+| `nord`                 | [Nord](https://www.nordtheme.com/) — arctic blue-gray with muted frost accents. |
+| `gruvbox-dark`         | [Gruvbox](https://github.com/morhetz/gruvbox) — warm retro-contrast on soft black. |
+| `solarized-dark`       | [Solarized](https://ethanschoonover.com/solarized/) Dark — the precision-tuned classic. |
+| `solarized-light`      | Solarized Light — same accents on Solarized's signature cream base.  |
+| `rose-pine`            | [Rosé Pine](https://rosepinetheme.com/) — muted foam/pine/iris on soft plum-black. |
+| `rose-pine-dawn`       | Rosé Pine's light companion flavor, warm cream base.                  |
+| `one-dark`             | [One Dark](https://github.com/atom/atom/tree/master/packages/one-dark-ui) — Atom's iconic blue/green/purple on slate. |
+| `everforest-dark`      | [Everforest](https://github.com/sainnhe/everforest) — soft nature-toned greens on muted forest-green. |
+>>>>>>> Stashed changes
 
 Leave `THEME` unset (or set to `auto`) and JFI detects your terminal's background via the standard `COLORFGBG` environment variable and picks `dark-default` or `light-default` accordingly. An explicit value always wins; an unknown name falls back to auto-detection with a hint, so a typo never crashes startup.
+
+Want your own colors instead? Set `THEME` to a JSON object (wrapped in single quotes in `.env`) instead of a name, e.g. `THEME='{"": "bg:#112233 fg:#eee", "out.user": "bold #ff8800"}'` — any subset of style classes may be set, and invalid JSON or an invalid style both fall back safely rather than crashing. See [Custom themes](docs/Themes.md#custom-themes-theme-as-json) for the full syntax.
 
 Live screenshots of each preset: [docs/Themes.md](docs/Themes.md).
 
@@ -176,16 +205,25 @@ Just-Finish-It/
 │   └── tool/
 │       ├── schemas.py           # AVAILABLE_TOOLS: the JSON-schema tool definitions sent to every LLM request
 │       ├── file_tools.py        # write_file / read_file / append_to_file / replace_in_file (the exact functions documented in each phase prompt)
+<<<<<<< Updated upstream
 │       ├── cmd_tools.py         # execute_command
 │       └── image_tools.py       # capture_screenshot / view_image — the one tool pair that returns an image to the model, not just text
+=======
+│       ├── cmd_tools.py         # execute_command, gated by CmdApprovalGate — see [Command approval](#command-approval)
+│       ├── image_tools.py       # capture_screenshot / view_image — the one tool pair that returns an image to the model, not just text
+│       └── web_tools.py         # fetch_webpage_images — downloads a page's images to disk (view_image shows them, same as a screenshot)
+>>>>>>> Stashed changes
 │
 ├── src/build_binary/             # `uv run build` — PyInstaller onefile packaging of src/JFI/runner.py
 │   └── __init__.py
 │
 ├── test/                        # pytest suite (see "Tests" below) — unit tests per module plus the plan-file protocol
+├── utils/                       # dev-only scripts, not part of the shipped package
+│   ├── capture_theme_screenshots.py # real pty capture of the console under every THEME (proof images, or --docs for docs/images/)
+│   └── _docs_frame_app.py       # no-LLM harness rendering one representative frame for the --docs capture
 └── docs/
-    ├── Themes.md                # live screenshots of all six theme presets
-    └── images/theme-*.png       # those screenshots, generated by docs/make_theme_screenshots.py
+    ├── Themes.md                # live screenshots of all twenty theme presets, plus the custom-theme (THEME as JSON) docs
+    └── images/theme-*.png       # those screenshots, captured from the real console by ../utils/capture_theme_screenshots.py --docs
 ```
 
 ---
@@ -200,7 +238,8 @@ Just-Finish-It/
 | `replace_in_file`  | Replace exactly one substring, leaving everything else untouched. This is *the* mechanism for ticking plan checkboxes and making surgical edits; a bad match (0 or >1 hits) errors out rather than corrupting the file. |
 | `execute_command`  | Run any shell command; returns stdout+stderr.                                                    |
 | `capture_screenshot` | Snapshot the monitor to disk — used by the testing phase for visual verification where possible (fails cleanly with a "skip this step" hint if there's no display). |
-| `view_image`       | Attach an image file into the model's next turn (the only tool whose result becomes an actual image message, not just text) — this is how the agent can actually *see* screenshots it captured. |
+| `fetch_webpage_images` | Fetch a web page (http/https only) and download the images it references — Open Graph/Twitter preview image first, then every `<img>` tag — to disk, auto-numbered. Same "writes files, doesn't show you anything" design as `capture_screenshot`. |
+| `view_image`       | Attach an image file into the model's next turn (the only tool whose result becomes an actual image message, not just text) — this is how the agent can actually *see* screenshots it captured or images `fetch_webpage_images` downloaded. |
 
 Every failed call gets a concrete `AUTO-RECTIFY:` instruction naming the exact tool/argument to change, and after 3 identical failures JFI tells the model to abandon that approach rather than loop — the difference between "retry forever" and "fix or move on."
 

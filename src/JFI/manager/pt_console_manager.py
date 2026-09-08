@@ -56,7 +56,15 @@ UI_STYLE_BASE: Dict[str, str] = {
     "prompt": "bold ansigreen",
     "out.user": "bold ansicyan",
     "out.assistant": "ansigreen",
-    "out.assistant.tag": "bold ansigreen",
+    # Explicit bright variant, not just "bold ansigreen": bold alone only
+    # widens the glyph weight here, it doesn't imply a brighter color the way
+    # it does for the legacy 16-color VGA convention some terminals apply —
+    # and once a THEME preset overrides these with literal 24-bit hex (see
+    # PT_THEME_PRESETS below), there is no automatic brightening at all, so
+    # the tag and the body text render in the identical color. Naming the
+    # bright ANSI variant directly keeps the tag visually distinct from the
+    # message body regardless of the terminal's own bold-rendering behavior.
+    "out.assistant.tag": "bold ansibrightgreen",
     "out.system": "ansibrightblack",
     "out.tool": "ansiyellow",
     "out.result": "ansibrightblack",
@@ -64,44 +72,173 @@ UI_STYLE_BASE: Dict[str, str] = {
     "out.rule": "bold ansibrightblack",
 }
 
+<<<<<<< Updated upstream
 # Per-preset overrides for the three message-role colors, keyed the same as
 # README's THEME table. Colors here are literal hex so they render the same
 # regardless of the user's terminal ANSI palette (unlike the ansi* names in
 # UI_STYLE_BASE, which deliberately inherit it). "dark-default" overrides
 # nothing: it *is* the ansi*-based baseline above, so a THEME-less run and
 # THEME=dark-default look identical.
+=======
+# Per-preset overrides for the message-role colors, plus the terminal
+# background/default-foreground fill (the "" key — matched by every style
+# lookup, see Style.get_attrs_for_style_str), keyed the same as README's
+# THEME table. Colors here are literal hex so they render the same regardless
+# of the user's terminal ANSI palette or its own background (unlike the
+# ansi* names in UI_STYLE_BASE, which deliberately inherit the terminal).
+# "dark-default" overrides nothing, including "": it *is* the ansi*-based
+# baseline above, so a THEME-less run and THEME=dark-default look identical
+# and keep the terminal's own background — every other preset paints over it.
+#
+# out.assistant.tag ("🤖 Assistant") is deliberately given its own accent hue
+# per preset, distinct from out.assistant (the message body) — not merely a
+# "bold" of the same color. A literal 24-bit color does not get automatically
+# brightened by bold the way a named ANSI color can on some terminals (see
+# UI_STYLE_BASE above), so reusing the body color for the tag made the two
+# render identically, defeating the point of a role label.
+>>>>>>> Stashed changes
 PT_THEME_PRESETS: Dict[str, Dict[str, str]] = {
     "dark-default": {},
     "dark-ocean": {
         "out.user": "bold #5fafff",
         "out.assistant": "#00afaf",
-        "out.assistant.tag": "bold #00afaf",
+        "out.assistant.tag": "bold #e0af68",
         "out.system": "#5f5fbe",
     },
     "dark-mono": {
         "out.user": "bold #ffffff",
-        "out.assistant": "#d0d0d0",
-        "out.assistant.tag": "bold #d0d0d0",
+        "out.assistant": "#a0a0a0",
+        "out.assistant.tag": "bold #f5f5f5",
         "out.system": "#808080",
     },
     "light-default": {
         "out.user": "bold #0000ff",
         "out.assistant": "bold #006400",
-        "out.assistant.tag": "bold #006400",
+        "out.assistant.tag": "bold #4b0082",
         "out.system": "#444444",
     },
     "light-sunrise": {
         "out.user": "bold #af00af",
         "out.assistant": "#870000",
-        "out.assistant.tag": "bold #870000",
+        "out.assistant.tag": "bold #006064",
         "out.system": "#87875f",
     },
     "light-paper": {
         "out.user": "#00005f",
         "out.assistant": "#5f8767",
-        "out.assistant.tag": "bold #5f8767",
+        "out.assistant.tag": "bold #a0522d",
         "out.system": "#808080",
     },
+<<<<<<< Updated upstream
+=======
+    # Catppuccin (https://github.com/catppuccin/catppuccin) — its four
+    # official flavors, mapped onto the same four message-role keys using
+    # each flavor's own blue/green/overlay1 accents from the published
+    # palette. The tag uses each flavor's own "mauve" — a fifth official
+    # accent, distinct from the blue/green already used for user/assistant.
+    "catppuccin-mocha": {
+        "": "bg:#1e1e2e fg:#cdd6f4",
+        "out.user": "bold #89b4fa",
+        "out.assistant": "#a6e3a1",
+        "out.assistant.tag": "bold #cba6f7",
+        "out.system": "#9399b2",
+    },
+    "catppuccin-macchiato": {
+        "": "bg:#24273a fg:#cad3f5",
+        "out.user": "bold #8aadf4",
+        "out.assistant": "#a6da95",
+        "out.assistant.tag": "bold #c6a0f6",
+        "out.system": "#8087a2",
+    },
+    "catppuccin-frappe": {
+        "": "bg:#303446 fg:#c6d0f5",
+        "out.user": "bold #8caaee",
+        "out.assistant": "#a6d189",
+        "out.assistant.tag": "bold #ca9ee6",
+        "out.system": "#838ba7",
+    },
+    "catppuccin-latte": {
+        "": "bg:#eff1f5 fg:#4c4f69",
+        "out.user": "bold #1e66f5",
+        "out.assistant": "#40a02b",
+        "out.assistant.tag": "bold #8839ef",
+        "out.system": "#8c8fa1",
+    },
+    # Ten more presets, each borrowed from a well-known, widely-used editor/
+    # terminal color scheme so THEME has real variety beyond the originals
+    # above — same four-key shape (background+foreground, user, assistant
+    # body, assistant tag) mapped onto each scheme's own published palette.
+    "tokyo-night": {
+        "": "bg:#1a1b26 fg:#c0caf5",
+        "out.user": "bold #7aa2f7",
+        "out.assistant": "#9ece6a",
+        "out.assistant.tag": "bold #bb9af7",
+        "out.system": "#565f89",
+    },
+    "dracula": {
+        "": "bg:#282a36 fg:#f8f8f2",
+        "out.user": "bold #8be9fd",
+        "out.assistant": "#50fa7b",
+        "out.assistant.tag": "bold #ff79c6",
+        "out.system": "#6272a4",
+    },
+    "nord": {
+        "": "bg:#2e3440 fg:#d8dee9",
+        "out.user": "bold #81a1c1",
+        "out.assistant": "#a3be8c",
+        "out.assistant.tag": "bold #b48ead",
+        "out.system": "#4c566a",
+    },
+    "gruvbox-dark": {
+        "": "bg:#282828 fg:#ebdbb2",
+        "out.user": "bold #83a598",
+        "out.assistant": "#b8bb26",
+        "out.assistant.tag": "bold #d3869b",
+        "out.system": "#928374",
+    },
+    "solarized-dark": {
+        "": "bg:#002b36 fg:#839496",
+        "out.user": "bold #268bd2",
+        "out.assistant": "#859900",
+        "out.assistant.tag": "bold #d33682",
+        "out.system": "#586e75",
+    },
+    "solarized-light": {
+        "": "bg:#fdf6e3 fg:#657b83",
+        "out.user": "bold #268bd2",
+        "out.assistant": "#859900",
+        "out.assistant.tag": "bold #6c71c4",
+        "out.system": "#93a1a1",
+    },
+    "rose-pine": {
+        "": "bg:#191724 fg:#e0def4",
+        "out.user": "bold #9ccfd8",
+        "out.assistant": "#31748f",
+        "out.assistant.tag": "bold #c4a7e7",
+        "out.system": "#6e6a86",
+    },
+    "rose-pine-dawn": {
+        "": "bg:#faf4ed fg:#575279",
+        "out.user": "bold #286983",
+        "out.assistant": "#56949f",
+        "out.assistant.tag": "bold #907aa9",
+        "out.system": "#9893a5",
+    },
+    "one-dark": {
+        "": "bg:#282c34 fg:#abb2bf",
+        "out.user": "bold #61afef",
+        "out.assistant": "#98c379",
+        "out.assistant.tag": "bold #c678dd",
+        "out.system": "#5c6370",
+    },
+    "everforest-dark": {
+        "": "bg:#2d353b fg:#d3c6aa",
+        "out.user": "bold #7fbbb3",
+        "out.assistant": "#a7c080",
+        "out.assistant.tag": "bold #d699b6",
+        "out.system": "#859289",
+    },
+>>>>>>> Stashed changes
 }
 
 
@@ -171,7 +308,21 @@ class PromptToolkitConsoleManager(AbstractManager):
 
         # An explicit THEME env preset wins; otherwise auto-detect the terminal.
         overrides, self.theme_source = resolve_pt_theme()
-        self._style = Style.from_dict({**UI_STYLE_BASE, **overrides})
+        try:
+            self._style = Style.from_dict({**UI_STYLE_BASE, **overrides})
+        except Exception as exc:
+            # Reachable only via an inline custom-theme THEME: its shape is
+            # valid JSON (see theme_env.parse_custom_theme) but one of its
+            # values isn't a valid prompt_toolkit style string (e.g. a
+            # nonsense color). Presets themselves are static and covered by
+            # tests, so this can't happen for a named THEME. Same
+            # never-crash-startup guarantee as an unknown preset name.
+            print(
+                f"[system] THEME set an invalid style ({exc}) — falling back to the "
+                f"default look."
+            )
+            self.theme_source = "invalid (using default)"
+            self._style = Style.from_dict(UI_STYLE_BASE)
 
         # --- output state (guarded, read during render) -------------------
         self._lock = threading.RLock()
