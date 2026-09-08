@@ -117,6 +117,13 @@ TOOL_RESULT_TAIL = 400
 PLAN_FORMAT_RULES = """
     PLAN FILE FORMAT (mandatory, no exceptions):
     - The plan file is exactly: {plan_path}
+    - {plan_path}'s own directory is internal bookkeeping ONLY (the plan
+      itself and its supporting files) — never create your actual
+      deliverables (source files, tests, docs) inside it just because the
+      plan happens to live there. Deliverables belong in the normal project
+      layout at the working directory root: e.g. calculator.py and
+      tests/test_calculator.py side by side at the top level, a README.md
+      at the top level — NOT nested inside {plan_path}'s own folder.
     - The plan is a TREE, not a flat list. Every task must be broken down into
       the smallest possible pieces: a task becomes subtasks, and any subtask
       that is still not a single, small, directly-doable action becomes
