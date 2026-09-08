@@ -1205,6 +1205,12 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._invalidate()
         self._apply_title()
 
+    def record_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+        with self._lock:
+            self._tokens_read += prompt_tokens
+            self._tokens_written += completion_tokens
+        self._invalidate()
+
     def start_iteration(self, number: int, phases: Optional[List[str]] = None) -> None:
         """
         Rewinds the phase breadcrumb for a fresh pass through the pipeline, so

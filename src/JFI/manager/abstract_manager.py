@@ -207,6 +207,18 @@ class AbstractManager(ABC):
     def mark_phase_done(self, phase: str) -> None:
         pass
 
+    def record_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+        """
+        Adds to the header's cumulative read/written token counters for
+        usage that didn't go through print_agent_response — e.g. ask_llm's
+        own side call, which is a real request against the same server/
+        budget but isn't a turn in the phase's own conversation. Without
+        this, the header's ↓/↑ totals would silently undercount actual
+        usage for anyone leaning on ask_llm. No-op default for managers
+        with no such display.
+        """
+        pass
+
     def start_iteration(self, number: int, phases: Optional[List[str]] = None) -> None:
         """Called at the top of every pipeline pass so the UI can reset progress."""
         pass

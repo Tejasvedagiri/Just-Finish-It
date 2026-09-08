@@ -46,6 +46,28 @@ class _RaisingLLM:
         raise RuntimeError("connection reset")
 
 
+class _UsageChunk:
+    """A trailer chunk carrying real usage — matches the real
+    stream_options.include_usage server behavior print_agent_response
+    already handles."""
+    choices = []
+
+    def __init__(self, prompt_tokens, completion_tokens):
+        class _Usage:
+            pass
+        self.usage = _Usage()
+        self.usage.prompt_tokens = prompt_tokens
+        self.usage.completion_tokens = completion_tokens
+
+
+class _RecordingConsole:
+    def __init__(self):
+        self.calls = []
+
+    def record_token_usage(self, prompt_tokens=0, completion_tokens=0):
+        self.calls.append((prompt_tokens, completion_tokens))
+
+
 def test_concatenates_streamed_content():
     llm = _ScriptedLLM([_Chunk("Hel"), _Chunk("lo"), _Chunk(None)])
     assert ask_llm("Say hi", llm) == "Hello"
@@ -98,3 +120,46 @@ def test_make_ask_llm_binds_the_given_llm():
     bound = make_ask_llm(llm)
     assert bound("hello") == "bound reply"
     assert len(llm.calls) == 1
+
+
+def test_records_estimated_token_usage_when_the_server_reports_none():
+    """Most OpenAI-compatible servers omit real usage in streaming mode --
+    ask_llm's cost must still show up in the header's ↓/↑ totals via the
+    same char/4 estimate print_agent_response falls back to."""
+    console = _RecordingConsole()
+    ask_llm("Say hi", _ScriptedLLM([_Chunk("Hello")]), console)
+
+    assert len(console.calls) == 1
+    prompt_tokens, completion_tokens = console.calls[0]
+    assert prompt_tokens == (len("Say hi") + 8) // 4
+    assert completion_tokens == (len("Hello") + 8) // 4
+
+
+def test_records_real_usage_when_the_server_reports_it():
+    console = _RecordingConsole()
+    ask_llm("Say hi", _ScriptedLLM([_Chunk("Hello"), _UsageChunk(42, 7)]), console)
+    assert console.calls == [(42, 7)]
+
+
+def test_no_console_means_no_token_recording_and_no_crash():
+    result = ask_llm("Say hi", _ScriptedLLM([_Chunk("Hello")]))  # console defaults to None
+    assert result == "Hello"
+
+
+def test_empty_prompt_never_records_token_usage():
+    console = _RecordingConsole()
+    ask_llm("", _ScriptedLLM([_Chunk("unused")]), console)
+    assert console.calls == []
+
+
+def test_llm_exception_never_records_token_usage():
+    console = _RecordingConsole()
+    ask_llm("hello", _RaisingLLM(), console)
+    assert console.calls == []
+
+
+def test_make_ask_llm_binds_console_too():
+    console = _RecordingConsole()
+    bound = make_ask_llm(_ScriptedLLM([_Chunk("Hello")]), console)
+    bound("Say hi")
+    assert len(console.calls) == 1

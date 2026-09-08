@@ -513,7 +513,7 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
     # ask_llm delegates to whatever model this phase itself is using — a
     # phase with its own .env override (PLANNER_MODEL, etc.) gets an ask_llm
     # backed by that same model, not always the shared default.
-    TOOL_MAP["ask_llm"] = make_ask_llm(llm)
+    TOOL_MAP["ask_llm"] = make_ask_llm(llm, console)
     console.set_status(phase=phase, state="thinking", plan=ssm.plan_progress(),
                        phase_plan=ssm.phase_progress(phase), tokens=ssm.token_usage(),
                        task=ssm.current_task_title(phase) or "")
