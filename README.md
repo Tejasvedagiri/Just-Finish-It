@@ -74,6 +74,10 @@ Every one of `OPENAI_URL` / `OPENAI_API_KEY` / `MODEL` / `TEMPERATURE` can also 
 
 Rerun with the **same session name**: JFI detects `JFI/readme/<session>/history.json`, skips every phase that already completed, and continues from the first unfinished one — including mid-phase, since the plan file's checkboxes are re-read rather than assumed to match the old transcript.
 
+### When an LLM request fails
+
+A transient failure (a dropped connection, a 5xx from the server) is retried automatically a few times with a short delay. If those retries run out — or the failure wasn't the transient kind to begin with (a bad request, an auth error, ...) — JFI does **not** end the run on its own. It asks: **Retry now**, or **Stop (progress is saved)**. Pick Retry as many times as you need (fix the server, swap `.env` values, whatever it takes) and the same turn just tries again; only an explicit Stop — from that menu or Ctrl+C — actually ends the run.
+
 ---
 
 ## Running locally on GPU

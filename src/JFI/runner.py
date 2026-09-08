@@ -556,9 +556,25 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
                     )
                     _interruptible_sleep(console, LLM_RETRY_DELAY_SECONDS)
                     continue
+
+                # Automatic retries are exhausted (or this wasn't a retryable
+                # error at all, e.g. a bad request) -- don't give up and end
+                # the run on the model's/network's say-so. The run only
+                # actually stops now if the user asks it to, either from
+                # this menu or with Ctrl+C; anything else just retries for
+                # as long as it takes.
                 console.display_error(f"LLM request failed: {_format_llm_error(e)}")
-                console.display_system("Progress is saved — rerun with the same session name to resume.")
-                return False
+                if console.should_stop():
+                    return False
+                choice = console.get_user_choice(
+                    "LLM request failed. Retry, or stop the run?",
+                    [("r", "Retry now"), ("s", "Stop (progress is saved)")],
+                )
+                if choice == "s" or console.should_stop():
+                    console.request_stop()
+                    return False
+                attempt = 0  # a deliberate manual retry earns a fresh automatic-retry budget
+                continue
 
         content = parsed_response.get("content")
         tool_calls = parsed_response.get("tool_calls")
