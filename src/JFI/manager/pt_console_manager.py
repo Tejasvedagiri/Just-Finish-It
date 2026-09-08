@@ -22,7 +22,7 @@ from prompt_toolkit.layout.dimension import Dimension as D
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.styles import Style
 
-from JFI.manager.abstract_manager import AbstractManager, phase_display_name
+from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.manager.key_bindings import add_shift_enter_newline, teach_terminal_shift_enter
 from JFI.manager.theme_env import resolve_explicit_theme, theme_label
 
@@ -268,6 +268,12 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # Typing "!something" jumps the queue; a bare "!" promotes the whole queue.
 FORCE_PREFIX = "!"
+
+# Overridable via STREAM_OUTPUT_CAP in .env — print_agent_response aborts a
+# single streamed response (raising ResponseTooLongError) once its running
+# char/4 estimate crosses this, so a runaway/looping generation can't stream
+# forever burning tokens and context.
+DEFAULT_STREAM_OUTPUT_CAP = 10000
 
 
 class PromptToolkitConsoleManager(AbstractManager):
@@ -962,10 +968,19 @@ class PromptToolkitConsoleManager(AbstractManager):
         ``usage`` (most OpenAI-compatible servers omit it in streaming mode
         unless ``stream_options.include_usage`` was requested, which isn't
         universally supported, so we don't require it).
+
+        Raises :class:`ResponseTooLongError` if the running char/4 estimate
+        of what's streamed so far crosses ``STREAM_OUTPUT_CAP`` (default
+        :data:`DEFAULT_STREAM_OUTPUT_CAP`) — a runaway/looping generation is
+        abandoned mid-stream rather than allowed to grow without bound;
+        runner._is_retryable_llm_error folds this into the normal
+        retry-then-ask flow, so the phase just tries the turn again.
         """
         full_text = ""
         tool_calls_dict: Dict[int, Dict[str, Any]] = {}
         usage_seen = False
+        streamed_chars = 0
+        cap = self._stream_output_cap()
 
         self.set_status(state="streaming")
         self._line("class:out.assistant.tag", "🤖 Assistant")
@@ -990,6 +1005,7 @@ class PromptToolkitConsoleManager(AbstractManager):
 
             if delta.content is not None:
                 full_text += delta.content
+                streamed_chars += len(delta.content)
                 self._write("class:out.assistant", delta.content)
 
             if getattr(delta, "tool_calls", None):
@@ -1010,6 +1026,18 @@ class PromptToolkitConsoleManager(AbstractManager):
 
                     if tc.function and getattr(tc.function, "arguments", None):
                         tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
+                        streamed_chars += len(tc.function.arguments)
+
+            if streamed_chars // 4 > cap:
+                self._line(
+                    "class:out.error",
+                    f" ⚠  Response exceeded STREAM_OUTPUT_CAP ({cap} tokens) — aborting this turn.",
+                )
+                self.set_status(state="thinking")
+                raise ResponseTooLongError(
+                    f"Response exceeded STREAM_OUTPUT_CAP ({cap}) — generated "
+                    f"~{streamed_chars // 4} tokens and counting."
+                )
 
         if not usage_seen:
             written_chars = len(full_text)
@@ -1268,6 +1296,16 @@ class PromptToolkitConsoleManager(AbstractManager):
             app.loop.call_soon_threadsafe(lambda: app.exit() if app.is_running else None)
         except Exception:
             pass
+
+    @staticmethod
+    def _stream_output_cap() -> int:
+        """STREAM_OUTPUT_CAP from .env, falling back to
+        DEFAULT_STREAM_OUTPUT_CAP for an unset or non-numeric value — never
+        crashes a turn over a typo'd override."""
+        try:
+            return int(os.environ.get("STREAM_OUTPUT_CAP", DEFAULT_STREAM_OUTPUT_CAP))
+        except ValueError:
+            return DEFAULT_STREAM_OUTPUT_CAP
 
     @staticmethod
     def _resolve_color_depth() -> ColorDepth:

@@ -11,7 +11,7 @@ from openai import APIConnectionError, APIStatusError
 
 # LLM and Console Management
 from JFI.llm.openai_compatable_stream import OpenAICompatableStream
-from JFI.manager.abstract_manager import AbstractManager, phase_display_name
+from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
 
 # Session Management
@@ -79,12 +79,15 @@ LLM_RETRY_DELAY_SECONDS = 3.0
 def _is_retryable_llm_error(e: Exception) -> bool:
     """
     Worth retrying: a network-level failure (server down/restarting, a
-    dropped connection) or a 5xx-class server error — both are typically
-    transient on a local LLM server. NOT a 4xx client error: retrying an
-    identical request the server already rejected (bad request, auth,
-    context-length) won't produce a different result.
+    dropped connection), a 5xx-class server error — both are typically
+    transient on a local LLM server — or a response that blew past
+    STREAM_OUTPUT_CAP (see ResponseTooLongError): the model was still
+    going, not finished, so re-sending the identical turn is worth another
+    shot. NOT a 4xx client error: retrying an identical request the server
+    already rejected (bad request, auth, context-length) won't produce a
+    different result.
     """
-    if isinstance(e, APIConnectionError):
+    if isinstance(e, (APIConnectionError, ResponseTooLongError)):
         return True
     if isinstance(e, APIStatusError):
         return e.status_code >= 500

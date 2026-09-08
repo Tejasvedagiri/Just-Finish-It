@@ -21,6 +21,22 @@ def phase_display_name(phase: str) -> str:
     return PHASE_DISPLAY_NAMES.get(phase, phase.title() if phase else phase)
 
 
+class ResponseTooLongError(Exception):
+    """
+    Raised by a manager's print_agent_response when one streamed response
+    grows past STREAM_OUTPUT_CAP tokens (see
+    PromptToolkitConsoleManager._stream_output_cap).
+
+    A response this long is treated as a runaway generation, not a large-
+    but-valid one: the stream is abandoned mid-way (so a huge, possibly
+    still-truncated tool call never reaches history) and
+    runner._is_retryable_llm_error folds this into the same retry-then-ask
+    path as a dropped connection, so the phase just tries the turn again
+    instead of the run ending on its own.
+    """
+    pass
+
+
 class AbstractManager(ABC):
     """
     Abstract interface for handling chat UI outputs.

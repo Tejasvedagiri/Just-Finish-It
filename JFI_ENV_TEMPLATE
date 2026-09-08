@@ -29,6 +29,11 @@ MODEL=qwen3:8b
 # history. Defaults to 0.7 if unset.
 # CONTEXT_COMPRESSION_RATIO=0.7
 
+# Max tokens (estimated) for a single streamed response before it's
+# abandoned as a runaway generation and retried as a fresh turn. Defaults
+# to 10000 if unset.
+# STREAM_OUTPUT_CAP=10000
+
 # Live-console color preset. Leave unset (or "auto") to detect your terminal's
 # background automatically. See README.md -> "Themes" for the full list (20
 # presets) or how to supply your own colors as inline JSON.
