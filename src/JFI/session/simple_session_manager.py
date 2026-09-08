@@ -9,6 +9,29 @@ from typing import Optional
 
 from JFI.manager.abstract_manager import AbstractManager
 
+# flock is Unix-only (Linux/macOS) — the ./JFI launcher is already a POSIX
+# shell script, so this project has never targeted Windows directly.
+# Session locking degrades to a no-op there rather than failing to import.
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+
+class SessionInUseError(Exception):
+    """Raised when another process already holds this session's lock (see
+    SimpleSessionManager._acquire_session_lock) — two processes racing on
+    the same session's history.jsonl.gz/plan.md/context.json could
+    otherwise corrupt them."""
+    pass
+
+
+# Per-process registry of held session locks: {resolved lock path: [refcount,
+# file_handle]} — see SimpleSessionManager._acquire_session_lock for why a
+# second SimpleSessionManager for the same session_id within this same
+# process must not trip the cross-process guard.
+_SESSION_LOCKS: dict = {}
+
 # --- append-only history persistence ----------------------------------------
 # history.pkl used to be rewritten *in full* on every single message, so a
 # long session's every turn cost an O(total history) disk write — on a
@@ -499,6 +522,8 @@ class SimpleSessionManager:
         # Path logic handled entirely inside the manager
         os_session_path = os.environ.get("SESSION_PATH", ".")
         self.session_path = Path(os_session_path) / "JFI" / self.session_id
+        self._lock_path = None
+        self._acquire_session_lock()
         self.history_path = self.session_path / "history.jsonl.gz"
         # Old full-rewrite-per-message format; read-only, for one-time migration.
         self._legacy_history_path = self.session_path / "history.pkl"
@@ -557,6 +582,81 @@ class SimpleSessionManager:
         return (self.session_path / "plan.md").resolve()
 
     # -------------------------------------------------------- context cache
+
+    def _acquire_session_lock(self) -> None:
+        """
+        Exclusive OS-level lock (flock) on this session's own folder —
+        refuses to run the same session_id twice at once, which would
+        otherwise let two processes race on history.jsonl.gz/plan.md/
+        context.json and corrupt them.
+
+        Released automatically when this process exits or the underlying
+        file handle is closed (see release_session_lock), even on a crash
+        — flock is held by the OS against the open file description, not a
+        stale PID file that would need its own cleanup/staleness logic. A
+        no-op wherever fcntl isn't available (Windows).
+
+        flock's exclusivity is scoped to the open file description, not the
+        process: two independent open()s of the same path *in this same
+        process* would otherwise block each other exactly like a genuinely
+        different process would — which a second SimpleSessionManager for
+        the same session_id, constructed within this process, legitimately
+        does (a Ctrl+N handoff overlapping briefly, or simply building a
+        fresh manager to inspect a session already open elsewhere in the
+        same run). _SESSION_LOCKS refcounts by resolved lock path so only a
+        genuinely different process ever gets refused.
+        """
+        if fcntl is None:
+            return
+        self.session_path.mkdir(parents=True, exist_ok=True)
+        lock_path = str((self.session_path / ".lock").resolve())
+
+        entry = _SESSION_LOCKS.get(lock_path)
+        if entry is not None:
+            entry[0] += 1
+            self._lock_path = lock_path
+            return
+
+        lock_file = open(lock_path, "w")
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock_file.close()
+            raise SessionInUseError(
+                f"Session '{self.session_id}' is already running in another JFI process "
+                f"(lock held on {lock_path}). Stop that run first, or pick a different "
+                f"session name."
+            )
+        _SESSION_LOCKS[lock_path] = [1, lock_file]
+        self._lock_path = lock_path
+
+    def release_session_lock(self) -> None:
+        """Releases this session's claim on its lock, if held — call once
+        this SimpleSessionManager is done being used (see
+        runner._run_session), so a later SimpleSessionManager (this
+        process or another) can acquire it. The underlying OS lock is only
+        actually released once every claim on it in this process has been
+        released (see _acquire_session_lock)."""
+        lock_path, self._lock_path = getattr(self, "_lock_path", None), None
+        if lock_path is None:
+            return
+        entry = _SESSION_LOCKS.get(lock_path)
+        if entry is None:
+            return
+        entry[0] -= 1
+        if entry[0] > 0:
+            return
+        del _SESSION_LOCKS[lock_path]
+        _, lock_file = entry
+        try:
+            if fcntl is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            lock_file.close()
+        except OSError:
+            pass
 
     @property
     def context_cache_file(self) -> Path:

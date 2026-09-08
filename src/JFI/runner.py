@@ -16,7 +16,7 @@ from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
 
 # Session Management
 from JFI.session.simple_session_manager import (
-    DEFAULT_CONTEXT_CACHE_PATH, SimpleSessionManager, get_phase_trigger, phase_completed,
+    DEFAULT_CONTEXT_CACHE_PATH, SessionInUseError, SimpleSessionManager, get_phase_trigger, phase_completed,
 )
 
 # Tools and Schemas
@@ -660,91 +660,104 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
     asked to start a new session (Ctrl+N while idle) — run_pipeline tells
     the two apart via console.should_restart() and loops accordingly.
     """
-    # 1. Gather Session Name
-    session_name = console.safe_get_user_input("Please enter a session name to begin:", multiline=False)
-    if not session_name or console.should_stop():
-        return
+    # 1. Gather Session Name — retrying if it's already locked by another
+    # running JFI process (SessionInUseError) instead of racing on the same
+    # history/plan/context files or crashing the whole app.
+    ssm = None
+    while ssm is None:
+        session_name = console.safe_get_user_input("Please enter a session name to begin:", multiline=False)
+        if not session_name or console.should_stop():
+            return
+        try:
+            ssm = SimpleSessionManager(console, session_name)
+        except SessionInUseError as e:
+            console.display_error(str(e))
     console.set_status(session=session_name)
 
-    # 2. Initialize Session Manager once
-    ssm = SimpleSessionManager(console, session_name)
-    # Gate execute_command behind the human's approval, backed by this
-    # session's own context.json (approved "Save" prefixes live there,
-    # alongside whatever facts the LLM itself has stashed there).
-    TOOL_MAP["execute_command"] = make_gated_execute_command(console, ssm.context_cache_path)
-    TOOL_MAP.update(make_context_tools(ssm.context_cache_path))
-    console.start_session_log(ssm.session_path / "run.log")
-    # Requests queued but never drained before the process closed (killed,
-    # crashed, or just quit) live in metadata.json — hand them back now, and
-    # persist the queue from here on so this doesn't happen again.
-    console.set_queue_store(ssm.load_queued_requests(), ssm.save_queued_requests)
+    try:
+        # 2. Gate execute_command behind the human's approval, backed by this
+        # session's own context.json (approved "Save" prefixes live there,
+        # alongside whatever facts the LLM itself has stashed there).
+        TOOL_MAP["execute_command"] = make_gated_execute_command(console, ssm.context_cache_path)
+        TOOL_MAP.update(make_context_tools(ssm.context_cache_path))
+        console.start_session_log(ssm.session_path / "run.log")
+        # Requests queued but never drained before the process closed (killed,
+        # crashed, or just quit) live in metadata.json — hand them back now, and
+        # persist the queue from here on so this doesn't happen again.
+        console.set_queue_store(ssm.load_queued_requests(), ssm.save_queued_requests)
 
-    if ssm.is_resuming:
-        console.display_system(f"📁 Resuming existing session '{session_name}'...")
-        initial_goal = "(Resuming previous session goal from history)"
-    else:
-        initial_goal = console.safe_get_user_input("What is your goal? (Be as detailed as possible):", multiline=True)
-        if not initial_goal or console.should_stop():
-            return
-
-    # 3. Resumed sessions pick up at the first phase that never completed
-    iteration = 1
-    console.start_iteration(iteration, PHASES)
-    console.set_status(plan=ssm.plan_progress(), tokens=ssm.token_usage())
-    active_phases = ssm.get_remaining_phases(PHASES)
-    skipped = [p for p in PHASES if p not in active_phases]
-    for phase in skipped:
-        console.mark_phase_done(phase)
-    if ssm.is_resuming and skipped:
-        console.display_system(f"⏩ Skipping completed phases: {', '.join(skipped).upper()}")
-
-    # 4. Outer Loop for Re-runs and Feedback
-    review_feedback: Optional[str] = None  # set when a failed review re-iteration starts
-    review_failures = 0                    # counts consecutive failed reviews (loop guard)
-    while not console.should_stop():
-        if not active_phases:
-            console.display_system("All phases have already been completed for this session.")
-
-        for phase in active_phases:
-            trigger_message = get_phase_trigger(phase, initial_goal, ssm.plan_path, iteration,
-                                                review_path=review_feedback)
-
-            # Avoid inserting duplicate trigger if already present in history
-            last_user_msg = next((m.get("content", "") for m in reversed(ssm.history) if m.get("role") == "user"), "")
-            if trigger_message not in last_user_msg:
-                ssm.add_message("user", trigger_message)
-
-            if not run_phase(console, llms, ssm, phase):
+        if ssm.is_resuming:
+            console.display_system(f"📁 Resuming existing session '{session_name}'...")
+            initial_goal = "(Resuming previous session goal from history)"
+        else:
+            initial_goal = console.safe_get_user_input("What is your goal? (Be as detailed as possible):", multiline=True)
+            if not initial_goal or console.should_stop():
                 return
 
-        # 5. Review has landed: a generated review.md (failed review) or queued
-        # requests loop us round again, no prompt.
-        feedback, review_feedback = collect_next_iteration(console, review_path=str(Path(ssm.plan_path).with_name("review.md")))
-        if feedback is None:
-            break
+        # 3. Resumed sessions pick up at the first phase that never completed
+        iteration = 1
+        console.start_iteration(iteration, PHASES)
+        console.set_status(plan=ssm.plan_progress(), tokens=ssm.token_usage())
+        active_phases = ssm.get_remaining_phases(PHASES)
+        skipped = [p for p in PHASES if p not in active_phases]
+        for phase in skipped:
+            console.mark_phase_done(phase)
+        if ssm.is_resuming and skipped:
+            console.display_system(f"⏩ Skipping completed phases: {', '.join(skipped).upper()}")
 
-        if review_feedback is not None:
-            review_failures += 1
-            console.display_rule(f"🔎 REVIEW FAIL #{review_failures}/{MAX_REVIEW_ITERATIONS} THIS SESSION")
-            if review_failures >= MAX_REVIEW_ITERATIONS:
-                console.display_rule(
-                    f"⛔ REVIEW LOOP CAP REACHED ({MAX_REVIEW_ITERATIONS} failed reviews) — "
-                    f"ending the run so a failing cycle is visible here instead of looping forever. "
-                    f"Queue another request to keep going."
-                )
+        # 4. Outer Loop for Re-runs and Feedback
+        review_feedback: Optional[str] = None  # set when a failed review re-iteration starts
+        review_failures = 0                    # counts consecutive failed reviews (loop guard)
+        while not console.should_stop():
+            if not active_phases:
+                console.display_system("All phases have already been completed for this session.")
+
+            for phase in active_phases:
+                trigger_message = get_phase_trigger(phase, initial_goal, ssm.plan_path, iteration,
+                                                    review_path=review_feedback)
+
+                # Avoid inserting duplicate trigger if already present in history
+                last_user_msg = next((m.get("content", "") for m in reversed(ssm.history) if m.get("role") == "user"), "")
+                if trigger_message not in last_user_msg:
+                    ssm.add_message("user", trigger_message)
+
+                if not run_phase(console, llms, ssm, phase):
+                    return
+
+            # 5. Review has landed: a generated review.md (failed review) or queued
+            # requests loop us round again, no prompt.
+            feedback, review_feedback = collect_next_iteration(console, review_path=str(Path(ssm.plan_path).with_name("review.md")))
+            if feedback is None:
                 break
 
-        ssm.add_message(
-            "user",
-            f"USER FEEDBACK FOR ITERATION:\n{feedback}\n\n"
-            f"{ssm.get_project_state_summary()}\n\n"
-            f"The plan file is {ssm.plan_path}. Keep its completed '- [x]' items, add new "
-            f"'- [ ]' items for this request, then implement and test them."
-        )
-        # Fresh pass: the header rewinds to planner and counts the loop.
-        iteration += 1
-        active_phases = PHASES
-        console.start_iteration(iteration, PHASES)
+            if review_feedback is not None:
+                review_failures += 1
+                console.display_rule(f"🔎 REVIEW FAIL #{review_failures}/{MAX_REVIEW_ITERATIONS} THIS SESSION")
+                if review_failures >= MAX_REVIEW_ITERATIONS:
+                    console.display_rule(
+                        f"⛔ REVIEW LOOP CAP REACHED ({MAX_REVIEW_ITERATIONS} failed reviews) — "
+                        f"ending the run so a failing cycle is visible here instead of looping forever. "
+                        f"Queue another request to keep going."
+                    )
+                    break
+
+            ssm.add_message(
+                "user",
+                f"USER FEEDBACK FOR ITERATION:\n{feedback}\n\n"
+                f"{ssm.get_project_state_summary()}\n\n"
+                f"The plan file is {ssm.plan_path}. Keep its completed '- [x]' items, add new "
+                f"'- [ ]' items for this request, then implement and test them."
+            )
+            # Fresh pass: the header rewinds to planner and counts the loop.
+            iteration += 1
+            active_phases = PHASES
+            console.start_iteration(iteration, PHASES)
+    finally:
+        # Release the lock unconditionally (Ctrl+C, a run_phase failure, the
+        # review cap, natural completion, ...) so a later Ctrl+N restart —
+        # or another process entirely — can use this session_id again
+        # without waiting for this one to actually exit.
+        ssm.release_session_lock()
 
 
 def run_pipeline(console: AbstractManager, llms: Dict[str, OpenAICompatableStream]) -> None:
