@@ -617,6 +617,16 @@ class PromptToolkitConsoleManager(AbstractManager):
             return fragments
 
     @staticmethod
+    def _progress_bar(ticked: int, total: int, width: int = 8) -> str:
+        """Fixed-width `width`-character bar (█ filled, ░ empty) for a
+        ticked/total pair — kept short since the header is already dense;
+        the exact fraction is always printed right after it."""
+        if total <= 0:
+            return "░" * width
+        filled = max(0, min(width, round(width * ticked / total)))
+        return "█" * filled + "░" * (width - filled)
+
+    @staticmethod
     def _fmt_tokens(n: int) -> str:
         """Compact token count: 987, 12.3k, or 3.1M (cumulative read/written
         counters cross into the millions on a long session, and 4-digit 'k'
@@ -666,14 +676,16 @@ class PromptToolkitConsoleManager(AbstractManager):
         if phase_plan and phase_plan[1]:
             p_ticked, p_total = phase_plan
             p_style = "class:header.phase.done" if p_ticked == p_total else "class:header.loop"
+            bar = self._progress_bar(p_ticked, p_total)
             frags += [
                 ("class:header.dim", f"  ·  {phase_display_name(phase).lower()} "),
-                (p_style, f"{p_ticked}/{p_total}"),
+                (p_style, f"{bar} {p_ticked}/{p_total}"),
             ]
         if plan and plan[1]:
             ticked, total = plan
             style = "class:header.phase.done" if ticked == total else "class:header.loop"
-            frags += [("class:header.dim", "  ·  plan "), (style, f"{ticked}/{total}")]
+            bar = self._progress_bar(ticked, total)
+            frags += [("class:header.dim", "  ·  total "), (style, f"{bar} {ticked}/{total}")]
         if tokens and tokens[1]:
             used, budget = tokens
             pct = min(100, int(used * 100 / budget))
