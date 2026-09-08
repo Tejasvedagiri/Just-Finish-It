@@ -101,9 +101,12 @@ def test_clear_console_is_idempotent_and_safe_to_call_twice(monkeypatch):
 def test_main_clears_console_after_dump_transcript(monkeypatch):
     """runner.main()'s exit path must call clear_console() AFTER dump_transcript(),
     so the replayed transcript itself gets wiped on Ctrl+C / normal exit."""
+    import sys
+
     import JFI.runner as runner
     import JFI.manager.pt_console_manager as ptm
 
+    monkeypatch.setattr(sys, "argv", ["jfi"])  # main() now parses argv; don't see pytest's own
     order: list[str] = []
     monkeypatch.setattr(runner, "load_dotenv", lambda *a, **k: True)
     monkeypatch.setattr(runner, "find_dotenv", lambda *a, **k: ".env")

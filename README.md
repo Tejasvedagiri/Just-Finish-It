@@ -52,6 +52,8 @@ The launcher:
 
 Then answer two prompts: **session name** and **goal**, and let it work.
 
+`./JFI --version` (or `jfi --version` once installed) prints the installed version and exits — useful for confirming which build you're actually running (e.g. after rebuilding `dist/jfi`) without launching a real session. `./JFI --help` lists every flag.
+
 ### Configuration (`.env`)
 
 | Variable            | Purpose                                            | Example value                              |

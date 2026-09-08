@@ -1,8 +1,10 @@
+import argparse
 import inspect
 import json
 import os
 import re
 import time
+from importlib.metadata import PackageNotFoundError, version as _package_version
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -783,7 +785,32 @@ def run_pipeline(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
     console.display_rule("🎉 JUST FINISH IT — SESSION TERMINATED 🎉")
 
 
+def _version() -> str:
+    """The installed package version (pyproject.toml's [project] name is
+    "just-finish-it"), or a clear fallback for the launcher's no-install
+    path (PYTHONPATH=src python3 -m JFI.runner), which has no distribution
+    metadata to read."""
+    try:
+        return _package_version("just-finish-it")
+    except PackageNotFoundError:
+        return "unknown (not installed as a package)"
+
+
+def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="jfi",
+        description="Just Finish It -- a multi-phase, plan-driven coding agent for local LLMs.",
+    )
+    parser.add_argument("--version", action="store_true", help="Print the installed version and exit.")
+    return parser.parse_args(argv)
+
+
 def main():
+    args = _parse_args()
+    if args.version:
+        print(f"JFI {_version()}")
+        return
+
     # Load the project's .env from an explicit path (searched upward from the
     # current working directory) BEFORE any console/theme code runs, so a user
     # setting THEME=... in their .env is honored no matter how JFI was launched.

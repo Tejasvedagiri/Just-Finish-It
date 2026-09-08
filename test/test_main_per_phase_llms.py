@@ -12,9 +12,12 @@ through the real construction path.
 
 
 def test_main_builds_one_llm_stream_per_phase_honoring_overrides(monkeypatch):
+    import sys
+
     import JFI.manager.pt_console_manager as ptm
     import JFI.runner as runner
 
+    monkeypatch.setattr(sys, "argv", ["jfi"])  # main() now parses argv; don't see pytest's own
     monkeypatch.setenv("OPENAI_URL", "http://shared.example/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "shared-key")
     monkeypatch.setenv("MODEL", "shared-model")

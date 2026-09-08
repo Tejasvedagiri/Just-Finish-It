@@ -126,9 +126,12 @@ def test_main_loads_dotenv_before_console(monkeypatch):
     """`load_dotenv` must run BEFORE the console is built in `runner.main()`,
     otherwise a THEME set in .env would be resolved from an empty environment.
     A spy records the call order so any future reorder fails this test."""
+    import sys
+
     import JFI.runner as runner
     import JFI.manager.pt_console_manager as ptm
 
+    monkeypatch.setattr(sys, "argv", ["jfi"])  # main() now parses argv; don't see pytest's own
     order: list[str] = []
     monkeypatch.setattr(
         runner, "load_dotenv", lambda *a, **k: order.append("load_dotenv") or True
