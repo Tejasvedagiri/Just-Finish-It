@@ -1,5 +1,6 @@
 import inspect
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -191,6 +192,26 @@ def _repair_directive(func_name: str, args: Dict[str, Any], result: str, attempt
     )
 
 
+def _announce_context_lookup_hit(console: AbstractManager, result: str) -> None:
+    """
+    Surfaces a successful context_lookup as its own system line — "found
+    this, cost that" — separate from the raw tool-result dump, the same way
+    a history compression gets its own "Context compressed: ..." line
+    instead of being buried in the turn. Silent for the two no-content
+    cases (empty cache, no keyword match): both lack a "- key: ..." line,
+    which is what every real hit (the blank-keyword index listing included)
+    always has, so this needs no separate success/failure signal from
+    context_lookup itself.
+    """
+    keys = re.findall(r"^- (.+?):", result, re.M)
+    if not keys:
+        return
+    tokens_estimate = (len(result) + 3) // 4
+    console.display_system(
+        f"🔎  Found context → {', '.join(keys)} (loaded ~{tokens_estimate} tokens)"
+    )
+
+
 def execute_tool_call(console: AbstractManager, ssm: SimpleSessionManager,
                       tool_call: Dict[str, Any], failures: Dict[tuple, int]) -> tuple[str, Optional[str]]:
     """
@@ -271,6 +292,8 @@ def execute_tool_call(console: AbstractManager, ssm: SimpleSessionManager,
         failures.pop(signature, None)
         if func_name in ("write_file", "append_to_file", "replace_in_file"):
             ssm.track_file(args.get("file_path"))
+        elif func_name == "context_lookup":
+            _announce_context_lookup_hit(console, result)
 
     return result, image_data_url
 
