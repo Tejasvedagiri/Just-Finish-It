@@ -101,7 +101,7 @@ def build_content() -> list[Row]:
         r(("Done — the THEME env var now picks one of six presets, and I've", "out.assistant")),
         r(("captured screenshots for each. Docs are in `docs/Themes.md`.", "out.assistant")),
         r(("", None)),
-        r(("⚙  Session log opened at .JFI/readme/session-2025.log", "out.system")),
+        r(("⚙  Session log opened at JFI/readme/session-2025.log", "out.system")),
         r(("", None)),
         r(("🛠  preparing call: write_file", "out.tool")),
         r((" ⚙️ write_file  (file_path=docs/Themes.md, content=# Themes …)", "out.tool")),

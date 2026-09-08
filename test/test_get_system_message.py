@@ -1,6 +1,6 @@
 """
 Tests for session_manager.get_system_message: it must be present, expose the
-plan file location (inside the .JFI folder) to the LLM, and no longer generate
+plan file location (inside the JFI folder) to the LLM, and no longer generate
 any markdown of its own.
 
 `get_system_message` is a module-level function (phase, plan_path); the manager
@@ -20,17 +20,17 @@ class TestGetSystemMessage:
         msg = get_system_message("planner", manager.plan_path)
         assert isinstance(msg, str) and msg.strip()
         # The LLM is told where the plan lives.
-        assert "plan.md" in msg and ".JFI" in msg
+        assert "plan.md" in msg and "JFI" in msg
 
     def test_phase_system_message_threads_plan_path(self, manager):
-        """The per-phase system message must reference the resolved .JFI plan path."""
+        """The per-phase system message must reference the resolved JFI plan path."""
         manager.plan_file.write_text("# Plan\n## Implementation\n- [ ] 1.1 x\n")
         msg = manager._phase_system_message("imp")
-        assert "plan.md" in msg and ".JFI" in msg
+        assert "plan.md" in msg and "JFI" in msg
 
     def test_plan_lives_inside_jfi_folder(self, manager):
-        """The plan path must be inside the .JFI session folder."""
-        assert manager.plan_path.startswith(".JFI/")
+        """The plan path must be inside the JFI session folder."""
+        assert manager.plan_path.startswith("JFI/")
         assert manager.plan_file.name == "plan.md"
 
     def test_does_not_write_or_generate_markdown(self, manager):
@@ -93,7 +93,7 @@ class TestContextCache:
         assert manager.context_cache_file.read_text().strip() == "{}"
 
     def test_context_cache_path_lives_inside_jfi_folder(self, manager):
-        assert manager.context_cache_path.startswith(".JFI/")
+        assert manager.context_cache_path.startswith("JFI/")
         assert manager.context_cache_file.name == "context.json"
 
     def test_get_system_message_references_the_cache_path(self, manager):
@@ -114,27 +114,27 @@ class TestContextCache:
         so existing callers that only pass plan_path keep working."""
         from JFI.session.simple_session_manager import get_system_message
 
-        msg = get_system_message("imp", ".JFI/demo/plan.md")
+        msg = get_system_message("imp", "JFI/demo/plan.md")
         assert isinstance(msg, str) and "context.json" in msg
 
 
 class TestReviewerSystemMessage:
     """The reviewer phase must carry BOTH branches of the conditional review.md
     instruction: do not generate it when the work is good; generate it (via
-    write_file) into .JFI/<session>/review.md when issues exist."""
+    write_file) into JFI/<session>/review.md when issues exist."""
 
     def test_good_branch_instructs_not_to_generate_review_md(self, manager):
         from JFI.session.simple_session_manager import get_system_message
 
         msg = get_system_message("reviewer", manager.plan_path).lower()
-        assert "do not write or touch .jfi/demo/review.md" in msg
+        assert "do not write or touch jfi/demo/review.md" in msg
         assert "pass" in msg  # the short 'Review: PASS' summary branch
 
     def test_issues_branch_instructs_to_generate_review_md(self, manager):
         from JFI.session.simple_session_manager import get_system_message
 
         msg = get_system_message("reviewer", manager.plan_path).lower()
-        assert "write_file to create .jfi/demo/review.md" in msg
+        assert "write_file to create jfi/demo/review.md" in msg
         # The report must be concrete and actionable.
         assert "line(s)" in msg or "file/line" in msg
 
@@ -144,7 +144,7 @@ class TestReviewerSystemMessage:
         from JFI.session.simple_session_manager import get_system_message
 
         expected = str(Path(manager.plan_path).with_name("review.md"))
-        assert expected == ".JFI/demo/review.md"
+        assert expected == "JFI/demo/review.md"
         msg = get_system_message("reviewer", manager.plan_path)
         assert expected in msg  # the exact path, not a placeholder
 

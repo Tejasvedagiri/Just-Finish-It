@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "just-finish-it"
 version = "0.1.0"
-description = "An autonomous plan-driven coding agent: it plans, implements and tests in a local .JFI workspace."
+description = "An autonomous plan-driven coding agent: it plans, implements and tests in a local JFI workspace."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -28,7 +28,7 @@ packages = ["src/JFI", "src/build_binary"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["test"]
-norecursedirs = [".venv", ".JFI"]
+norecursedirs = [".venv", "JFI"]
 
 [dependency-groups]
 dev = [

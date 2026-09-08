@@ -38,10 +38,10 @@ def _restore_tool_map():
 
 
 def test_run_pipeline_binds_gated_execute_command_to_session_context_cache():
-    from JFI.runner import TOOL_MAP, run_pipeline
+    from JFI.runner import PHASES, TOOL_MAP, run_pipeline
 
     console = _FakeConsole(answers=["gate-session", "goal: do the thing", "n"])
-    run_pipeline(console, _FakeLLM())
+    run_pipeline(console, {phase: _FakeLLM() for phase in PHASES})
 
     gated = TOOL_MAP["execute_command"]
     assert gated is not execute_command  # replaced with the gated wrapper

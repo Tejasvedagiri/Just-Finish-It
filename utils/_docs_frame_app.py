@@ -53,7 +53,7 @@ def main() -> None:
         "captured real screenshots for each. Docs are in `docs/Themes.md`.\n",
     )
 
-    console.display_system("Session log opened at .JFI/readme/session-2025.log")
+    console.display_system("Session log opened at JFI/readme/session-2025.log")
     console.display_error("LLM stream ended without a finish reason — retrying in 5s")
 
     # The capturing script kills this process once it has read enough frames;

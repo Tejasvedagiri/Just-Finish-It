@@ -140,6 +140,15 @@ class _FakeConsole:
     def drain_forced_input(self):
         return []
 
+    def drain_skip_request(self):
+        return False
+
+    def drain_skip_all_request(self):
+        return False
+
+    def wait_while_paused(self):
+        pass
+
     def mark_phase_done(self, phase):
         pass
 
@@ -171,7 +180,7 @@ class TestRunPhaseRetry:
         console = _FakeConsole()
         llm = _ScriptedLLM([_html_500_error()])
 
-        result = run_phase(console, llm, ssm, "imp")
+        result = run_phase(console, {"imp": llm}, ssm, "imp")
 
         assert result is True
         assert llm.calls == 2  # one failure, then the retry succeeded
@@ -187,7 +196,7 @@ class TestRunPhaseRetry:
         console = _FakeConsole()
         llm = _ScriptedLLM([_html_500_error() for _ in range(LLM_RETRY_LIMIT + 1)])
 
-        result = run_phase(console, llm, ssm, "imp")
+        result = run_phase(console, {"imp": llm}, ssm, "imp")
 
         assert result is False
         assert llm.calls == LLM_RETRY_LIMIT + 1
@@ -202,7 +211,7 @@ class TestRunPhaseRetry:
         console = _FakeConsole()
         llm = _ScriptedLLM([_bad_request_error()])
 
-        result = run_phase(console, llm, ssm, "imp")
+        result = run_phase(console, {"imp": llm}, ssm, "imp")
 
         assert result is False
         assert llm.calls == 1  # never retried

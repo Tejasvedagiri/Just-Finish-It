@@ -4,7 +4,7 @@
 
 What makes it different from "just an autonomous mode" is that all of its state lives on disk:
 
-- A **persisted plan file** (`.JFI/readme/plan.md`) in strict `- [ ] N.M` / `- [x] N.M` checkbox form — the single source of truth for what's done, re-read by every phase and every restart.
+- A **persisted plan file** (`JFI/readme/plan.md`) in strict `- [ ] N.M` / `- [x] N.M` checkbox form — the single source of truth for what's done, re-read by every phase and every restart.
 - A **context cache** (a small JSON fact store) that survives turns and phases, so key decisions and discovered details don't have to be re-derived after history compression.
 - An append-only session transcript (`history.json`) plus a live `run.log`, which is what makes resuming mid-session — even mid-phase — reliable.
 
@@ -18,7 +18,7 @@ Every JFI session runs the same four phases in order:
 
 | Phase     | What it does                                                                                          |
 |-----------|--------------------------------------------------------------------------------------------------------|
-| **planner**   | Writes a step-by-step plan to `.JFI/readme/plan.md`, every item as a `- [ ] N.M` checkbox.             |
+| **planner**   | Writes a step-by-step plan to `JFI/readme/plan.md`, every item as a `- [ ] N.M` checkbox.             |
 | **imp**       | Implements the code, ticking each box with `replace_in_file` *immediately* after finishing that one item — never batched. |
 | **testing**   | Runs the test suite and fixes failures.                                                                |
 | **reviewer**  | Signs off (`REVIEWER_COMPLETE`) or writes a `review.md` report, which automatically schedules another full iteration. Up to 3 failed-review loops per session before JFI stops so a bad cycle is visible instead of looping forever. |
@@ -29,11 +29,11 @@ The plan file is the single source of truth across phases *and* across restarts 
 
 1. You type a **session name**, then your **goal** (be as detailed as you want).
 2. The planner writes `plan.md`. As soon as its last line is written and the phase-complete marker is emitted, JFI moves on automatically — there is no approval gate between phases; the review loop *is* the quality gate.
-3. During **imp** and **testing**, the model works strictly one checkbox at a time: it does the work, then ticks exactly that one box in `plan.md` (byte-identical text, only `[ ]`→`[x]`). This is what makes the header's live plan progress counter (`plan 7/14`) meaningful and makes resumption robust.
+3. During **imp** and **testing**, the model works strictly one checkbox at a time: it does the work, then ticks exactly that one box in `plan.md` (byte-identical text, only `[ ]`→`[x]`). This is what makes the header's live progress counters — the current phase's own checklist (e.g. `imp 3/19`) alongside the whole plan (`plan 7/35`) — meaningful and makes resumption robust.
 4. The **reviewer** reads the finished work; if it finds real issues it writes `review.md`, JFI deletes that file, folds its contents into a fresh user message, and loops all four phases again (the header shows `loop #2`, etc.). A clean review ends the run.
 5. Once done — or if you queue more requests at any point (see [Live input](#live-input-queue-force-idle)) — JFI either idles with a live input line waiting for your next request, or exits.
 
-The whole transcript is also written to `.JFI/readme/<session>/run.log` as it happens (`tail -f` friendly), and every file the agent touches is tracked so a project-state summary can be folded into later iterations.
+The whole transcript is also written to `JFI/readme/<session>/run.log` as it happens (`tail -f` friendly), and every file the agent touches is tracked so a project-state summary can be folded into later iterations.
 
 ---
 
@@ -61,11 +61,13 @@ Then answer two prompts: **session name** and **goal**, and let it work.
 | `CONTEXT_SIZE` *(optional)* | Context window of the served model, in tokens — history is compressed once a request would exceed `CONTEXT_SIZE × CONTEXT_COMPRESSION_RATIO`. Size it to what *fits on your machine*: 4096–16384 for an ~8GB setup with a small model, 32768+ for 27B/31B runs. Defaults to 32768 if unset. | `32768`              |
 | `THEME` *(optional)*| Live-console color preset — see [Themes](#themes)  | `dark-ocean`, `light-paper`, or empty for auto-detect |
 
+Every one of `OPENAI_URL` / `OPENAI_API_KEY` / `MODEL` / `TEMPERATURE` can also be set **per phase**, prefixed `PLANNER_`, `IMP_`, `TESTING_`, or `REVIEWER_` (e.g. `REVIEWER_MODEL=gpt-4.1`, `IMP_OPENAI_URL=http://127.0.0.1:8080/v1`). A phase with no prefixed override falls back to the shared, unprefixed setting — so the default (unset) behavior is exactly one model for every phase, and you only add prefixed lines for the phases you actually want to route elsewhere (e.g. a cheap/fast model for `testing`, a stronger one for `reviewer`).
+
 `.env` is loaded before anything else runs (see `runner.py::main()`), so a `THEME=...` line in it takes effect no matter how JFI was launched.
 
 ### Resuming a session
 
-Rerun with the **same session name**: JFI detects `.JFI/readme/<session>/history.json`, skips every phase that already completed, and continues from the first unfinished one — including mid-phase, since the plan file's checkboxes are re-read rather than assumed to match the old transcript.
+Rerun with the **same session name**: JFI detects `JFI/readme/<session>/history.json`, skips every phase that already completed, and continues from the first unfinished one — including mid-phase, since the plan file's checkboxes are re-read rather than assumed to match the old transcript.
 
 ---
 
@@ -100,18 +102,6 @@ Then point the `.env` at it:
 
 ## Themes
 
-<<<<<<< Updated upstream
-The live console supports six named presets (three dark, three light), selectable via `THEME=` in `.env`:
-
-| Preset           | Look                                                                  |
-|------------------|------------------------------------------------------------------------|
-| `dark-default`   | ANSI-color baseline — inherits your terminal's own palette.            |
-| `dark-ocean`     | Fixed blue/teal-on-dark, readable regardless of terminal colors.       |
-| `dark-mono`      | Pure grayscale on dark.                                                 |
-| `light-default`  | Classic black/blue/green on white.                                      |
-| `light-sunrise`  | Warm magenta/maroon on light.                                           |
-| `light-paper`    | Soft muted green/blue, "paper" feel — the most contrast-friendly light option. |
-=======
 The live console supports twenty named presets, selectable via `THEME=` in `.env`. Every preset but `dark-default` also paints the terminal's actual background — not just the message text — so it looks right regardless of what your terminal profile's own background happens to be:
 
 | Preset                 | Look                                                                  |
@@ -136,7 +126,6 @@ The live console supports twenty named presets, selectable via `THEME=` in `.env
 | `rose-pine-dawn`       | Rosé Pine's light companion flavor, warm cream base.                  |
 | `one-dark`             | [One Dark](https://github.com/atom/atom/tree/master/packages/one-dark-ui) — Atom's iconic blue/green/purple on slate. |
 | `everforest-dark`      | [Everforest](https://github.com/sainnhe/everforest) — soft nature-toned greens on muted forest-green. |
->>>>>>> Stashed changes
 
 Leave `THEME` unset (or set to `auto`) and JFI detects your terminal's background via the standard `COLORFGBG` environment variable and picks `dark-default` or `light-default` accordingly. An explicit value always wins; an unknown name falls back to auto-detection with a hint, so a typo never crashes startup.
 
@@ -157,6 +146,18 @@ The bottom line is *always* live while JFI works (the pipeline runs on its own t
 | bare `!` + Enter    | Promotes *everything* already queued into the current turn at once.                                         |
 
 When a run finishes with an empty queue, JFI doesn't exit — it idles with the input line live (`PIPELINE COMPLETE — IDLE`), so feeding it more work is optional and stateful (same session, same history). Multi-line input uses Shift+Enter or Alt+Enter; Enter submits.
+
+### Keyboard shortcuts
+
+| Key      | When it works                  | Effect                                                                          |
+|----------|---------------------------------|----------------------------------------------------------------------------------|
+| `Ctrl+K` | While a phase is running        | Skips the current checklist item outright — marks it `- [○]` in the plan directly (imp/testing only). |
+| `Ctrl+Q` | While a phase is running        | Skips every remaining item in the current phase's checklist, then wraps the phase up. |
+| `Ctrl+P` | While a phase is running        | Pauses the pipeline — holds before the next turn so an in-flight call finishes first. Press again to resume. |
+| `Ctrl+N` | Idle (`PIPELINE COMPLETE`) only | Starts a brand-new session from scratch (fresh name + goal), without leaving the console. |
+| `Ctrl+C` | Anytime                         | Requests a stop; state is saved, so rerunning with the same session name resumes. |
+
+A skipped item (`- [○]`) is treated exactly like a finished one everywhere progress is counted — it just means a human decided it was done with, not the model.
 
 ---
 
@@ -205,14 +206,10 @@ Just-Finish-It/
 │   └── tool/
 │       ├── schemas.py           # AVAILABLE_TOOLS: the JSON-schema tool definitions sent to every LLM request
 │       ├── file_tools.py        # write_file / read_file / append_to_file / replace_in_file (the exact functions documented in each phase prompt)
-<<<<<<< Updated upstream
-│       ├── cmd_tools.py         # execute_command
-│       └── image_tools.py       # capture_screenshot / view_image — the one tool pair that returns an image to the model, not just text
-=======
 │       ├── cmd_tools.py         # execute_command, gated by CmdApprovalGate — see [Command approval](#command-approval)
+│       ├── context_tools.py     # context_save / context_lookup — the model's fact store, see [Context cache](#context-cache)
 │       ├── image_tools.py       # capture_screenshot / view_image — the one tool pair that returns an image to the model, not just text
 │       └── web_tools.py         # fetch_webpage_images — downloads a page's images to disk (view_image shows them, same as a screenshot)
->>>>>>> Stashed changes
 │
 ├── src/build_binary/             # `uv run build` — PyInstaller onefile packaging of src/JFI/runner.py
 │   └── __init__.py
@@ -228,6 +225,27 @@ Just-Finish-It/
 
 ---
 
+## Context cache
+
+Alongside the plan, each session keeps a small persistent fact store (`context.json`) for
+things worth remembering that would otherwise be lost once older turns are compressed out
+of context: key decisions, discovered schema/API/config details, gotchas — anything a later
+phase or iteration would otherwise have to re-derive.
+
+The model manages it with two dedicated tools rather than `read_file`/`write_file`:
+
+- `context_save(key, value)` — merges one fact in with a single call, never disturbing any
+  other key already there (including internal bookkeeping like approved `execute_command`
+  prefixes — see [Command approval](#command-approval)).
+- `context_lookup(keyword)` — searches instead of dumping the whole file. Called with no
+  keyword it lists every saved key plus a short preview (a live-computed index, so it can
+  never drift out of sync with the facts themselves); called with a keyword it returns the
+  full text of just what matches, case-insensitively, against keys and values.
+
+It's meant to stay small — a handful of high-value facts, not a transcript.
+
+---
+
 ## The tool set (what the model can call)
 
 | Tool               | Purpose                                                                                          |
@@ -237,6 +255,8 @@ Just-Finish-It/
 | `append_to_file`   | Append to a file — the sanctioned way to build long documents in chunks instead of one oversized write. |
 | `replace_in_file`  | Replace exactly one substring, leaving everything else untouched. This is *the* mechanism for ticking plan checkboxes and making surgical edits; a bad match (0 or >1 hits) errors out rather than corrupting the file. |
 | `execute_command`  | Run any shell command; returns stdout+stderr.                                                    |
+| `context_save`     | Save one fact to the persistent [context cache](#context-cache) in a single call — merges it in without touching any other key. |
+| `context_lookup`   | Search the context cache instead of reading it wholesale — call with no keyword to list every saved key, or a keyword to get the full text of just what matches. |
 | `capture_screenshot` | Snapshot the monitor to disk — used by the testing phase for visual verification where possible (fails cleanly with a "skip this step" hint if there's no display). |
 | `fetch_webpage_images` | Fetch a web page (http/https only) and download the images it references — Open Graph/Twitter preview image first, then every `<img>` tag — to disk, auto-numbered. Same "writes files, doesn't show you anything" design as `capture_screenshot`. |
 | `view_image`       | Attach an image file into the model's next turn (the only tool whose result becomes an actual image message, not just text) — this is how the agent can actually *see* screenshots it captured or images `fetch_webpage_images` downloaded. |
@@ -254,7 +274,7 @@ pytest            # full suite (config in pyproject.toml: testpaths = ["test"])
 Highlights:
 
 - `test_phase_messages.py` / `test_phase_completion.py` — pin the exact phase-trigger prompts and their completion-marker detection.
-- `test_plan_parsing.py` / `test_plan_location.py` — the `- [ ] N.M` protocol: parsing, ticking, and that the plan file always lands at `.JFI/readme/plan.md`.
+- `test_plan_parsing.py` / `test_plan_location.py` — the `- [ ] N.M` protocol: parsing, ticking, and that the plan file always lands at `JFI/readme/plan.md`.
 - `test_session_manager.py` — history append/resume semantics, context-budget compression.
 - `test_pt_line_count.py` — the live console's scroll/cursor math (the exact rendering invariant described in [Project layout](#project-layout)).
 - `test_safe_get_user_input.py` — input-prompt retry behavior.

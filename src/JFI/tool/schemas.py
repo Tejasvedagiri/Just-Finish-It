@@ -127,7 +127,7 @@ AVAILABLE_TOOLS = [
                     "directory": {
                         "type": "string",
                         "description": (
-                            "Where to save the screenshot — pass your session's .JFI/<session> "
+                            "Where to save the screenshot — pass your session's JFI/<session> "
                             "folder (the same directory your plan file lives in)."
                         )
                     }
@@ -181,7 +181,7 @@ AVAILABLE_TOOLS = [
                         "type": "string",
                         "description": (
                             "Where to save downloaded images — pass your session's "
-                            ".JFI/<session> folder (the same directory your plan file lives in)."
+                            "JFI/<session> folder (the same directory your plan file lives in)."
                         )
                     },
                     "max_images": {
@@ -190,6 +190,54 @@ AVAILABLE_TOOLS = [
                     }
                 },
                 "required": ["url", "directory"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "context_save",
+            "description": (
+                "Saves one fact to your persistent context cache in a single call — merges "
+                "it in without disturbing any other key already there. This is the correct "
+                "way to add or update a context-cache fact; do NOT read_file + write_file "
+                "the whole cache by hand, that risks dropping other keys you didn't retype."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Short identifier for this fact, e.g. 'db_schema'."
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "The fact itself, e.g. 'users table: id, email, created_at'."
+                    }
+                },
+                "required": ["key", "value"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "context_lookup",
+            "description": (
+                "Searches your persistent context cache instead of reading the whole file. "
+                "Call with no keyword first to list every saved key plus a short preview — "
+                "then call again with a keyword (matched against keys and values, case-"
+                "insensitive) to get the full text of just what's relevant."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "Term to search for. Omit or leave blank to list all saved keys."
+                    }
+                },
+                "required": []
             }
         }
     },

@@ -68,13 +68,13 @@ JPEG_BYTES = b"\xff\xd8\xff" + b"x" * 50
 
 class TestUrlValidation:
     def test_rejects_non_http_scheme(self):
-        result = web_tools.fetch_webpage_images("ftp://example.com", ".JFI/demo")
+        result = web_tools.fetch_webpage_images("ftp://example.com", "JFI/demo")
         assert result.startswith("Error:")
         assert "scheme" in result
 
     def test_rejects_file_scheme(self):
         """A file:// URL must not be usable to read local files off disk."""
-        result = web_tools.fetch_webpage_images("file:///etc/passwd", ".JFI/demo")
+        result = web_tools.fetch_webpage_images("file:///etc/passwd", "JFI/demo")
         assert result.startswith("Error:")
         assert "scheme" in result
 
@@ -89,13 +89,13 @@ class TestFetchErrors:
         _install_fake_client(monkeypatch, {
             "http://example.com/": FakeResponse(status_code=404, url="http://example.com/"),
         })
-        result = web_tools.fetch_webpage_images("http://example.com/", ".JFI/demo")
+        result = web_tools.fetch_webpage_images("http://example.com/", "JFI/demo")
         assert result.startswith("Error:")
         assert "404" in result
 
     def test_page_fetch_connection_error(self, monkeypatch):
         _install_fake_client(monkeypatch, {})  # no entry -> ConnectError
-        result = web_tools.fetch_webpage_images("http://example.com/", ".JFI/demo")
+        result = web_tools.fetch_webpage_images("http://example.com/", "JFI/demo")
         assert result.startswith("Error fetching")
 
     def test_non_html_content_type_rejected(self, monkeypatch):
@@ -105,7 +105,7 @@ class TestFetchErrors:
                 url="http://example.com/data.json",
             ),
         })
-        result = web_tools.fetch_webpage_images("http://example.com/data.json", ".JFI/demo")
+        result = web_tools.fetch_webpage_images("http://example.com/data.json", "JFI/demo")
         assert result.startswith("Error:")
         assert "not HTML" in result
 
@@ -116,7 +116,7 @@ class TestFetchErrors:
                 url="http://example.com/",
             ),
         })
-        result = web_tools.fetch_webpage_images("http://example.com/", ".JFI/demo")
+        result = web_tools.fetch_webpage_images("http://example.com/", "JFI/demo")
         assert result == "No images found on http://example.com/."
 
 
@@ -145,10 +145,10 @@ class TestDownloading:
             ),
         })
 
-        result = web_tools.fetch_webpage_images("http://example.com/page", ".JFI/demo")
+        result = web_tools.fetch_webpage_images("http://example.com/page", "JFI/demo")
         assert result.startswith("Success: downloaded 2 image(s)")
 
-        out_dir = tmp_path / ".JFI" / "demo"
+        out_dir = tmp_path / "JFI" / "demo"
         first, second = out_dir / "web-1.png", out_dir / "web-2.jpg"
         assert first.is_file() and second.is_file()
         assert first.read_bytes() == PNG_BYTES
@@ -171,7 +171,7 @@ class TestDownloading:
                 headers={"content-type": "image/png"}, content=PNG_BYTES,
             ),
         })
-        result = web_tools.fetch_webpage_images("http://example.com/page", ".JFI/demo")
+        result = web_tools.fetch_webpage_images("http://example.com/page", "JFI/demo")
         assert result.startswith("Success:")
         assert "http://example.com/blog/pic.png" in result
 
@@ -188,7 +188,7 @@ class TestDownloading:
             )
         _install_fake_client(monkeypatch, responses)
 
-        result = web_tools.fetch_webpage_images("http://example.com/", ".JFI/demo", max_images=3)
+        result = web_tools.fetch_webpage_images("http://example.com/", "JFI/demo", max_images=3)
         assert result.startswith("Success: downloaded 3 image(s)")
 
     def test_max_images_hard_capped_regardless_of_argument(self, monkeypatch):
@@ -204,7 +204,7 @@ class TestDownloading:
             )
         _install_fake_client(monkeypatch, responses)
 
-        result = web_tools.fetch_webpage_images("http://example.com/", ".JFI/demo", max_images=999)
+        result = web_tools.fetch_webpage_images("http://example.com/", "JFI/demo", max_images=999)
         assert result.startswith(f"Success: downloaded {web_tools.MAX_IMAGES_CAP} image(s)")
 
     def test_oversized_image_skipped(self, monkeypatch):
@@ -220,7 +220,7 @@ class TestDownloading:
                 headers={"content-type": "image/png"}, content=PNG_BYTES,
             ),
         })
-        result = web_tools.fetch_webpage_images("http://example.com/", ".JFI/demo")
+        result = web_tools.fetch_webpage_images("http://example.com/", "JFI/demo")
         assert result.startswith("Success: downloaded 1 image(s)")
         assert "small.png" in result
         assert "skipped" in result
@@ -238,7 +238,7 @@ class TestDownloading:
                 headers={"content-type": "image/jpeg"}, content=JPEG_BYTES,
             ),
         })
-        result = web_tools.fetch_webpage_images("http://example.com/", ".JFI/demo")
+        result = web_tools.fetch_webpage_images("http://example.com/", "JFI/demo")
         assert result.startswith("Success: downloaded 1 image(s)")
         assert "photo.jpg" in result
 
@@ -250,7 +250,7 @@ class TestDownloading:
             ),
             "http://example.com/broken.png": FakeResponse(status_code=500, url="http://example.com/broken.png"),
         })
-        result = web_tools.fetch_webpage_images("http://example.com/", ".JFI/demo")
+        result = web_tools.fetch_webpage_images("http://example.com/", "JFI/demo")
         assert result.startswith("Error:")
         assert "none could be downloaded" in result
 
@@ -264,9 +264,9 @@ class TestDownloading:
                 headers={"content-type": "image/png"}, content=PNG_BYTES,
             ),
         })
-        web_tools.fetch_webpage_images("http://example.com/", ".JFI/demo")
-        web_tools.fetch_webpage_images("http://example.com/", ".JFI/demo")
+        web_tools.fetch_webpage_images("http://example.com/", "JFI/demo")
+        web_tools.fetch_webpage_images("http://example.com/", "JFI/demo")
 
-        out_dir = tmp_path / ".JFI" / "demo"
+        out_dir = tmp_path / "JFI" / "demo"
         assert (out_dir / "web-1.png").is_file()
         assert (out_dir / "web-2.png").is_file()

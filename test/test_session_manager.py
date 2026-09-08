@@ -10,15 +10,15 @@ def test_constructor_creates_jfi_session_folder(manager):
     assert (manager.session_path / "history.jsonl.gz").parent.is_dir()
     assert manager.session_path.name == "demo"
     parent = manager.session_path.parent
-    assert parent.name == ".JFI"
+    assert parent.name == "JFI"
     # The on-disk folder is inside the test cwd.
-    assert (Path.cwd() / ".JFI" / "demo").is_dir()
+    assert (Path.cwd() / "JFI" / "demo").is_dir()
 
 
 def test_constructor_normalises_session_id(make_manager):
     ssm = make_manager("My Demo")
     assert ssm.session_id == "my_demo"
-    assert ssm.session_path.parent.name == ".JFI"
+    assert ssm.session_path.parent.name == "JFI"
 
 
 def test_resume_flag_reflects_existing_history(make_manager, manager):

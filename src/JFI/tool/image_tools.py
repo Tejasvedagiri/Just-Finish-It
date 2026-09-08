@@ -39,7 +39,7 @@ _MIME_BY_EXT = {
 def capture_screenshot(directory: str) -> str:
     """
     Captures the primary monitor and saves it as an auto-numbered
-    ``screen-N.png`` inside `directory` (pass your session's ``.JFI/<session>``
+    ``screen-N.png`` inside `directory` (pass your session's ``JFI/<session>``
     folder — the same one your plan file lives in — so screenshots land next
     to everything else from this run). Returns where it landed; use
     ``view_image`` on that path afterward to actually look at it.

@@ -221,4 +221,7 @@ __marimo__/
 /.idea/inspectionProfiles/Project_Default.xml
 /.idea/inspectionProfiles/profiles_settings.xml
 /.idea/vcs.xml
+/JFI/
+# Old hidden-dotfile location, pre-rename — keep ignoring any leftover
+# session folders created before the JFI/ (no leading dot) rename.
 /.JFI/

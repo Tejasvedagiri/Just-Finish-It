@@ -28,22 +28,22 @@ class TestCaptureScreenshot:
     def test_returns_success_or_clean_error_never_raises(self):
         from JFI.tool.image_tools import capture_screenshot
 
-        result = capture_screenshot(".JFI/demo")
+        result = capture_screenshot("JFI/demo")
         assert isinstance(result, str)
         assert result.startswith("Success:") or result.startswith(("Error:", "Warning:"))
 
     def test_successful_capture_writes_a_real_png_and_auto_increments(self, tmp_path):
         from JFI.tool.image_tools import capture_screenshot
 
-        first = capture_screenshot(".JFI/demo")
+        first = capture_screenshot("JFI/demo")
         if not first.startswith("Success:"):
             pytest.skip(f"no screenshot backend available here: {first!r}")
 
-        second = capture_screenshot(".JFI/demo")
+        second = capture_screenshot("JFI/demo")
         assert second.startswith("Success:")
 
-        png1 = tmp_path / ".JFI" / "demo" / "screen-1.png"
-        png2 = tmp_path / ".JFI" / "demo" / "screen-2.png"
+        png1 = tmp_path / "JFI" / "demo" / "screen-1.png"
+        png2 = tmp_path / "JFI" / "demo" / "screen-2.png"
         assert png1.is_file() and png2.is_file()
         # PNG magic bytes.
         assert png1.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
@@ -61,7 +61,7 @@ class TestCaptureScreenshot:
             return real_import(name, *args, **kwargs)
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
-        result = image_tools.capture_screenshot(".JFI/demo")
+        result = image_tools.capture_screenshot("JFI/demo")
         assert result.startswith("Error:")
         assert "mss" in result
 

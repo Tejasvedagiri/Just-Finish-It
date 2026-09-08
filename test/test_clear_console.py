@@ -121,7 +121,7 @@ def test_main_clears_console_after_dump_transcript(monkeypatch):
     # Patch the real class first (as test_themes does), then swap its factory.
     monkeypatch.setattr(runner.OpenAICompatableStream, "close", lambda self: None)
     fake_llm = type("FakeLLM", (), {"close": staticmethod(lambda *a, **k: None)})()
-    monkeypatch.setattr(runner, "OpenAICompatableStream", lambda: fake_llm)
+    monkeypatch.setattr(runner, "OpenAICompatableStream", lambda *a, **k: fake_llm)
 
     def no_pipeline(console, llm):  # noqa: ANN001 - signature matches run_pipeline
         pass
