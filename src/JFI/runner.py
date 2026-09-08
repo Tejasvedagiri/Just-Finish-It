@@ -475,6 +475,13 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
                            task=ssm.current_task_title(phase) or "")
 
         messages = ssm.get_messages(phase)
+        # get_messages() is what actually runs compress_history() and updates
+        # ssm's last-sent-tokens figure — push it to the header now, not just
+        # when this turn happens to produce tool calls (see the tokens=
+        # set_status calls below): a run of plain-content turns (a model
+        # thinking out loud, an auto-nudge reply, ...) would otherwise leave
+        # ctx showing a stale figure from several turns back.
+        console.set_status(tokens=ssm.token_usage())
         attempt = 0
         while True:
             try:
