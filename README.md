@@ -46,7 +46,7 @@ The terminal's own tab/window title tracks the same thing (session name plus liv
 ```
 
 The launcher:
-1. Ensures Python ≥ 3.10 is available (bundled venv → active venv → system `python3`).
+1. Ensures Python ≥ 3.12 is available (bundled venv → active venv → system `python3`).
 2. Creates `.venv` and installs dependencies on first run (or after a dependency change).
 3. Verifies the project's `.env` exists — if not, it copies the bundled `JFI_ENV_TEMPLATE` into it so you only have to fill in your own values.
 
@@ -191,7 +191,7 @@ The binary is a onefile build of `src/JFI/runner.py`, bundling prompt_toolkit, t
 ```
 Just-Finish-It/
 ├── JFI                          # bash launcher (venv bootstrap + .env check)
-├── .python-version              # 3.10 — matches pyproject.toml's requires-python floor
+├── .python-version              # 3.12 — matches pyproject.toml's requires-python floor
 ├── pyproject.toml               # package metadata, deps (pytest/pyinstaller for dev), pytest config
 ├── JFI_ENV_TEMPLATE             # copied to ./.env on first run if missing
 ├── README.md                    # this file
@@ -293,6 +293,14 @@ Highlights:
 - `test_pt_line_count.py` — the live console's scroll/cursor math (the exact rendering invariant described in [Project layout](#project-layout)).
 - `test_safe_get_user_input.py` — input-prompt retry behavior.
 - `test_review_outcome.py` — the review-loop decision logic (pass/fail, iteration re-scheduling).
+
+## Linting
+
+```bash
+uv run ruff check .   # config in pyproject.toml: [tool.ruff]
+```
+
+Scoped to Pyflakes plus pycodestyle's error-level checks (unused imports/variables, undefined names, syntax-adjacent mistakes) — real bugs, not a style ruleset, so it stays quiet on an already-written codebase's own conventions (prose-heavy comments, its existing line lengths, import ordering, ...).
 
 ---
 

@@ -108,8 +108,6 @@ def test_main_clears_console_after_dump_transcript(monkeypatch):
     monkeypatch.setattr(runner, "load_dotenv", lambda *a, **k: True)
     monkeypatch.setattr(runner, "find_dotenv", lambda *a, **k: ".env")
 
-    real_init = ptm.PromptToolkitConsoleManager.__init__
-
     def spy_init(self, *args, **kwargs):
         order.append("console_init")
         self.run = lambda fn: None

@@ -13,7 +13,6 @@ Run:  .venv/bin/python docs/make_theme_screenshots.py
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -136,7 +135,6 @@ def render_theme(name: str, out_path: Path) -> None:
 
     fonts = _fonts()
     draw_probe = ImageDraw.Draw(Image.new("RGB", (10, 10)))
-    char_w = measure(draw_probe, "M", fonts["reg"])
     line_h = int(FONT_SIZE * 1.45)
 
     # --- assemble rows ------------------------------------------------------

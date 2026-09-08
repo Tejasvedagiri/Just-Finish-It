@@ -17,7 +17,6 @@ Two separate tools, deliberately not one:
 
 import base64
 import re
-from pathlib import Path
 from typing import Optional
 
 from JFI.tool.file_tools import _get_safe_path

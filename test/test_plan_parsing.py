@@ -7,9 +7,7 @@
   tick counts for existing vs. missing (or empty) plan files.
 """
 
-import pytest
 
-from JFI.session.simple_session_manager import SimpleSessionManager
 
 
 def _plan_with(manager, text):

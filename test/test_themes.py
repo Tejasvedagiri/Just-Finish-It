@@ -135,8 +135,6 @@ def test_main_loads_dotenv_before_console(monkeypatch):
     )
     monkeypatch.setattr(runner, "find_dotenv", lambda *a, **k: ".env")
 
-    real_init = ptm.PromptToolkitConsoleManager.__init__
-
     def spy_init(self, *args, **kwargs):
         order.append("console_init")
         # main() calls these on the console; stub them since we skipped the real UI.

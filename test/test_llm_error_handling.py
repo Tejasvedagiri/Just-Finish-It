@@ -13,7 +13,6 @@ server already rejected on its merits (4xx).
 """
 
 import httpx
-import pytest
 from openai import APIConnectionError, BadRequestError, InternalServerError
 
 _REQUEST = httpx.Request("POST", "http://127.0.0.1:1234/v1/chat/completions")
