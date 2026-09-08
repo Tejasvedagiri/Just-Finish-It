@@ -269,7 +269,7 @@ It's meant to stay small — a handful of high-value facts, not a transcript.
 | `read_file`        | Read an existing file's content.                                                                 |
 | `append_to_file`   | Append to a file — the sanctioned way to build long documents in chunks instead of one oversized write. |
 | `replace_in_file`  | Replace exactly one substring, leaving everything else untouched. This is *the* mechanism for ticking plan checkboxes and making surgical edits; a bad match (0 or >1 hits) errors out rather than corrupting the file. |
-| `execute_command`  | Run any shell command; returns stdout+stderr.                                                    |
+| `execute_command`  | Run any shell command; returns stdout+stderr. Times out after 300s by default — pass `timeout` to raise it for a slow install/build/test step.                                                    |
 | `context_save`     | Save one fact to the persistent [context cache](#context-cache) in a single call — merges it in without touching any other key. |
 | `context_lookup`   | Search the context cache instead of reading it wholesale — call with no keyword to list every saved key, or a keyword to get the full text of just what matches. |
 | `capture_screenshot` | Snapshot the monitor to disk — used by the testing phase for visual verification where possible (fails cleanly with a "skip this step" hint if there's no display). |

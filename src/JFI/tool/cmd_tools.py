@@ -6,7 +6,7 @@ from JFI.tool.context_tools import load_context_cache, save_context_cache
 APPROVED_CMD_KEY = "approved-cmd"
 
 
-def execute_command(command: str, timeout: int = 120) -> str:
+def execute_command(command: str, timeout: int = 300) -> str:
     """Executes a shell command and returns the output."""
     try:
         # shell=True allows for piped commands like 'ls -la | grep src'
@@ -145,7 +145,7 @@ def make_gated_execute_command(console, cache_path: str):
     """
     gate = CmdApprovalGate(console, cache_path)
 
-    def gated_execute_command(command: str, timeout: int = 120) -> str:
+    def gated_execute_command(command: str, timeout: int = 300) -> str:
         if not gate.request(command):
             return f"Command not executed (user answered No): '{command}'"
         return execute_command(command, timeout)

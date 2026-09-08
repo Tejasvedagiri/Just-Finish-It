@@ -33,6 +33,15 @@ AVAILABLE_TOOLS = [
                     "command": {
                         "type": "string",
                         "description": "The terminal command to run, e.g., 'pip install requests' or 'python test.py'"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": (
+                            "Seconds to wait before giving up on this command. Defaults to 300 -- "
+                            "raise it (e.g. 600-1200) for anything that legitimately takes even "
+                            "longer, like installing large packages or running a slow build/test "
+                            "suite."
+                        )
                     }
                 },
                 "required": ["command"]
