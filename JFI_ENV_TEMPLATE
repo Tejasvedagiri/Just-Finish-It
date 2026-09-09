@@ -19,6 +19,13 @@ MODEL=qwen3:8b
 # Sampling temperature. Defaults to 0.7 if unset.
 # TEMPERATURE=0.7
 
+# Penalizes tokens proportional to how often they've already appeared in
+# the response so far -- the standard lever against a model falling into a
+# verbatim repetition loop (seen in practice on smaller/quantized models).
+# 0.0 (OpenAI's own default, a no-op) if unset. Try 0.3-0.5 if a model gets
+# stuck repeating itself; stronger models generally don't need it.
+# FREQUENCY_PENALTY=0.0
+
 # Context window of the served model, in tokens. History is compressed once a
 # request would exceed CONTEXT_SIZE * CONTEXT_COMPRESSION_RATIO. Size it to
 # what fits on your machine: 4096-16384 for an ~8GB setup with a small model,
@@ -41,8 +48,9 @@ MODEL=qwen3:8b
 
 # --- Optional: a different model/endpoint per phase --------------------------
 #
-# Each of OPENAI_URL / OPENAI_API_KEY / MODEL / TEMPERATURE can be overridden
-# per phase by prefixing it PLANNER_, IMP_, TESTING_, or REVIEWER_. Any phase
+# Each of OPENAI_URL / OPENAI_API_KEY / MODEL / TEMPERATURE / FREQUENCY_PENALTY
+# can be overridden per phase by prefixing it PLANNER_, IMP_, TESTING_, or
+# REVIEWER_. Any phase
 # left unset falls back to the shared settings above, so uncomment only the
 # phases (and only the settings within them) you actually want to route
 # elsewhere — e.g. a cheap/fast model for testing, a stronger one for review.

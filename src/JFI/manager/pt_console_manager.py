@@ -25,6 +25,7 @@ from prompt_toolkit.styles import Style
 from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.manager.key_bindings import add_shift_enter_newline, teach_terminal_shift_enter
 from JFI.manager.theme_env import resolve_explicit_theme, theme_label
+from JFI.text_sanitize import strip_leaked_special_tokens
 
 teach_terminal_shift_enter()
 
@@ -977,6 +978,7 @@ class PromptToolkitConsoleManager(AbstractManager):
         retry-then-ask flow, so the phase just tries the turn again.
         """
         full_text = ""
+        reasoning_started = False
         tool_calls_dict: Dict[int, Dict[str, Any]] = {}
         usage_seen = False
         streamed_chars = 0
@@ -1003,10 +1005,39 @@ class PromptToolkitConsoleManager(AbstractManager):
 
             delta = chunk.choices[0].delta
 
+            # Reasoning-model servers (e.g. this one, an OpenAI-compatible
+            # extension) stream a separate reasoning_content field ahead of
+            # the real answer. Previously ignored entirely: a turn that spent
+            # its whole generation "thinking" and got cut off before any
+            # content/tool_calls came out looked identical to a genuinely
+            # empty turn, which the rest of the pipeline can only respond to
+            # by re-nudging -- so a model prone to long reasoning could stall
+            # for many turns with nothing visible happening. Surface it (so a
+            # long think is visible, not a blank screen) and count it toward
+            # STREAM_OUTPUT_CAP, same as content/tool_calls, so a genuinely
+            # runaway one is still aborted and retried rather than left to
+            # hang until the server's own limit.
+            reasoning_delta = getattr(delta, "reasoning_content", None)
+            if reasoning_delta:
+                reasoning_delta = strip_leaked_special_tokens(reasoning_delta)
+            if reasoning_delta:
+                if not reasoning_started:
+                    self._line("class:out.system", "💭 Reasoning")
+                    reasoning_started = True
+                streamed_chars += len(reasoning_delta)
+                self._write("class:out.system", reasoning_delta)
+
             if delta.content is not None:
-                full_text += delta.content
-                streamed_chars += len(delta.content)
-                self._write("class:out.assistant", delta.content)
+                # Seen in practice: raw chat-template tokens (</s>,
+                # <|channel|>, ...) leaking straight into content instead of
+                # being consumed by the server -- scrub them here, at the
+                # one place all of history/display/file-writes ultimately
+                # source their text from, rather than chasing every
+                # downstream consumer separately.
+                content_delta = strip_leaked_special_tokens(delta.content)
+                full_text += content_delta
+                streamed_chars += len(content_delta)
+                self._write("class:out.assistant", content_delta)
 
             if getattr(delta, "tool_calls", None):
                 for tc in delta.tool_calls:
@@ -1055,6 +1086,14 @@ class PromptToolkitConsoleManager(AbstractManager):
         return {
             "content": full_text.strip() if full_text else None,
             "tool_calls": list(tool_calls_dict.values()) if tool_calls_dict else None,
+            # A turn that reasoned but produced neither content nor a tool
+            # call leaves literally no trace in history (the assistant
+            # message is only ever appended `if content or tool_calls`) --
+            # the model then has zero memory of having just deliberated this
+            # exact question, which is what let it re-derive the same
+            # reasoning near-verbatim turn after turn. Surfacing this lets
+            # runner.py give a pointed nudge instead of the generic one.
+            "had_reasoning": reasoning_started,
         }
 
     # ------------------------------------------------------- queue & status

@@ -124,6 +124,17 @@ PLAN_FORMAT_RULES = """
       layout at the working directory root: e.g. calculator.py and
       tests/test_calculator.py side by side at the top level, a README.md
       at the top level — NOT nested inside {plan_path}'s own folder.
+    - Consequence of the above: a project-scaffolding command that requires
+      an EMPTY target directory (`create-next-app`, `npm create vite`,
+      `django-admin startproject`, ...) will see {plan_path}'s own folder
+      already sitting in the working directory and refuse to run there,
+      reporting it as a conflicting file — this is expected, not a real
+      error, and adding scaffolder flags will not fix it. Instead: run the
+      scaffolder into a throwaway subdirectory (e.g. `npx create-next-app@
+      latest temp-app ...`), then move everything it generated up into the
+      working directory root (`mv temp-app/* temp-app/.[!.]* . 2>/dev/null;
+      rmdir temp-app` or equivalent), leaving {plan_path}'s own folder
+      untouched.
     - The plan is a TREE, not a flat list. Every task must be broken down into
       the smallest possible pieces: a task becomes subtasks, and any subtask
       that is still not a single, small, directly-doable action becomes
@@ -186,6 +197,44 @@ CONTEXT_CACHE_RULES = """
       fact is genuinely obsolete, save it with an updated value instead.
 """
 
+VERIFICATION_RULES = """
+    VERIFICATION STANDARD (applies whenever you judge whether something works):
+    - If there is ANY mechanical way to check a piece of work — running it,
+      compiling/building it, starting it and hitting it, running its test
+      suite, executing it against sample input — that check MUST actually be
+      run with execute_command. Reading the source and reasoning about what
+      it "should" do is not verification and is not a substitute for running
+      it, even when the code looks obviously correct.
+    - This applies beyond languages with an obvious test runner: a frontend
+      app with no test suite still has `npm run build` (or the equivalent
+      compile/bundle step); a server still has "start it, curl it, stop it";
+      a script still has "run it with representative input." Plan for and
+      perform that kind of check even when nobody asked for automated tests.
+    - Only fall back to code-reading-only verification when no mechanical
+      check is possible at all (e.g. prose content, a static design decision).
+    - Testing the small pure/helper functions in isolation is not enough by
+      itself, in any language or stack. Also exercise the actual entry point
+      a real user or caller would go through end-to-end: a CLI's main loop
+      (including its exit and error-handling paths, not just the functions
+      it calls), an HTTP route handler (a real request in, a real response
+      checked out), a GUI's event loop, an exported public API called the
+      way a consumer would call it. A suite that only covers internal
+      building blocks while leaving the thing the goal actually described
+      untested has NOT verified the goal, no matter how many of those
+      building-block tests pass.
+    - Verifying a GUI app (it opens a window and never returns on its own):
+      capture the PID directly instead of searching for it —
+      `python app.py & PID=$!; sleep 2; kill "$PID"` — then, as a SEPARATE
+      execute_command call (not chained into the shell line above),
+      capture_screenshot followed by view_image. capture_screenshot and
+      view_image are tools, not shell commands; they cannot appear inside an
+      execute_command string. Never find the PID with `pgrep`/`pkill` by the
+      script's own name — the shell running THIS very execute_command also
+      has that name in its command line, so a name-based search can match
+      and kill the wrong process for no visible reason (the failure shows no
+      useful STDERR, just an unexplained kill).
+"""
+
 
 # Default plan location: inside the JFI session folder. The manager overrides this
 # with its own resolved path (see SimpleSessionManager.plan_path); it is only used as a
@@ -204,6 +253,7 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
     rules = (
         PLAN_FORMAT_RULES.format(plan_path=plan_path)
         + CONTEXT_CACHE_RULES.format(context_cache_path=context_cache_path)
+        + VERIFICATION_RULES
     )
 
     if phase == "planner":
@@ -227,6 +277,12 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                    - [ ] 1.2 Second high-level task (already small enough as one leaf)
                    ## Testing
                    - [ ] 2.1 ...
+               The Testing section must include at least one concrete, mechanically-checkable
+               leaf per the VERIFICATION STANDARD above — e.g. "run `npm run build` and confirm
+               it exits 0", "start the server and curl it", "run the script against sample
+               input and check the output" — even when nobody asked for automated tests. A
+               vague leaf like "manually verify everything looks right" does not satisfy this;
+               name the actual command that will be run.
                For EVERY task you add, ask "can I do this correctly in one focused step?" If
                not, break it into subtasks and ask the same question of each one — recurse
                until every leaf is genuinely that small. Only leaves get a checkbox; every
@@ -282,7 +338,9 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                surrounding context or when the list looks stale.
             2. State what you are testing, in exactly this format:
                **[CURRENT TEST: 2.1]**
-            3. Run it with execute_command, or read the produced files to verify them.
+            3. Run it with execute_command per the VERIFICATION STANDARD above. Only read the
+               produced files instead when there is genuinely nothing to execute (e.g. checking
+               prose content) — never as a shortcut around running code that can be run.
             4. If it fails, fix the implementation with the file tools and re-run until it passes.
             5. IMMEDIATELY tick that one item with replace_in_file on {plan_path}, exactly as the
                Implementation agent does. One box per step, right after it passes.
@@ -303,10 +361,15 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
             and never wait for a reply.
             {rules}
 
-            1. read_file {plan_path}, then inspect the files that were produced (and re-run any
-               tests or commands needed to judge them).
-            2. Decide: is the work good — every planned item genuinely done, verified, and free of
-               defects?
+            1. read_file {plan_path}, then inspect the files that were produced. You MUST
+               personally re-run the project's own mechanical checks (build/compile, test suite,
+               start-and-hit-it, run-with-sample-input — per the VERIFICATION STANDARD above)
+               with execute_command before you may say PASS. A Testing-phase item already reading
+               "- [x]" is NOT evidence it still passes — later steps may have edited those same
+               files since, silently invalidating it. Re-run it yourself, now, in this phase.
+               A review with zero execute_command/read_file calls is not a review.
+            2. Decide: is the work good — every planned item genuinely done, verified BY YOU JUST
+               NOW, and free of defects?
             3. If the review is GOOD: do NOT write or touch {review_path}. Just output a short
                "Review: PASS" summary in your reply (what was built, what was verified).
             4. Only if problems exist (broken/unfinished work, failing tests, missing pieces):

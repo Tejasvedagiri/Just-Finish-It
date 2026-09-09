@@ -1,11 +1,30 @@
 from pathlib import Path
 
+from JFI.text_sanitize import strip_leaked_special_tokens
+
 
 def _get_safe_path(file_path: str) -> Path:
     """
     Validates and resolves the path to ensure it stays strictly
     within the current working directory. Prevents path traversal attacks (like ../../).
     """
+    # Some models occasionally fail to cleanly terminate a tool call's JSON
+    # arguments (e.g. a stray chat-template/reasoning-channel token bleeding
+    # into the stream) -- past this point file_path is one that came from
+    # such a broken call. Reject it outright rather than silently creating a
+    # garbage file on disk with control characters or raw template tokens in
+    # its name.
+    if "\x00" in file_path or "\n" in file_path or "\r" in file_path:
+        raise ValueError(
+            f"file_path contains a control/newline character — this looks like a malformed "
+            f"tool call, not a real path: {file_path!r}"
+        )
+    if "<|" in file_path or "|>" in file_path:
+        raise ValueError(
+            f"file_path contains what looks like a leaked chat-template token, not a real "
+            f"path: {file_path!r}"
+        )
+
     cwd = Path.cwd().resolve()
 
     # Resolve the target path relative to the current working directory
@@ -25,6 +44,11 @@ def write_file(file_path: str, content: str) -> str:
         path = _get_safe_path(file_path)
         # Create directories if they don't exist (e.g., output/ subfolders)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Unlike a malformed file_path (rejected outright, above), a leaked
+        # token inside otherwise-legitimate content is scrubbed rather than
+        # failing the whole write -- the content around it is still real and
+        # worth keeping.
+        content = strip_leaked_special_tokens(content)
 
         with open(path, 'w', encoding='utf-8') as f:
             f.write(content)
@@ -61,6 +85,7 @@ def append_to_file(file_path: str, content: str) -> str:
                 f.seek(max(0, path.stat().st_size - 1))
                 prefix = "" if f.read().endswith("\n") else "\n"
 
+        content = strip_leaked_special_tokens(content)
         with open(path, 'a', encoding='utf-8') as f:
             f.write(prefix + content)
 
@@ -104,6 +129,9 @@ def replace_in_file(file_path: str, old_string: str, new_string: str) -> str:
         path = _get_safe_path(file_path)
         if not path.exists():
             return f"Error: File {file_path} does not exist."
+
+        old_string = strip_leaked_special_tokens(old_string)
+        new_string = strip_leaked_special_tokens(new_string)
 
         with open(path, 'r', encoding='utf-8') as f:
             content = f.read()

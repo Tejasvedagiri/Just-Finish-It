@@ -9,13 +9,21 @@ APPROVED_CMD_KEY = "approved-cmd"
 def execute_command(command: str, timeout: int = 300) -> str:
     """Executes a shell command and returns the output."""
     try:
-        # shell=True allows for piped commands like 'ls -la | grep src'
+        # shell=True allows for piped commands like 'ls -la | grep src'.
+        # stdin=DEVNULL is deliberate: this subprocess shares our controlling
+        # tty, so any invoked CLI that isatty()-detects it (npm create,
+        # create-next-app, etc.) will launch an interactive prompt instead of
+        # picking a non-interactive default -- and nothing will ever answer
+        # it, so it hangs until `timeout` instead of failing fast. Closing
+        # stdin makes those tools see a non-interactive session immediately,
+        # same as CI, so they either use their default or error out clearly.
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=timeout,
+            stdin=subprocess.DEVNULL
         )
 
         # Combine stdout and stderr for the LLM to read

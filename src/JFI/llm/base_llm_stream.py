@@ -28,6 +28,12 @@ class BaseLLMStream(ABC):
         self.prefix = prefix
         self.model = phase_env(prefix, "MODEL", "glm-5.3-flash-colibri")
         self.temperature = phase_env(prefix, "TEMPERATURE", "0.7")
+        # 0.0 is the OpenAI API's own default (a no-op) -- unset means
+        # unchanged behavior. A model prone to falling into verbatim
+        # repetition loops (seen in practice on smaller/quantized models)
+        # benefits from something like 0.3-0.5 here; stronger models
+        # generally don't need it.
+        self.frequency_penalty = phase_env(prefix, "FREQUENCY_PENALTY", "0.0")
         self.stream = True
         self.stream_service = None
 

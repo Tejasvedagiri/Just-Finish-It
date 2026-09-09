@@ -184,6 +184,17 @@ def _repair_directive(func_name: str, args: Dict[str, Any], result: str, attempt
         )
 
     if func_name == "execute_command":
+        if "timed out after" in lowered:
+            current_timeout = args.get("timeout", 300)
+            next_timeout = max(int(current_timeout) * 2, 900)
+            return (
+                f"AUTO-RECTIFY: the command did not fail — it simply needed more than "
+                f"{current_timeout}s (no STDERR is shown because nothing went wrong, it just "
+                f"wasn't finished yet). This is normal for package installs/downloads and "
+                f"builds. Re-run the SAME command again, this time passing "
+                f"timeout={next_timeout} to execute_command. Do not add flags or change the "
+                "command to work around this — a longer timeout is the fix."
+            )
         return (
             "AUTO-RECTIFY: the command failed — read the STDERR above and fix the cause "
             "(missing dependency, wrong path, syntax error) before re-running it. Do not "
@@ -554,6 +565,27 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
                 break
             except Exception as e:
                 attempt += 1
+
+                if isinstance(e, ResponseTooLongError):
+                    # Blindly resending the identical `messages` after this
+                    # specific failure just invites the same overly-long
+                    # reasoning again (observed in practice: several
+                    # STREAM_OUTPUT_CAP hits in a row on the same turn, with
+                    # no forward progress). This only touches the local copy
+                    # for this retry -- ssm's real history is untouched, so a
+                    # later, unrelated turn starts clean again.
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "AUTO-RECTIFY: your last response was discarded for exceeding the "
+                            "reasoning budget (STREAM_OUTPUT_CAP) before producing a real answer "
+                            "or tool call. Re-sending the identical request risks the identical "
+                            "outcome. This time: skip the lengthy internal debate and commit to "
+                            "ONE concrete action immediately — call a tool, or state the required "
+                            "phase-complete phrase — with minimal deliberation."
+                        ),
+                    })
+
                 if _is_retryable_llm_error(e) and attempt <= LLM_RETRY_LIMIT and not console.should_stop():
                     console.display_error(
                         f"LLM request failed (attempt {attempt}/{LLM_RETRY_LIMIT + 1}): "
@@ -643,11 +675,28 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
             continue
 
         # --- AUTO-NUDGE (STALL PREVENTION) ---
-        ssm.add_message(
-            "user",
-            f"Please continue your work. Remember, when you are entirely finished with this "
-            f"phase, you MUST output the exact phrase: '{phase.upper()}_COMPLETE'."
-        )
+        if parsed_response.get("had_reasoning") and not content:
+            # The model deliberated but never committed to an action -- and
+            # that deliberation left no trace in history (nothing gets
+            # appended when both content and tool_calls are empty), so next
+            # turn it has zero memory of having just reasoned this through.
+            # A generic "please continue" invites re-deriving the identical
+            # reasoning again; naming the actual failure (thought, didn't
+            # act) is what breaks that loop.
+            ssm.add_message(
+                "user",
+                "AUTO-RECTIFY: your last turn was entirely reasoning — it never produced a real "
+                "reply or a tool call, so nothing was recorded and that reasoning is now lost. "
+                "Stop re-deliberating the same decision. This turn, take exactly ONE concrete "
+                "action (call a tool, or state the required phrase) — do not just think about it "
+                "again."
+            )
+        else:
+            ssm.add_message(
+                "user",
+                f"Please continue your work. Remember, when you are entirely finished with this "
+                f"phase, you MUST output the exact phrase: '{phase.upper()}_COMPLETE'."
+            )
 
     return False
 

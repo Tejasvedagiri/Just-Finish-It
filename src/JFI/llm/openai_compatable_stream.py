@@ -28,6 +28,7 @@ class OpenAICompatableStream(BaseLLMStream):
             "model": self.model,
             "messages": message,
             "temperature": float(self.temperature),
+            "frequency_penalty": float(self.frequency_penalty),
             "stream": True
         }
 
