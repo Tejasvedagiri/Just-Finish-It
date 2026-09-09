@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "just-finish-it"
 version = "0.1.0"
-description = "An autonomous plan-driven coding agent: it plans, implements and tests in a local .JFI workspace."
+description = "An autonomous plan-driven coding agent: it plans, implements and tests in a local JFI workspace."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -28,10 +28,24 @@ packages = ["src/JFI", "src/build_binary"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["test"]
-norecursedirs = [".venv", ".JFI"]
+norecursedirs = [".venv", "JFI"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = ["/JFI", "/dist", "/build"]  # runtime session data / build output at repo root, not src/JFI
+
+[tool.ruff.lint]
+# Pyflakes (F) catches real bugs (unused imports, undefined names, unused
+# variables, ...); the pycodestyle subset (E) is kept to the error-level
+# checks only -- deliberately not the full style ruleset (line-length
+# nitpicks, import sorting, etc.) for an already-written codebase with its
+# own established prose-comment-heavy style.
+select = ["E4", "E7", "E9", "F"]
 
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "pyinstaller>=6.11.0",
+    "ruff>=0.16.6",
 ]

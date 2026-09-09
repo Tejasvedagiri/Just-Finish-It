@@ -9,6 +9,29 @@ from typing import Optional
 
 from JFI.manager.abstract_manager import AbstractManager
 
+# flock is Unix-only (Linux/macOS) — the ./JFI launcher is already a POSIX
+# shell script, so this project has never targeted Windows directly.
+# Session locking degrades to a no-op there rather than failing to import.
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+
+class SessionInUseError(Exception):
+    """Raised when another process already holds this session's lock (see
+    SimpleSessionManager._acquire_session_lock) — two processes racing on
+    the same session's history.jsonl.gz/plan.md/context.json could
+    otherwise corrupt them."""
+    pass
+
+
+# Per-process registry of held session locks: {resolved lock path: [refcount,
+# file_handle]} — see SimpleSessionManager._acquire_session_lock for why a
+# second SimpleSessionManager for the same session_id within this same
+# process must not trip the cross-process guard.
+_SESSION_LOCKS: dict = {}
+
 # --- append-only history persistence ----------------------------------------
 # history.pkl used to be rewritten *in full* on every single message, so a
 # long session's every turn cost an O(total history) disk write — on a
@@ -94,14 +117,24 @@ TOOL_RESULT_TAIL = 400
 PLAN_FORMAT_RULES = """
     PLAN FILE FORMAT (mandatory, no exceptions):
     - The plan file is exactly: {plan_path}
-<<<<<<< Updated upstream
-    - Every actionable item MUST be a GitHub task-list line and nothing else:
-          - [ ] 1.1 Short description of the step
-      Not started is "- [ ] ", finished is "- [x] ".
-      NEVER use any other marker for progress: no U+2610 ballot boxes, no emoji
-      ticks, no tables of checkboxes. Only "- [ ]" and "- [x]".
-    - Numbering: sections are 1, 2, 3 ...; steps inside them are 1.1, 1.2 ...
-=======
+    - {plan_path}'s own directory is internal bookkeeping ONLY (the plan
+      itself and its supporting files) — never create your actual
+      deliverables (source files, tests, docs) inside it just because the
+      plan happens to live there. Deliverables belong in the normal project
+      layout at the working directory root: e.g. calculator.py and
+      tests/test_calculator.py side by side at the top level, a README.md
+      at the top level — NOT nested inside {plan_path}'s own folder.
+    - Consequence of the above: a project-scaffolding command that requires
+      an EMPTY target directory (`create-next-app`, `npm create vite`,
+      `django-admin startproject`, ...) will see {plan_path}'s own folder
+      already sitting in the working directory and refuse to run there,
+      reporting it as a conflicting file — this is expected, not a real
+      error, and adding scaffolder flags will not fix it. Instead: run the
+      scaffolder into a throwaway subdirectory (e.g. `npx create-next-app@
+      latest temp-app ...`), then move everything it generated up into the
+      working directory root (`mv temp-app/* temp-app/.[!.]* . 2>/dev/null;
+      rmdir temp-app` or equivalent), leaving {plan_path}'s own folder
+      untouched.
     - The plan is a TREE, not a flat list. Every task must be broken down into
       the smallest possible pieces: a task becomes subtasks, and any subtask
       that is still not a single, small, directly-doable action becomes
@@ -140,32 +173,79 @@ PLAN_FORMAT_RULES = """
     - A task with only one obvious, already-small action underneath it can
       stay a single leaf — don't split for the sake of splitting. The goal is
       the smallest task that is still genuinely one task, not maximum depth.
->>>>>>> Stashed changes
     - Item text must stay byte-identical when you tick it: change only the
       space inside the brackets to an x, so a targeted replace can find it.
 """
 
 CONTEXT_CACHE_RULES = """
     CONTEXT CACHE (optional, persists across turns and phases):
-    - A small JSON file at {context_cache_path} holds facts worth remembering
-      that would otherwise be lost once older turns are compressed out of your
-      context: key decisions, discovered schema/API/config details, gotchas —
-      anything a later step or phase would otherwise have to re-derive.
-    - It already exists (starts as "{{}}"); read_file it whenever you need
-      context from earlier work, in this phase or an earlier one.
-    - To add or update a fact: read_file it first, then write_file the whole
-      file back with your fact merged in. It stays a small flat JSON object,
-      e.g. {{"db_schema": "users table: id, email, created_at"}}. Keep it
-      small — a handful of high-value facts, not a transcript — and never
-      remove another entry just because you didn't write it.
+    - A small fact store backing {context_cache_path} holds things worth
+      remembering that would otherwise be lost once older turns are
+      compressed out of your context: key decisions, discovered schema/API/
+      config details, gotchas — anything a later step or phase would
+      otherwise have to re-derive.
+    - Use the context_save and context_lookup tools for it — NOT read_file/
+      write_file. context_save(key, value) merges one fact in with a single
+      call; context_lookup(keyword) searches instead of dumping everything —
+      call it with no keyword first to see what's already saved (a key plus
+      a short preview of each), then again with a keyword to get one fact's
+      full text. Never read_file or write_file this path directly: a
+      write_file that doesn't perfectly round-trip every existing key
+      silently deletes the ones you didn't retype.
+    - Keep it small — a handful of high-value facts, not a transcript — and
+      never overwrite another entry's key just to remove it from view; if a
+      fact is genuinely obsolete, save it with an updated value instead.
+"""
+
+VERIFICATION_RULES = """
+    VERIFICATION STANDARD (applies whenever you judge whether something works):
+    - If there is ANY mechanical way to check a piece of work — running it,
+      compiling/building it, starting it and hitting it, running its test
+      suite, executing it against sample input — that check MUST actually be
+      run with execute_command. Reading the source and reasoning about what
+      it "should" do is not verification and is not a substitute for running
+      it, even when the code looks obviously correct.
+    - This applies beyond languages with an obvious test runner: a frontend
+      app with no test suite still has `npm run build` (or the equivalent
+      compile/bundle step); a server still has "start it, curl it, stop it";
+      a script still has "run it with representative input." Plan for and
+      perform that kind of check even when nobody asked for automated tests.
+    - Only fall back to code-reading-only verification when no mechanical
+      check is possible at all (e.g. prose content, a static design decision).
+    - Testing the small pure/helper functions in isolation is not enough by
+      itself, in any language or stack. Also exercise the actual entry point
+      a real user or caller would go through end-to-end: a CLI's main loop
+      (including its exit and error-handling paths, not just the functions
+      it calls), an HTTP route handler (a real request in, a real response
+      checked out), a GUI's event loop, an exported public API called the
+      way a consumer would call it. A suite that only covers internal
+      building blocks while leaving the thing the goal actually described
+      untested has NOT verified the goal, no matter how many of those
+      building-block tests pass.
+    - Verifying a GUI app (it opens a window and never returns on its own):
+      capture the PID directly instead of searching for it —
+      `python app.py & PID=$!; sleep 2; kill "$PID"` — then, as a SEPARATE
+      execute_command call (not chained into the shell line above),
+      capture_screenshot followed by view_image. capture_screenshot and
+      view_image are tools, not shell commands; they cannot appear inside an
+      execute_command string. Never find the PID with `pgrep`/`pkill` by the
+      script's own name — the shell running THIS very execute_command also
+      has that name in its command line, so a name-based search can match
+      and kill the wrong process for no visible reason (the failure shows no
+      useful STDERR, just an unexplained kill).
 """
 
 
-# Default plan location: inside the .JFI session folder. The manager overrides this
+# Default plan location: inside the JFI session folder. The manager overrides this
 # with its own resolved path (see SimpleSessionManager.plan_path); it is only used as a
 # fallback when callers do not pass an explicit plan_path.
-DEFAULT_PLAN_PATH = ".JFI/plan.md"
-DEFAULT_CONTEXT_CACHE_PATH = ".JFI/context.json"
+DEFAULT_PLAN_PATH = "JFI/plan.md"
+DEFAULT_CONTEXT_CACHE_PATH = "JFI/context.json"
+
+# The only two phases with a per-item checklist to work through (and so the
+# only two Ctrl+K/Ctrl+Q skip requests apply to) — planner writes the plan in
+# one continuous pass, reviewer judges the whole thing at once.
+PHASE_SECTION = {"imp": "Implementation", "testing": "Testing"}
 
 
 def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
@@ -173,6 +253,7 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
     rules = (
         PLAN_FORMAT_RULES.format(plan_path=plan_path)
         + CONTEXT_CACHE_RULES.format(context_cache_path=context_cache_path)
+        + VERIFICATION_RULES
     )
 
     if phase == "planner":
@@ -196,6 +277,12 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                    - [ ] 1.2 Second high-level task (already small enough as one leaf)
                    ## Testing
                    - [ ] 2.1 ...
+               The Testing section must include at least one concrete, mechanically-checkable
+               leaf per the VERIFICATION STANDARD above — e.g. "run `npm run build` and confirm
+               it exits 0", "start the server and curl it", "run the script against sample
+               input and check the output" — even when nobody asked for automated tests. A
+               vague leaf like "manually verify everything looks right" does not satisfy this;
+               name the actual command that will be run.
                For EVERY task you add, ask "can I do this correctly in one focused step?" If
                not, break it into subtasks and ask the same question of each one — recurse
                until every leaf is genuinely that small. Only leaves get a checkbox; every
@@ -251,7 +338,9 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                surrounding context or when the list looks stale.
             2. State what you are testing, in exactly this format:
                **[CURRENT TEST: 2.1]**
-            3. Run it with execute_command, or read the produced files to verify them.
+            3. Run it with execute_command per the VERIFICATION STANDARD above. Only read the
+               produced files instead when there is genuinely nothing to execute (e.g. checking
+               prose content) — never as a shortcut around running code that can be run.
             4. If it fails, fix the implementation with the file tools and re-run until it passes.
             5. IMMEDIATELY tick that one item with replace_in_file on {plan_path}, exactly as the
                Implementation agent does. One box per step, right after it passes.
@@ -272,10 +361,15 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
             and never wait for a reply.
             {rules}
 
-            1. read_file {plan_path}, then inspect the files that were produced (and re-run any
-               tests or commands needed to judge them).
-            2. Decide: is the work good — every planned item genuinely done, verified, and free of
-               defects?
+            1. read_file {plan_path}, then inspect the files that were produced. You MUST
+               personally re-run the project's own mechanical checks (build/compile, test suite,
+               start-and-hit-it, run-with-sample-input — per the VERIFICATION STANDARD above)
+               with execute_command before you may say PASS. A Testing-phase item already reading
+               "- [x]" is NOT evidence it still passes — later steps may have edited those same
+               files since, silently invalidating it. Re-run it yourself, now, in this phase.
+               A review with zero execute_command/read_file calls is not a review.
+            2. Decide: is the work good — every planned item genuinely done, verified BY YOU JUST
+               NOW, and free of defects?
             3. If the review is GOOD: do NOT write or touch {review_path}. Just output a short
                "Review: PASS" summary in your reply (what was built, what was verified).
             4. Only if problems exist (broken/unfinished work, failing tests, missing pieces):
@@ -497,7 +591,9 @@ class SimpleSessionManager:
 
         # Path logic handled entirely inside the manager
         os_session_path = os.environ.get("SESSION_PATH", ".")
-        self.session_path = Path(os_session_path) / ".JFI" / self.session_id
+        self.session_path = Path(os_session_path) / "JFI" / self.session_id
+        self._lock_path = None
+        self._acquire_session_lock()
         self.history_path = self.session_path / "history.jsonl.gz"
         # Old full-rewrite-per-message format; read-only, for one-time migration.
         self._legacy_history_path = self.session_path / "history.pkl"
@@ -531,7 +627,7 @@ class SimpleSessionManager:
 
     def _resolve_session_file_path(self, filename: str) -> str:
         """
-        Single source of truth for locating a file inside this session's .JFI
+        Single source of truth for locating a file inside this session's JFI
         folder (the plan, the context cache, ...): made cwd-relative when
         possible so it works with the file tools (sandboxed to cwd).
         """
@@ -540,22 +636,97 @@ class SimpleSessionManager:
         if target.is_relative_to(cwd):
             return str(target.relative_to(cwd))
         # Session dir lives outside the tool sandbox; express it relative to
-        # cwd so the file still lands in .JFI/<session>/<filename>.
+        # cwd so the file still lands in JFI/<session>/<filename>.
         self.console.display_system(
             "Session path is outside the working directory — keeping "
-            f"{filename} inside the .JFI session folder."
+            f"{filename} inside the JFI session folder."
         )
-        return f".JFI/{self.session_id}/{filename}"
+        return f"JFI/{self.session_id}/{filename}"
 
     def _resolve_plan_path(self) -> str:
         return self._resolve_session_file_path("plan.md")
 
     @property
     def plan_file(self) -> Path:
-        """Absolute location of the plan file (always inside this session's .JFI folder)."""
+        """Absolute location of the plan file (always inside this session's JFI folder)."""
         return (self.session_path / "plan.md").resolve()
 
     # -------------------------------------------------------- context cache
+
+    def _acquire_session_lock(self) -> None:
+        """
+        Exclusive OS-level lock (flock) on this session's own folder —
+        refuses to run the same session_id twice at once, which would
+        otherwise let two processes race on history.jsonl.gz/plan.md/
+        context.json and corrupt them.
+
+        Released automatically when this process exits or the underlying
+        file handle is closed (see release_session_lock), even on a crash
+        — flock is held by the OS against the open file description, not a
+        stale PID file that would need its own cleanup/staleness logic. A
+        no-op wherever fcntl isn't available (Windows).
+
+        flock's exclusivity is scoped to the open file description, not the
+        process: two independent open()s of the same path *in this same
+        process* would otherwise block each other exactly like a genuinely
+        different process would — which a second SimpleSessionManager for
+        the same session_id, constructed within this process, legitimately
+        does (a Ctrl+N handoff overlapping briefly, or simply building a
+        fresh manager to inspect a session already open elsewhere in the
+        same run). _SESSION_LOCKS refcounts by resolved lock path so only a
+        genuinely different process ever gets refused.
+        """
+        if fcntl is None:
+            return
+        self.session_path.mkdir(parents=True, exist_ok=True)
+        lock_path = str((self.session_path / ".lock").resolve())
+
+        entry = _SESSION_LOCKS.get(lock_path)
+        if entry is not None:
+            entry[0] += 1
+            self._lock_path = lock_path
+            return
+
+        lock_file = open(lock_path, "w")
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock_file.close()
+            raise SessionInUseError(
+                f"Session '{self.session_id}' is already running in another JFI process "
+                f"(lock held on {lock_path}). Stop that run first, or pick a different "
+                f"session name."
+            )
+        _SESSION_LOCKS[lock_path] = [1, lock_file]
+        self._lock_path = lock_path
+
+    def release_session_lock(self) -> None:
+        """Releases this session's claim on its lock, if held — call once
+        this SimpleSessionManager is done being used (see
+        runner._run_session), so a later SimpleSessionManager (this
+        process or another) can acquire it. The underlying OS lock is only
+        actually released once every claim on it in this process has been
+        released (see _acquire_session_lock)."""
+        lock_path, self._lock_path = getattr(self, "_lock_path", None), None
+        if lock_path is None:
+            return
+        entry = _SESSION_LOCKS.get(lock_path)
+        if entry is None:
+            return
+        entry[0] -= 1
+        if entry[0] > 0:
+            return
+        del _SESSION_LOCKS[lock_path]
+        _, lock_file = entry
+        try:
+            if fcntl is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            lock_file.close()
+        except OSError:
+            pass
 
     @property
     def context_cache_file(self) -> Path:
@@ -569,14 +740,49 @@ class SimpleSessionManager:
             self.context_cache_file.write_text("{}\n", encoding="utf-8")
 
     def plan_progress(self):
-        """(ticked, total) task-list checkboxes in the plan file."""
+        """(resolved, total) task-list checkboxes in the plan file. A
+        user-skipped "- [○]" item counts as resolved alongside "- [x]" —
+        it's no longer pending action, just not done by the model."""
         try:
             text = self.plan_file.read_text(encoding="utf-8")
         except Exception:
             return 0, 0
         done = len(re.findall(r"^[ \t]*[-*][ \t]*\[[xX]\]", text, re.M))
+        skipped = len(re.findall(r"^[ \t]*[-*][ \t]*\[○\]", text, re.M))
         todo = len(re.findall(r"^[ \t]*[-*][ \t]*\[[ ]\]", text, re.M))
-        return done, done + todo
+        return done + skipped, done + skipped + todo
+
+    def phase_progress(self, phase: str):
+        """(resolved, total) task-list checkboxes within just `phase`'s own
+        section (e.g. imp -> "Implementation" only), same resolved/total
+        rule as plan_progress but scoped instead of whole-file — so the
+        console can show "3/19 this phase" alongside "3/35 overall".
+        Returns (0, 0) for planner/reviewer, which have no per-item
+        checklist of their own (see PHASE_SECTION)."""
+        section = PHASE_SECTION.get(phase)
+        if not section:
+            return 0, 0
+        try:
+            text = self.plan_file.read_text(encoding="utf-8")
+        except Exception:
+            return 0, 0
+
+        done = skipped = todo = 0
+        in_section = False
+        for line in text.splitlines():
+            header = re.match(r"^\s*#{1,6}\s+(.*)", line)
+            if header:
+                in_section = header.group(1).strip().lower().startswith(section.lower())
+                continue
+            if not in_section:
+                continue
+            if re.match(r"^[ \t]*[-*][ \t]*\[[xX]\]", line):
+                done += 1
+            elif re.match(r"^[ \t]*[-*][ \t]*\[○\]", line):
+                skipped += 1
+            elif re.match(r"^[ \t]*[-*][ \t]*\[[ ]\]", line):
+                todo += 1
+        return done + skipped, done + skipped + todo
 
     def _pending_items(self, section: str) -> list[str]:
         """
@@ -604,6 +810,77 @@ class SimpleSessionManager:
                 pending.append(line.strip())
         return pending
 
+    def skip_current_task(self, phase: str) -> Optional[str]:
+        """
+        Ctrl+K: marks `phase`'s first unchecked item "- [○] ..." instead of
+        ticking it — the user's own call that this one item is done with,
+        not the model's. Only imp/testing have a checklist to skip from;
+        returns None (no-op) for any other phase, or when nothing is
+        pending. Returns the skipped item's description text on success.
+
+        Edits the raw line directly (not through _pending_items' stripped
+        copy) so original indentation is preserved exactly, the same
+        byte-for-byte-except-the-marker discipline PLAN_FORMAT_RULES asks
+        the model to follow for its own "- [x]" ticks.
+        """
+        section = PHASE_SECTION.get(phase)
+        if not section:
+            return None
+        try:
+            text = self.plan_file.read_text(encoding="utf-8")
+        except Exception:
+            return None
+
+        lines = text.splitlines(keepends=True)
+        in_section = False
+        for i, raw_line in enumerate(lines):
+            line = raw_line.splitlines()[0] if raw_line.splitlines() else ""
+            header = re.match(r"^\s*#{1,6}\s+(.*)", line)
+            if header:
+                in_section = header.group(1).strip().lower().startswith(section.lower())
+                continue
+            item = re.match(r"^([ \t]*[-*][ \t]+)\[ \]([ \t]+.*)", line)
+            if in_section and item:
+                newline = "\n" if raw_line.endswith("\n") else ""
+                lines[i] = item.group(1) + "[○]" + item.group(2) + newline
+                self.plan_file.write_text("".join(lines), encoding="utf-8")
+                return item.group(2).strip()
+        return None
+
+    def skip_remaining_tasks(self, phase: str) -> int:
+        """
+        Ctrl+Q: marks EVERY still-unchecked item in `phase`'s section
+        "- [○] ..." in one pass — the bulk version of skip_current_task, for
+        "I'm done reviewing this phase item by item, move on." Returns how
+        many items were skipped (0 for a phase with no checklist, or one
+        already clear).
+        """
+        section = PHASE_SECTION.get(phase)
+        if not section:
+            return 0
+        try:
+            text = self.plan_file.read_text(encoding="utf-8")
+        except Exception:
+            return 0
+
+        lines = text.splitlines(keepends=True)
+        in_section = False
+        skipped = 0
+        for i, raw_line in enumerate(lines):
+            line = raw_line.splitlines()[0] if raw_line.splitlines() else ""
+            header = re.match(r"^\s*#{1,6}\s+(.*)", line)
+            if header:
+                in_section = header.group(1).strip().lower().startswith(section.lower())
+                continue
+            item = re.match(r"^([ \t]*[-*][ \t]+)\[ \]([ \t]+.*)", line)
+            if in_section and item:
+                newline = "\n" if raw_line.endswith("\n") else ""
+                lines[i] = item.group(1) + "[○]" + item.group(2) + newline
+                skipped += 1
+        if skipped:
+            self.plan_file.write_text("".join(lines), encoding="utf-8")
+        return skipped
+
     def current_task_title(self, phase: str, max_len: int = 140) -> Optional[str]:
         """
         The first unchecked item's descriptive text for `phase`'s section
@@ -616,7 +893,7 @@ class SimpleSessionManager:
         model's own self-reported "[CURRENT TASK: ...]" text, which would
         need parsing streamed output and could drift out of sync mid-turn.
         """
-        section = {"imp": "Implementation", "testing": "Testing"}.get(phase)
+        section = PHASE_SECTION.get(phase)
         if not section:
             return None
         pending = self._pending_items(section)
@@ -857,7 +1134,7 @@ class SimpleSessionManager:
         not need to scan the whole plan just to find what is left.
         """
         base = get_system_message(phase, self.plan_path, self.context_cache_path)
-        section = {"imp": "Implementation", "testing": "Testing"}.get(phase)
+        section = PHASE_SECTION.get(phase)
         if phase in ("planner", "reviewer") or not section:
             return base
 

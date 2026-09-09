@@ -10,7 +10,7 @@ import json
 import pytest
 
 # Import at module level so the parametrize decorator can reference the table.
-from JFI.manager.pt_console_manager import PT_THEME_PRESETS
+from JFI.manager.pt_console_manager import PT_THEME_PRESETS, UI_STYLE_BASE
 
 
 def test_six_presets_exist():
@@ -126,16 +126,17 @@ def test_main_loads_dotenv_before_console(monkeypatch):
     """`load_dotenv` must run BEFORE the console is built in `runner.main()`,
     otherwise a THEME set in .env would be resolved from an empty environment.
     A spy records the call order so any future reorder fails this test."""
+    import sys
+
     import JFI.runner as runner
     import JFI.manager.pt_console_manager as ptm
 
+    monkeypatch.setattr(sys, "argv", ["jfi"])  # main() now parses argv; don't see pytest's own
     order: list[str] = []
     monkeypatch.setattr(
         runner, "load_dotenv", lambda *a, **k: order.append("load_dotenv") or True
     )
     monkeypatch.setattr(runner, "find_dotenv", lambda *a, **k: ".env")
-
-    real_init = ptm.PromptToolkitConsoleManager.__init__
 
     def spy_init(self, *args, **kwargs):
         order.append("console_init")
@@ -150,7 +151,7 @@ def test_main_loads_dotenv_before_console(monkeypatch):
         runner.OpenAICompatableStream, "close", lambda self: None
     )
     fake_llm = type("FakeLLM", (), {"close": staticmethod(lambda *a, **k: None)})()
-    monkeypatch.setattr(runner, "OpenAICompatableStream", lambda: fake_llm)
+    monkeypatch.setattr(runner, "OpenAICompatableStream", lambda *a, **k: fake_llm)
 
     def no_pipeline(console, llm):  # noqa: ANN001 - signature matches run_pipeline
         pass
@@ -159,8 +160,6 @@ def test_main_loads_dotenv_before_console(monkeypatch):
     runner.main()
 
     assert order == ["load_dotenv", "console_init"]
-<<<<<<< Updated upstream
-=======
 
 
 # --------------------------------------------------------- background fill
@@ -356,4 +355,3 @@ def test_unknown_preset_hint_mentions_custom_theme_option(monkeypatch, capsys):
     ptm.resolve_pt_theme()
     out = capsys.readouterr().out
     assert "inline custom theme" in out
->>>>>>> Stashed changes

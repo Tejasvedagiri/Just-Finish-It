@@ -1,8 +1,8 @@
 """
-Tests for the .JFI plan-file location and related helpers:
+Tests for the JFI plan-file location and related helpers:
 
 - SimpleSessionManager._resolve_plan_path always points into this session's
-  .JFI folder (cwd-relative when possible).
+  JFI folder (cwd-relative when possible).
 - get_system_message embeds that path in every phase prompt.
 - _pending_items parses GitHub task-list items per section, ignoring "- [x]"
   lines and items from other sections; a missing plan yields [].
@@ -29,8 +29,8 @@ def test_resolve_plan_path_is_inside_jfi_folder(console, tmp_path):
          patch("pathlib.Path.cwd", return_value=Path.cwd()):
         mgr = SimpleSessionManager(console, "Demo Session")
 
-    # session folder is .JFI/<session_id>; plan lives inside it.
-    assert mgr.session_path == Path(str(tmp_path)) / ".JFI" / "demo_session"
+    # session folder is JFI/<session_id>; plan lives inside it.
+    assert mgr.session_path == Path(str(tmp_path)) / "JFI" / "demo_session"
 
     with patch("os.environ", {"SESSION_PATH": str(tmp_path)}):
         resolved = mgr._resolve_plan_path()
@@ -38,28 +38,28 @@ def test_resolve_plan_path_is_inside_jfi_folder(console, tmp_path):
     # The path must be cwd-relative (no leading slash) and end in the plan.
     assert not Path(resolved).is_absolute(), f"path should be cwd-relative: {resolved}"
     assert resolved.endswith("plan.md")
-    # And it must route through this session's .JFI folder.
-    assert "/.JFI/" in resolved or resolved.startswith(".JFI/")
+    # And it must route through this session's JFI folder.
+    assert "/JFI/" in resolved or resolved.startswith("JFI/")
 
 
 def test_resolve_plan_path_relative_to_cwd(console, tmp_path):
-    """When SESSION_PATH is the cwd itself, the plan path is '.JFI/<id>/plan.md'."""
+    """When SESSION_PATH is the cwd itself, the plan path is 'JFI/<id>/plan.md'."""
     with patch("os.environ", {"SESSION_PATH": str(tmp_path)}), \
          patch("pathlib.Path.cwd", return_value=Path(str(tmp_path))):
         mgr = SimpleSessionManager(console, "abc")
         resolved = mgr._resolve_plan_path()
 
-    assert resolved == ".JFI/abc/plan.md"
+    assert resolved == "JFI/abc/plan.md"
 
 
 def test_resolve_plan_path_fallback_outside_cwd(console, tmp_path):
-    """When the session dir is outside the tool sandbox cwd, fall back to '.JFI/<id>/plan.md'."""
+    """When the session dir is outside the tool sandbox cwd, fall back to 'JFI/<id>/plan.md'."""
     with patch("os.environ", {"SESSION_PATH": str(tmp_path)}), \
          patch("pathlib.Path.cwd", return_value=Path("/nonexistent-cwd-for-test")):
         mgr = SimpleSessionManager(console, "xyz")
         resolved = mgr._resolve_plan_path()
 
-    assert resolved == ".JFI/xyz/plan.md"
+    assert resolved == "JFI/xyz/plan.md"
 
 
 def test_session_id_is_lowercased_and_underscored(console, tmp_path):
@@ -82,14 +82,14 @@ def test_session_id_is_lowercased_and_underscored(console, tmp_path):
     ],
 )
 def test_system_message_contains_plan_path_and_marker(phase, marker):
-    msg = get_system_message(phase, plan_path=".JFI/session1/plan.md")
-    assert ".JFI/session1/plan.md" in msg
+    msg = get_system_message(phase, plan_path="JFI/session1/plan.md")
+    assert "JFI/session1/plan.md" in msg
     assert marker in msg
 
 
 def test_system_message_default_plan_path():
-    """The default fallback path is the .JFI folder (not the old project root)."""
-    assert DEFAULT_PLAN_PATH == ".JFI/plan.md"
+    """The default fallback path is the JFI folder (not the old project root)."""
+    assert DEFAULT_PLAN_PATH == "JFI/plan.md"
     # Every phase prompt defaults to that location.
     for phase in ("planner", "imp", "testing", "reviewer"):
         msg = get_system_message(phase)
@@ -127,8 +127,8 @@ def _manager_with_plan(console, tmp_path):
          patch("pathlib.Path.cwd", return_value=Path(str(tmp_path))):
         mgr = SimpleSessionManager(console, "plan-test")
 
-    # Write the plan into the session's .JFI folder.
-    plan_file = Path(str(tmp_path)) / ".JFI" / "plan-test" / "plan.md"
+    # Write the plan into the session's JFI folder.
+    plan_file = Path(str(tmp_path)) / "JFI" / "plan-test" / "plan.md"
     plan_file.parent.mkdir(parents=True, exist_ok=True)
     plan_file.write_text(PLAN_TEXT, encoding="utf-8")
     return mgr

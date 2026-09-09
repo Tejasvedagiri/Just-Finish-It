@@ -7,18 +7,6 @@ and its colors come from a small set of style dictionaries in
 - `UI_STYLE_BASE` — the baseline UI chrome (header, phase breadcrumb, status bar, rule
   lines, prompt). It uses ANSI color *names* (`ansicyan`, `ansiwhite`, ...) on purpose so
   those parts inherit whatever palette your terminal already has.
-<<<<<<< Updated upstream
-- `PT_THEME_PRESETS` — six named presets. Each one only overrides the three message-role
-  keys (`out.user`, `out.assistant`/`.tag`, and `out.system`) with **literal hex** colors,
-  so they render identically regardless of the user's terminal palette.
-
-That split is deliberate: a preset changes how *your messages and the AI's output* look,
-while the UI chrome stays consistent on top of it.
-
-`dark-default` overrides nothing — it *is* the ANSI-based baseline above — so a run with no
-`THEME` set looks identical to `THEME=dark-default`. The other five presets each define their
-own message-role hex colors and are shown below.
-=======
 - `PT_THEME_PRESETS` — twenty named presets. Each one overrides the message-role keys
   (`out.user`, `out.assistant`/`.tag`, and `out.system`) plus the terminal **background**
   itself, all with **literal hex** colors, so a preset renders identically regardless of
@@ -39,7 +27,6 @@ terminal profile happened to be (a stray purple, in one case that prompted this)
 `THEME` set looks identical to `THEME=dark-default`, background included. The other
 nineteen presets each define their own background plus message-role hex colors and are
 shown below.
->>>>>>> Stashed changes
 
 ## Selecting a theme (`THEME`)
 
@@ -117,14 +104,6 @@ THEME='{"": "bg:#112233 fg:#eeeeee", "out.user": "bold #ff8800", "out.assistant"
 
 | Preset | Background family | Character |
 |---|---|---|
-<<<<<<< Updated upstream
-| `dark-default`  | dark  | ANSI baseline (no overrides) — matches an unset `THEME`. |
-| `dark-ocean`    | dark  | Cool blue user text, teal AI output. |
-| `dark-mono`     | dark  | Grayscale only: white user, light-gray AI, mid-gray system. |
-| `light-default` | light | Blue user text, green AI output — the auto-detected light pick. |
-| `light-sunrise` | light | Warm palette: magenta user, deep-red AI output. |
-| `light-paper`   | light | Ink-on-paper, low saturation: navy user, sage-green AI. |
-=======
 | `dark-default`  | dark  | ANSI baseline (no overrides, terminal's own background) — matches an unset `THEME`. |
 | `dark-ocean`    | dark  | Cool blue user text, teal AI output, deep navy background. |
 | `dark-mono`     | dark  | Grayscale only: white user, light-gray AI, mid-gray system, near-black background. |
@@ -145,7 +124,6 @@ THEME='{"": "bg:#112233 fg:#eeeeee", "out.user": "bold #ff8800", "out.assistant"
 | `rose-pine-dawn`| light | Rosé Pine Dawn — the light companion flavor, warm cream base. |
 | `one-dark`      | dark  | [One Dark](https://github.com/atom/atom/tree/master/packages/one-dark-ui) — Atom's iconic blue/green/purple on slate. |
 | `everforest-dark`| dark | [Everforest](https://github.com/sainnhe/everforest) — soft, nature-toned greens on a muted forest-green base. |
->>>>>>> Stashed changes
 
 The screenshots below are captured from the **real running console** — a genuine
 `PromptToolkitConsoleManager` rendered through prompt_toolkit on a real pty, not a drawn
@@ -195,8 +173,6 @@ Warm palette: magenta user text (`#af00af`) and deep-red AI output (`#870000`).
 Ink-on-paper, low saturation: navy user text on a warm off-white background.
 
 ![light-paper theme](images/theme-light-paper.png)
-<<<<<<< Updated upstream
-=======
 
 ### `catppuccin-mocha`
 
@@ -294,4 +270,3 @@ iris tag (`#907aa9`), on a warm cream `#faf4ed` base.
 (`#a7c080`), pink tag (`#d699b6`), on a muted forest-green `#2d353b` base.
 
 ![everforest-dark theme](images/theme-everforest-dark.png)
->>>>>>> Stashed changes

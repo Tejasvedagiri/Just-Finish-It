@@ -38,10 +38,13 @@ def _restore_tool_map():
 
 
 def test_run_pipeline_binds_gated_execute_command_to_session_context_cache():
-    from JFI.runner import TOOL_MAP, run_pipeline
+    from JFI.runner import PHASES, TOOL_MAP, run_pipeline
 
-    console = _FakeConsole(answers=["gate-session", "goal: do the thing", "n"])
-    run_pipeline(console, _FakeLLM())
+    # "s" answers the "LLM request failed. Retry, or stop the run?" menu
+    # run_phase now raises instead of giving up silently (see runner.py);
+    # "n" is left over for the later, separate gated(...) call below.
+    console = _FakeConsole(answers=["gate-session", "goal: do the thing", "s", "n"])
+    run_pipeline(console, {phase: _FakeLLM() for phase in PHASES})
 
     gated = TOOL_MAP["execute_command"]
     assert gated is not execute_command  # replaced with the gated wrapper

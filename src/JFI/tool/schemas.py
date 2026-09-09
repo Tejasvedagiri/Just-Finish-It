@@ -33,6 +33,15 @@ AVAILABLE_TOOLS = [
                     "command": {
                         "type": "string",
                         "description": "The terminal command to run, e.g., 'pip install requests' or 'python test.py'"
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": (
+                            "Seconds to wait before giving up on this command. Defaults to 300 -- "
+                            "raise it (e.g. 600-1200) for anything that legitimately takes even "
+                            "longer, like installing large packages or running a slow build/test "
+                            "suite."
+                        )
                     }
                 },
                 "required": ["command"]
@@ -127,7 +136,7 @@ AVAILABLE_TOOLS = [
                     "directory": {
                         "type": "string",
                         "description": (
-                            "Where to save the screenshot — pass your session's .JFI/<session> "
+                            "Where to save the screenshot — pass your session's JFI/<session> "
                             "folder (the same directory your plan file lives in)."
                         )
                     }
@@ -181,7 +190,7 @@ AVAILABLE_TOOLS = [
                         "type": "string",
                         "description": (
                             "Where to save downloaded images — pass your session's "
-                            ".JFI/<session> folder (the same directory your plan file lives in)."
+                            "JFI/<session> folder (the same directory your plan file lives in)."
                         )
                     },
                     "max_images": {
@@ -190,6 +199,79 @@ AVAILABLE_TOOLS = [
                     }
                 },
                 "required": ["url", "directory"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "context_save",
+            "description": (
+                "Saves one fact to your persistent context cache in a single call — merges "
+                "it in without disturbing any other key already there. This is the correct "
+                "way to add or update a context-cache fact; do NOT read_file + write_file "
+                "the whole cache by hand, that risks dropping other keys you didn't retype."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Short identifier for this fact, e.g. 'db_schema'."
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "The fact itself, e.g. 'users table: id, email, created_at'."
+                    }
+                },
+                "required": ["key", "value"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "context_lookup",
+            "description": (
+                "Searches your persistent context cache instead of reading the whole file. "
+                "Call with no keyword first to list every saved key plus a short preview — "
+                "then call again with a keyword (matched against keys and values, case-"
+                "insensitive) to get the full text of just what's relevant."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "keyword": {
+                        "type": "string",
+                        "description": "Term to search for. Omit or leave blank to list all saved keys."
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_llm",
+            "description": (
+                "Asks a fresh, single-turn LLM call anything — write a description, brainstorm "
+                "names, clarify an ambiguous requirement, summarize a chunk of text, or handle "
+                "any other one-off text task that doesn't need a dedicated tool. This call is "
+                "STATELESS: it has NO access to your conversation, the plan file, or any files "
+                "on disk — put everything it needs directly in the prompt. Do NOT use this for "
+                "file operations, running commands, or anything another tool already does "
+                "directly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The full, self-contained question or instruction to send."
+                    }
+                },
+                "required": ["prompt"]
             }
         }
     },

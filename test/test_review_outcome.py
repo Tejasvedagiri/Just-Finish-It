@@ -94,15 +94,15 @@ class TestPlannerTriggerForReIteration:
         from JFI.session.simple_session_manager import get_phase_trigger
 
         msg = get_phase_trigger(
-            "planner", "goal", ".JFI/demo/plan.md", iteration=2, review_path=".JFI/demo/review.md"
+            "planner", "goal", "JFI/demo/plan.md", iteration=2, review_path="JFI/demo/review.md"
         )
-        assert ".JFI/demo/review.md" in msg
+        assert "JFI/demo/review.md" in msg
         assert "- [x]" in msg  # do not touch ticked lines
 
     def test_planner_trigger_without_review_is_plain(self):
         from JFI.session.simple_session_manager import get_phase_trigger
 
-        msg = get_phase_trigger("planner", "goal", ".JFI/demo/plan.md", iteration=2)
+        msg = get_phase_trigger("planner", "goal", "JFI/demo/plan.md", iteration=2)
         assert "review" not in msg.lower()
 
 

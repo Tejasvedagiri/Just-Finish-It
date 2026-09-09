@@ -1,8 +1,8 @@
 """Shared fixtures: consoles and SimpleSessionManagers that are safe in tests.
 
-The manager resolves its .JFI folder relative to SESSION_PATH (default cwd), so
+The manager resolves its JFI folder relative to SESSION_PATH (default cwd), so
 every test runs inside a fresh temp directory — no real files are touched and
-the plan path comes out as ".JFI/<session>/plan.md".
+the plan path comes out as "JFI/<session>/plan.md".
 """
 
 import pytest

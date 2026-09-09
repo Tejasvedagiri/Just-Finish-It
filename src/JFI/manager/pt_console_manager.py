@@ -19,11 +19,13 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension as D
+from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.styles import Style
 
-from JFI.manager.abstract_manager import AbstractManager, phase_display_name
+from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.manager.key_bindings import add_shift_enter_newline, teach_terminal_shift_enter
 from JFI.manager.theme_env import resolve_explicit_theme, theme_label
+from JFI.text_sanitize import strip_leaked_special_tokens
 
 teach_terminal_shift_enter()
 
@@ -72,14 +74,6 @@ UI_STYLE_BASE: Dict[str, str] = {
     "out.rule": "bold ansibrightblack",
 }
 
-<<<<<<< Updated upstream
-# Per-preset overrides for the three message-role colors, keyed the same as
-# README's THEME table. Colors here are literal hex so they render the same
-# regardless of the user's terminal ANSI palette (unlike the ansi* names in
-# UI_STYLE_BASE, which deliberately inherit it). "dark-default" overrides
-# nothing: it *is* the ansi*-based baseline above, so a THEME-less run and
-# THEME=dark-default look identical.
-=======
 # Per-preset overrides for the message-role colors, plus the terminal
 # background/default-foreground fill (the "" key — matched by every style
 # lookup, see Style.get_attrs_for_style_str), keyed the same as README's
@@ -96,41 +90,43 @@ UI_STYLE_BASE: Dict[str, str] = {
 # brightened by bold the way a named ANSI color can on some terminals (see
 # UI_STYLE_BASE above), so reusing the body color for the tag made the two
 # render identically, defeating the point of a role label.
->>>>>>> Stashed changes
 PT_THEME_PRESETS: Dict[str, Dict[str, str]] = {
     "dark-default": {},
     "dark-ocean": {
+        "": "bg:#141b26 fg:#c8d6e5",
         "out.user": "bold #5fafff",
         "out.assistant": "#00afaf",
         "out.assistant.tag": "bold #e0af68",
         "out.system": "#5f5fbe",
     },
     "dark-mono": {
+        "": "bg:#1a1a1a fg:#d0d0d0",
         "out.user": "bold #ffffff",
         "out.assistant": "#a0a0a0",
         "out.assistant.tag": "bold #f5f5f5",
         "out.system": "#808080",
     },
     "light-default": {
+        "": "bg:#ffffff fg:#1a1a1a",
         "out.user": "bold #0000ff",
         "out.assistant": "bold #006400",
         "out.assistant.tag": "bold #4b0082",
         "out.system": "#444444",
     },
     "light-sunrise": {
+        "": "bg:#fdf3e0 fg:#4a3728",
         "out.user": "bold #af00af",
         "out.assistant": "#870000",
         "out.assistant.tag": "bold #006064",
         "out.system": "#87875f",
     },
     "light-paper": {
+        "": "bg:#f7f3ec fg:#3a3a34",
         "out.user": "#00005f",
         "out.assistant": "#5f8767",
         "out.assistant.tag": "bold #a0522d",
         "out.system": "#808080",
     },
-<<<<<<< Updated upstream
-=======
     # Catppuccin (https://github.com/catppuccin/catppuccin) — its four
     # official flavors, mapped onto the same four message-role keys using
     # each flavor's own blue/green/overlay1 accents from the published
@@ -238,7 +234,6 @@ PT_THEME_PRESETS: Dict[str, Dict[str, str]] = {
         "out.assistant.tag": "bold #d699b6",
         "out.system": "#859289",
     },
->>>>>>> Stashed changes
 }
 
 
@@ -274,6 +269,12 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # Typing "!something" jumps the queue; a bare "!" promotes the whole queue.
 FORCE_PREFIX = "!"
+
+# Overridable via STREAM_OUTPUT_CAP in .env — print_agent_response aborts a
+# single streamed response (raising ResponseTooLongError) once its running
+# char/4 estimate crosses this, so a runaway/looping generation can't stream
+# forever burning tokens and context.
+DEFAULT_STREAM_OUTPUT_CAP = 10000
 
 
 class PromptToolkitConsoleManager(AbstractManager):
@@ -345,7 +346,8 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._choice_options: Optional[List[Tuple[str, str]]] = None
         self._choice_index = 0
         self._iteration = 1
-        self._plan = None  # (ticked, total) checkbox progress
+        self._plan = None  # (ticked, total) checkbox progress, whole plan
+        self._phase_plan = None  # (ticked, total) checkbox progress, current phase's section only
         self._task: Optional[str] = None  # current plan item's text (imp/testing only)
         self._tokens = None  # (estimated tokens used, context window)
         self._tokens_read = 0  # cumulative prompt tokens sent this run
@@ -363,6 +365,19 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._queued_snapshot: List[str] = []
         self._queue_on_change: Optional[Callable[[List[str]], None]] = None
         self._stop = threading.Event()
+        # Ctrl+N (restart): only actionable while idle after a review, see
+        # wait_for_queued_input/_idle_wait below.
+        self._restart = threading.Event()
+        self._idle_wait = False
+        # Ctrl+P (pause/resume): checked between turns in runner.run_phase,
+        # never mid-turn, so an in-flight LLM call/tool always finishes first.
+        self._paused = threading.Event()
+        # Ctrl+K (skip one item) / Ctrl+Q (skip the rest of this phase):
+        # edit the plan file directly instead of asking the model to comply
+        # (see SimpleSessionManager.skip_current_task/skip_remaining_tasks),
+        # so the skip is guaranteed rather than merely requested.
+        self._skip_requested = threading.Event()
+        self._skip_all_requested = threading.Event()
         self._app: Optional[Application] = None
         self._worker_error: Optional[BaseException] = None
 
@@ -440,6 +455,11 @@ class PromptToolkitConsoleManager(AbstractManager):
         add_shift_enter_newline(kb)
 
         choice_active = Condition(lambda: self._choice_options is not None)
+        # A phase is actively running: not idling on the post-review queue,
+        # and not blocked on a question/choice (those already own Enter).
+        phase_active = Condition(
+            lambda: not self._idle_wait and self._awaiting is None and self._choice_options is None
+        )
 
         @kb.add("left", filter=choice_active)
         @kb.add("up", filter=choice_active)
@@ -479,6 +499,31 @@ class PromptToolkitConsoleManager(AbstractManager):
                 event.app.exit()  # second press: leave now
                 return
             self.request_stop()
+
+        @kb.add("c-n", filter=Condition(lambda: self._idle_wait))
+        def _new_session(event):
+            self._restart.set()
+
+        @kb.add("c-p", filter=phase_active)
+        def _toggle_pause(event):
+            if self._paused.is_set():
+                self._paused.clear()
+                self._line("class:out.system", " ▶  Resumed.")
+            else:
+                self._paused.set()
+                self._line("class:out.system", " ⏸  Paused — will hold before the next turn.")
+            self._invalidate()
+
+        # No prompt_toolkit binding for c-k reuses this app's "delete to end
+        # of line" binding — deliberate: this app has no use for kill/yank,
+        # and Ctrl+K reads naturally as "skip this one".
+        @kb.add("c-k", filter=phase_active)
+        def _skip_one(event):
+            self._skip_requested.set()
+
+        @kb.add("c-q", filter=phase_active)
+        def _skip_all(event):
+            self._skip_all_requested.set()
 
         return kb
 
@@ -579,6 +624,16 @@ class PromptToolkitConsoleManager(AbstractManager):
             return fragments
 
     @staticmethod
+    def _progress_bar(ticked: int, total: int, width: int = 8) -> str:
+        """Fixed-width `width`-character bar (█ filled, ░ empty) for a
+        ticked/total pair — kept short since the header is already dense;
+        the exact fraction is always printed right after it."""
+        if total <= 0:
+            return "░" * width
+        filled = max(0, min(width, round(width * ticked / total)))
+        return "█" * filled + "░" * (width - filled)
+
+    @staticmethod
     def _fmt_tokens(n: int) -> str:
         """Compact token count: 987, 12.3k, or 3.1M (cumulative read/written
         counters cross into the millions on a long session, and 4-digit 'k'
@@ -594,6 +649,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             session, phases = self._session, list(self._phases)
             phase, done = self._phase, set(self._done_phases)
             iteration, plan, tokens = self._iteration, self._plan, self._tokens
+            phase_plan = self._phase_plan
             tokens_read, tokens_written = self._tokens_read, self._tokens_written
 
         frags = [("class:header", f" {self.title}")]
@@ -603,6 +659,7 @@ class PromptToolkitConsoleManager(AbstractManager):
                 ("class:header.tokens", f"↓{self._fmt_tokens(tokens_read)}"),
                 ("class:header.dim", " "),
                 ("class:header.tokens", f"↑{self._fmt_tokens(tokens_written)}"),
+                ("class:header.dim", " tokens"),
             ]
         if session:
             frags += [("class:header.dim", "  ·  session: "), ("class:header", session)]
@@ -623,10 +680,19 @@ class PromptToolkitConsoleManager(AbstractManager):
                     frags.append(("class:header.phase.active", f"▸ {label}"))
                 else:
                     frags.append(("class:header.phase", label))
+        if phase_plan and phase_plan[1]:
+            p_ticked, p_total = phase_plan
+            p_style = "class:header.phase.done" if p_ticked == p_total else "class:header.loop"
+            bar = self._progress_bar(p_ticked, p_total)
+            frags += [
+                ("class:header.dim", f"  ·  {phase_display_name(phase).lower()} "),
+                (p_style, f"{bar} {p_ticked}/{p_total}"),
+            ]
         if plan and plan[1]:
             ticked, total = plan
             style = "class:header.phase.done" if ticked == total else "class:header.loop"
-            frags += [("class:header.dim", "  ·  plan "), (style, f"{ticked}/{total}")]
+            bar = self._progress_bar(ticked, total)
+            frags += [("class:header.dim", "  ·  total "), (style, f"{bar} {ticked}/{total}")]
         if tokens and tokens[1]:
             used, budget = tokens
             pct = min(100, int(used * 100 / budget))
@@ -668,6 +734,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             phase, state, awaiting, follow = self._phase, self._state, self._awaiting, self._follow
             choice_options = list(self._choice_options) if self._choice_options else None
             choice_index = self._choice_index
+            idle_wait = self._idle_wait
         queued, forced = self._queued.qsize(), self._forced.qsize()
 
         frags = [
@@ -689,6 +756,9 @@ class PromptToolkitConsoleManager(AbstractManager):
                     frags.append(("class:status.choice", f"  {label}"))
         elif awaiting is not None:
             frags += [("class:status.wait", "⌨ waiting for your input")]
+        elif self._paused.is_set():
+            label = f"{phase_display_name(phase)} · paused" if phase else "paused"
+            frags += [("class:status.forced", f"⏸ {label}")]
         else:
             tick = SPINNER[int(time.monotonic() * 10) % len(SPINNER)]
             label = f"{phase_display_name(phase)} · {state}" if phase else state
@@ -704,6 +774,10 @@ class PromptToolkitConsoleManager(AbstractManager):
         else:
             hint = ("   Enter queues for after review · !text runs now · ! runs the whole queue · "
                     "Alt+Enter newline · Ctrl+C stop")
+            if idle_wait:
+                hint += " · Ctrl+N new session"
+            else:
+                hint += " · Ctrl+K skip task · Ctrl+P pause · Ctrl+Q skip all"
         frags.append(("class:status", hint))
         return frags
 
@@ -712,6 +786,32 @@ class PromptToolkitConsoleManager(AbstractManager):
     def _invalidate(self) -> None:
         if self._app is not None:
             self._app.invalidate()
+
+    def _apply_title(self) -> None:
+        """
+        Pushes the terminal's own tab/window title (OSC 2 — supported by
+        essentially every modern terminal) so it shows the session and its
+        live progress instead of just the launch command. Called only from
+        the handful of methods that actually change session/phase/progress
+        state (set_status, mark_phase_done, start_iteration) — not from the
+        much hotter _invalidate (called on every streamed character), which
+        would spam the terminal with redundant title writes for no benefit.
+        """
+        if self._app is None:
+            return
+        with self._lock:
+            session, phase = self._session, self._phase
+            phase_plan, plan = self._phase_plan, self._plan
+
+        parts = [session or self.title]
+        if phase:
+            label = phase_display_name(phase)
+            progress = phase_plan if phase_plan and phase_plan[1] else plan
+            parts.append(f"{label} {progress[0]}/{progress[1]}" if progress and progress[1] else label)
+        try:
+            self._app.output.set_title(" · ".join(parts))
+        except Exception:
+            pass  # cosmetic only — never worth crashing or even logging over
 
     def _write(self, style: str, text: str) -> None:
         """Appends text to the AI space, merging into the previous block."""
@@ -869,10 +969,20 @@ class PromptToolkitConsoleManager(AbstractManager):
         ``usage`` (most OpenAI-compatible servers omit it in streaming mode
         unless ``stream_options.include_usage`` was requested, which isn't
         universally supported, so we don't require it).
+
+        Raises :class:`ResponseTooLongError` if the running char/4 estimate
+        of what's streamed so far crosses ``STREAM_OUTPUT_CAP`` (default
+        :data:`DEFAULT_STREAM_OUTPUT_CAP`) — a runaway/looping generation is
+        abandoned mid-stream rather than allowed to grow without bound;
+        runner._is_retryable_llm_error folds this into the normal
+        retry-then-ask flow, so the phase just tries the turn again.
         """
         full_text = ""
+        reasoning_started = False
         tool_calls_dict: Dict[int, Dict[str, Any]] = {}
         usage_seen = False
+        streamed_chars = 0
+        cap = self._stream_output_cap()
 
         self.set_status(state="streaming")
         self._line("class:out.assistant.tag", "🤖 Assistant")
@@ -895,9 +1005,39 @@ class PromptToolkitConsoleManager(AbstractManager):
 
             delta = chunk.choices[0].delta
 
+            # Reasoning-model servers (e.g. this one, an OpenAI-compatible
+            # extension) stream a separate reasoning_content field ahead of
+            # the real answer. Previously ignored entirely: a turn that spent
+            # its whole generation "thinking" and got cut off before any
+            # content/tool_calls came out looked identical to a genuinely
+            # empty turn, which the rest of the pipeline can only respond to
+            # by re-nudging -- so a model prone to long reasoning could stall
+            # for many turns with nothing visible happening. Surface it (so a
+            # long think is visible, not a blank screen) and count it toward
+            # STREAM_OUTPUT_CAP, same as content/tool_calls, so a genuinely
+            # runaway one is still aborted and retried rather than left to
+            # hang until the server's own limit.
+            reasoning_delta = getattr(delta, "reasoning_content", None)
+            if reasoning_delta:
+                reasoning_delta = strip_leaked_special_tokens(reasoning_delta)
+            if reasoning_delta:
+                if not reasoning_started:
+                    self._line("class:out.system", "💭 Reasoning")
+                    reasoning_started = True
+                streamed_chars += len(reasoning_delta)
+                self._write("class:out.system", reasoning_delta)
+
             if delta.content is not None:
-                full_text += delta.content
-                self._write("class:out.assistant", delta.content)
+                # Seen in practice: raw chat-template tokens (</s>,
+                # <|channel|>, ...) leaking straight into content instead of
+                # being consumed by the server -- scrub them here, at the
+                # one place all of history/display/file-writes ultimately
+                # source their text from, rather than chasing every
+                # downstream consumer separately.
+                content_delta = strip_leaked_special_tokens(delta.content)
+                full_text += content_delta
+                streamed_chars += len(content_delta)
+                self._write("class:out.assistant", content_delta)
 
             if getattr(delta, "tool_calls", None):
                 for tc in delta.tool_calls:
@@ -917,6 +1057,18 @@ class PromptToolkitConsoleManager(AbstractManager):
 
                     if tc.function and getattr(tc.function, "arguments", None):
                         tool_calls_dict[idx]["function"]["arguments"] += tc.function.arguments
+                        streamed_chars += len(tc.function.arguments)
+
+            if streamed_chars // 4 > cap:
+                self._line(
+                    "class:out.error",
+                    f" ⚠  Response exceeded STREAM_OUTPUT_CAP ({cap} tokens) — aborting this turn.",
+                )
+                self.set_status(state="thinking")
+                raise ResponseTooLongError(
+                    f"Response exceeded STREAM_OUTPUT_CAP ({cap}) — generated "
+                    f"~{streamed_chars // 4} tokens and counting."
+                )
 
         if not usage_seen:
             written_chars = len(full_text)
@@ -934,6 +1086,14 @@ class PromptToolkitConsoleManager(AbstractManager):
         return {
             "content": full_text.strip() if full_text else None,
             "tool_calls": list(tool_calls_dict.values()) if tool_calls_dict else None,
+            # A turn that reasoned but produced neither content nor a tool
+            # call leaves literally no trace in history (the assistant
+            # message is only ever appended `if content or tool_calls`) --
+            # the model then has zero memory of having just deliberated this
+            # exact question, which is what let it re-derive the same
+            # reasoning near-verbatim turn after turn. Surfacing this lets
+            # runner.py give a pointed nudge instead of the generic one.
+            "had_reasoning": reasoning_started,
         }
 
     # ------------------------------------------------------- queue & status
@@ -953,6 +1113,18 @@ class PromptToolkitConsoleManager(AbstractManager):
         """Lines the user pushed to the front; belong in the AI's next turn."""
         return self._drain(self._forced)
 
+    def drain_skip_request(self) -> bool:
+        if self._skip_requested.is_set():
+            self._skip_requested.clear()
+            return True
+        return False
+
+    def drain_skip_all_request(self) -> bool:
+        if self._skip_all_requested.is_set():
+            self._skip_all_requested.clear()
+            return True
+        return False
+
     def drain_queued_input(self) -> List[str]:
         """The default queue, replayed as a new iteration after the review phase."""
         items = self._drain(self._queued)
@@ -964,20 +1136,49 @@ class PromptToolkitConsoleManager(AbstractManager):
 
     def wait_for_queued_input(self, poll: float = 0.2) -> List[str]:
         """
-        Blocks until the user queues something, or the run is stopped.
+        Blocks until the user queues something, or the run is stopped or
+        restarted.
 
         Used instead of asking a question: the pipeline idles here with the
         input line live, so feeding it more work stays entirely optional.
+        Ctrl+N (see should_restart) is only live while this is blocking —
+        _idle_wait tracks that window so the key binding's filter and the
+        status-bar hint can key off the exact same condition.
         """
-        while not self._stop.is_set():
-            items = self._drain(self._queued)
-            if items:
-                with self._lock:
-                    self._queued_snapshot = []
-                self._notify_queue_change()
-                return items
-            time.sleep(poll)
-        return []
+        with self._lock:
+            self._idle_wait = True
+        self._invalidate()
+        try:
+            while not self._stop.is_set() and not self._restart.is_set():
+                items = self._drain(self._queued)
+                if items:
+                    with self._lock:
+                        self._queued_snapshot = []
+                    self._notify_queue_change()
+                    return items
+                time.sleep(poll)
+            return []
+        finally:
+            with self._lock:
+                self._idle_wait = False
+            self._invalidate()
+
+    def should_restart(self) -> bool:
+        return self._restart.is_set()
+
+    def clear_restart(self) -> None:
+        self._restart.clear()
+
+    def is_paused(self) -> bool:
+        return self._paused.is_set()
+
+    def wait_while_paused(self) -> None:
+        if not self._paused.is_set():
+            return
+        self._invalidate()
+        while self._paused.is_set() and not self._stop.is_set():
+            time.sleep(0.2)
+        self._invalidate()
 
     def _notify_queue_change(self) -> None:
         """Reports self._queued_snapshot to whoever is persisting the queue
@@ -1014,11 +1215,13 @@ class PromptToolkitConsoleManager(AbstractManager):
 
     def set_status(self, session: Optional[str] = None, phase: Optional[str] = None,
                    state: Optional[str] = None, phases: Optional[List[str]] = None,
-                   plan: Optional[tuple] = None, tokens: Optional[tuple] = None,
-                   task: Optional[str] = None) -> None:
+                   plan: Optional[tuple] = None, phase_plan: Optional[tuple] = None,
+                   tokens: Optional[tuple] = None, task: Optional[str] = None) -> None:
         with self._lock:
             if plan is not None:
                 self._plan = plan
+            if phase_plan is not None:
+                self._phase_plan = phase_plan
             if tokens is not None:
                 self._tokens = tokens
             if task is not None:
@@ -1032,11 +1235,19 @@ class PromptToolkitConsoleManager(AbstractManager):
             if phases is not None:
                 self._phases = list(phases)
         self._invalidate()
+        self._apply_title()
 
     def mark_phase_done(self, phase: str) -> None:
         with self._lock:
             if phase not in self._done_phases:
                 self._done_phases.append(phase)
+        self._invalidate()
+        self._apply_title()
+
+    def record_token_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+        with self._lock:
+            self._tokens_read += prompt_tokens
+            self._tokens_written += completion_tokens
         self._invalidate()
 
     def start_iteration(self, number: int, phases: Optional[List[str]] = None) -> None:
@@ -1052,6 +1263,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             if phases is not None:
                 self._phases = list(phases)
         self._invalidate()
+        self._apply_title()
 
     def should_stop(self) -> bool:
         return self._stop.is_set()
@@ -1130,6 +1342,34 @@ class PromptToolkitConsoleManager(AbstractManager):
         except Exception:
             pass
 
+    @staticmethod
+    def _stream_output_cap() -> int:
+        """STREAM_OUTPUT_CAP from .env, falling back to
+        DEFAULT_STREAM_OUTPUT_CAP for an unset or non-numeric value — never
+        crashes a turn over a typo'd override."""
+        try:
+            return int(os.environ.get("STREAM_OUTPUT_CAP", DEFAULT_STREAM_OUTPUT_CAP))
+        except ValueError:
+            return DEFAULT_STREAM_OUTPUT_CAP
+
+    @staticmethod
+    def _resolve_color_depth() -> ColorDepth:
+        """
+        Themes use literal 24-bit hex (see ``PT_THEME_PRESETS``) so they
+        render identically everywhere, but prompt_toolkit's own default color
+        depth is 256-color, not truecolor ("we prefer 256 colors almost
+        always" — ``vt100.Vt100_Output.get_default_color_depth``) — every hex
+        color, including each preset's background fill, was silently
+        quantized down to the nearest xterm-256 entry, which for a
+        low-saturation navy/cream/etc. background can round to a near-black
+        or near-white grey that barely looks different from whatever the
+        terminal's own background already was. Force true color so what you
+        see matches the hex actually configured; ``PROMPT_TOOLKIT_COLOR_DEPTH``
+        (prompt_toolkit's own standard env override) still wins for a
+        terminal that genuinely can't do 24-bit.
+        """
+        return ColorDepth.from_env() or ColorDepth.DEPTH_24_BIT
+
     def run(self, worker: Callable[[], Any]) -> Any:
         """
         Takes over the terminal and runs ``worker`` on a background thread.
@@ -1144,8 +1384,10 @@ class PromptToolkitConsoleManager(AbstractManager):
             full_screen=True,
             mouse_support=True,
             refresh_interval=0.2,
+            color_depth=self._resolve_color_depth(),
         )
         app = self._app
+        self._apply_title()
 
         def target() -> None:
             try:
@@ -1213,7 +1455,12 @@ class PromptToolkitConsoleManager(AbstractManager):
         survives a crash or a forced-stop that never reaches
         :meth:`dump_transcript`, and can be ``tail -f``'d while a run is in
         flight.
+
+        Closes any log already open first — a session restarted with Ctrl+N
+        calls this again for the new session, and would otherwise leak the
+        previous session's file handle.
         """
+        self.close_session_log()
         path = Path(path)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

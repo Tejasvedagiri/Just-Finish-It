@@ -1,21 +1,29 @@
-import json
 import shlex
 import subprocess
-from pathlib import Path
+
+from JFI.tool.context_tools import load_context_cache, save_context_cache
 
 APPROVED_CMD_KEY = "approved-cmd"
 
 
-def execute_command(command: str, timeout: int = 120) -> str:
+def execute_command(command: str, timeout: int = 300) -> str:
     """Executes a shell command and returns the output."""
     try:
-        # shell=True allows for piped commands like 'ls -la | grep src'
+        # shell=True allows for piped commands like 'ls -la | grep src'.
+        # stdin=DEVNULL is deliberate: this subprocess shares our controlling
+        # tty, so any invoked CLI that isatty()-detects it (npm create,
+        # create-next-app, etc.) will launch an interactive prompt instead of
+        # picking a non-interactive default -- and nothing will ever answer
+        # it, so it hangs until `timeout` instead of failing fast. Closing
+        # stdin makes those tools see a non-interactive session immediately,
+        # same as CI, so they either use their default or error out clearly.
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=timeout,
+            stdin=subprocess.DEVNULL
         )
 
         # Combine stdout and stderr for the LLM to read
@@ -56,43 +64,26 @@ def execute_command(command: str, timeout: int = 120) -> str:
 #   [N]o        — don't run it
 #
 # "Save" persists to the session's context.json — the same file the LLM uses
-# as its own scratchpad (CONTEXT_CACHE_RULES in simple_session_manager.py).
-# Sharing that file is deliberate (one place to look), but it means a
-# read-then-write_file from the LLM that doesn't round-trip the whole file
-# can clobber the "approved-cmd" key; _load/_save always merge through the
-# rest of the file to limit the damage to that one key.
-
-def _load_context_cache(cache_path: str) -> dict:
-    path = Path(cache_path)
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _save_context_cache(data: dict, cache_path: str) -> None:
-    path = Path(cache_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
+# as its own scratchpad via the context_save/context_lookup tools
+# (context_tools.py, CONTEXT_CACHE_RULES in simple_session_manager.py).
+# Sharing that file is deliberate (one place to look); load/save_context_cache
+# (context_tools.py) always merge through the rest of the file so writing one
+# key here can never clobber the model's own facts, or vice versa.
 
 def get_approved_cmd_prefixes(cache_path: str) -> list:
-    prefixes = _load_context_cache(cache_path).get(APPROVED_CMD_KEY, [])
+    prefixes = load_context_cache(cache_path).get(APPROVED_CMD_KEY, [])
     return prefixes if isinstance(prefixes, list) else []
 
 
 def save_approved_cmd_prefix(prefix: str, cache_path: str) -> None:
-    data = _load_context_cache(cache_path)
+    data = load_context_cache(cache_path)
     prefixes = data.get(APPROVED_CMD_KEY, [])
     if not isinstance(prefixes, list):
         prefixes = []
     if prefix not in prefixes:
         prefixes.append(prefix)
     data[APPROVED_CMD_KEY] = prefixes
-    _save_context_cache(data, cache_path)
+    save_context_cache(data, cache_path)
 
 
 def _command_prefix(command: str) -> str:
@@ -114,7 +105,7 @@ class CmdApprovalGate:
     approving every command for a session is a one-time, in-the-moment call,
     not something a future session should silently inherit) alongside the
     cache_path used to read/write persisted "Save" prefixes. `cache_path`
-    must be the owning session's own context.json (.JFI/<session_id>/context.json)
+    must be the owning session's own context.json (JFI/<session_id>/context.json)
     — there is no shared fallback location.
     """
 
@@ -162,7 +153,7 @@ def make_gated_execute_command(console, cache_path: str):
     """
     gate = CmdApprovalGate(console, cache_path)
 
-    def gated_execute_command(command: str, timeout: int = 120) -> str:
+    def gated_execute_command(command: str, timeout: int = 300) -> str:
         if not gate.request(command):
             return f"Command not executed (user answered No): '{command}'"
         return execute_command(command, timeout)

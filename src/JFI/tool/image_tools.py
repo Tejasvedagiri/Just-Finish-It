@@ -17,7 +17,6 @@ Two separate tools, deliberately not one:
 
 import base64
 import re
-from pathlib import Path
 from typing import Optional
 
 from JFI.tool.file_tools import _get_safe_path
@@ -39,7 +38,7 @@ _MIME_BY_EXT = {
 def capture_screenshot(directory: str) -> str:
     """
     Captures the primary monitor and saves it as an auto-numbered
-    ``screen-N.png`` inside `directory` (pass your session's ``.JFI/<session>``
+    ``screen-N.png`` inside `directory` (pass your session's ``JFI/<session>``
     folder — the same one your plan file lives in — so screenshots land next
     to everything else from this run). Returns where it landed; use
     ``view_image`` on that path afterward to actually look at it.

@@ -1,6 +1,6 @@
 """
 Rename verification: every source occurrence of ".just_finish_it" must be gone,
-replaced by ".JFI".
+replaced by "JFI".
 
 These tests scan the real repository on disk (excluding .venv and this test
 module itself), so they guard against regressions as soon as they pass once.
@@ -13,8 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _source_files():
     for path in sorted(REPO_ROOT.rglob("*")):
-        if any(part in {".venv", ".git"} or part.startswith(".") and part != ".JFI"
-               for part in path.parts[:-1]):
+        if any(part in {".venv", ".git"} or part.startswith(".") for part in path.parts[:-1]):
             continue
         # The rename matters for code + config; docs/plans may still explain it.
         if not (path.is_file() and path.suffix in {".py", ".toml"}):
@@ -37,7 +36,7 @@ def test_no_just_finish_it_occurrences_in_source():
 
 
 def test_jfi_folder_present_and_used_in_code():
-    """The .JFI folder is the canonical session/plan location."""
+    """The JFI folder is the canonical session/plan location."""
     from JFI.session.simple_session_manager import DEFAULT_PLAN_PATH
 
-    assert DEFAULT_PLAN_PATH == ".JFI/plan.md"
+    assert DEFAULT_PLAN_PATH == "JFI/plan.md"

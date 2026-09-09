@@ -42,7 +42,7 @@ class TestPhaseCompleted:
     @pytest.mark.parametrize(
         ("content", "phase"),
         [
-            ("The plan is in .JFI/session/plan.md.", "planner"),
+            ("The plan is in JFI/session/plan.md.", "planner"),
             ("PLANNER_COMPLETE!", "reviewer"),  # right marker, wrong phase
             ("done\nTESTING_COMPLETE", "imp"),   # other phases' markers don't count
         ],

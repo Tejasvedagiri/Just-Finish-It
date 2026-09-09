@@ -1,6 +1,20 @@
 #!/bin/sh
 # JFI launcher: prefer the project's virtualenv, fall back to the current interpreter.
 cd "$(dirname "$0")" || exit 1
+
+# First run: seed .env from the bundled template so there's something to
+# edit -- skipped for informational flags, which need no config to answer.
+case "$1" in
+    --version|-h|--help) ;;
+    *)
+        if [ ! -f .env ] && [ -f JFI_ENV_TEMPLATE ]; then
+            cp JFI_ENV_TEMPLATE .env
+            echo "Created .env from JFI_ENV_TEMPLATE — fill in OPENAI_URL/OPENAI_API_KEY/MODEL before running JFI again." >&2
+            exit 1
+        fi
+        ;;
+esac
+
 if [ -x .venv/bin/jfi ]; then
     exec .venv/bin/jfi "$@"
 else

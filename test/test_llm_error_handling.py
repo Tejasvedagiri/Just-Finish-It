@@ -13,7 +13,6 @@ server already rejected on its merits (4xx).
 """
 
 import httpx
-import pytest
 from openai import APIConnectionError, BadRequestError, InternalServerError
 
 _REQUEST = httpx.Request("POST", "http://127.0.0.1:1234/v1/chat/completions")
@@ -121,9 +120,18 @@ class _FakeConsole:
         self.errors = []
         self.systems = []
         self._stopped = False
+        self.choice_prompts = []  # (prompt_label, options) for every get_user_choice call
+        self.choice_answers = []  # queued answers get_user_choice returns, in order
 
     def should_stop(self):
         return self._stopped
+
+    def request_stop(self):
+        self._stopped = True
+
+    def get_user_choice(self, prompt_label, options):
+        self.choice_prompts.append((prompt_label, options))
+        return self.choice_answers.pop(0) if self.choice_answers else options[0][0]
 
     def set_status(self, **kwargs):
         pass
@@ -139,6 +147,15 @@ class _FakeConsole:
 
     def drain_forced_input(self):
         return []
+
+    def drain_skip_request(self):
+        return False
+
+    def drain_skip_all_request(self):
+        return False
+
+    def wait_while_paused(self):
+        pass
 
     def mark_phase_done(self, phase):
         pass
@@ -171,39 +188,82 @@ class TestRunPhaseRetry:
         console = _FakeConsole()
         llm = _ScriptedLLM([_html_500_error()])
 
-        result = run_phase(console, llm, ssm, "imp")
+        result = run_phase(console, {"imp": llm}, ssm, "imp")
 
         assert result is True
         assert llm.calls == 2  # one failure, then the retry succeeded
         assert any("retrying" in e.lower() for e in console.errors)
         assert not any("\n" in e for e in console.errors)  # no raw multi-line HTML dump
 
-    def test_gives_up_after_exhausting_retry_limit(self, make_manager, monkeypatch):
+    def test_prompts_user_after_exhausting_retry_limit_and_stops_on_request(self, make_manager, monkeypatch):
+        """Automatic retries running out must NOT end the run on its own —
+        the user is asked, and the run only actually stops if they say so."""
         from JFI.runner import run_phase, LLM_RETRY_LIMIT
         import JFI.runner as runner_module
 
         monkeypatch.setattr(runner_module, "LLM_RETRY_DELAY_SECONDS", 0)
         ssm = make_manager("retry_fail")
         console = _FakeConsole()
+        console.choice_answers = ["s"]  # user chooses to stop
         llm = _ScriptedLLM([_html_500_error() for _ in range(LLM_RETRY_LIMIT + 1)])
 
-        result = run_phase(console, llm, ssm, "imp")
+        result = run_phase(console, {"imp": llm}, ssm, "imp")
 
         assert result is False
         assert llm.calls == LLM_RETRY_LIMIT + 1
-        assert any("Progress is saved" in s for s in console.systems)
+        assert len(console.choice_prompts) == 1
+        assert console.should_stop() is True  # request_stop() was called on "Stop"
 
-    def test_non_retryable_error_gives_up_immediately(self, make_manager, monkeypatch):
+    def test_non_retryable_error_prompts_instead_of_giving_up_immediately(self, make_manager, monkeypatch):
         from JFI.runner import run_phase
         import JFI.runner as runner_module
 
         monkeypatch.setattr(runner_module, "LLM_RETRY_DELAY_SECONDS", 0)
         ssm = make_manager("retry_client_err")
         console = _FakeConsole()
+        console.choice_answers = ["s"]
         llm = _ScriptedLLM([_bad_request_error()])
 
-        result = run_phase(console, llm, ssm, "imp")
+        result = run_phase(console, {"imp": llm}, ssm, "imp")
 
         assert result is False
-        assert llm.calls == 1  # never retried
+        assert llm.calls == 1  # never auto-retried
         assert not any("retrying" in e.lower() for e in console.errors)
+        assert console.should_stop() is True  # request_stop() was called on "Stop"
+
+    def test_user_can_retry_after_a_failure_and_succeed(self, make_manager, monkeypatch):
+        """Choosing "Retry now" tries the LLM call again -- and a manual
+        retry earns its own fresh automatic-retry budget, so it isn't
+        treated as already having exhausted the last one."""
+        from JFI.runner import run_phase
+        import JFI.runner as runner_module
+
+        monkeypatch.setattr(runner_module, "LLM_RETRY_DELAY_SECONDS", 0)
+        ssm = make_manager("retry_manual")
+        console = _FakeConsole()
+        console.choice_answers = ["r"]
+        llm = _ScriptedLLM([_bad_request_error()])  # fails once, then succeeds
+
+        result = run_phase(console, {"imp": llm}, ssm, "imp")
+
+        assert result is True
+        assert llm.calls == 2
+        assert len(console.choice_prompts) == 1
+        assert console.should_stop() is False
+
+    def test_already_stopped_before_the_prompt_returns_without_asking(self, make_manager, monkeypatch):
+        """Ctrl+C during the automatic-retry sleep (or any earlier point)
+        must not still pop up a "retry or stop?" menu afterward."""
+        from JFI.runner import run_phase
+        import JFI.runner as runner_module
+
+        monkeypatch.setattr(runner_module, "LLM_RETRY_DELAY_SECONDS", 0)
+        ssm = make_manager("retry_already_stopped")
+        console = _FakeConsole()
+        console._stopped = True
+        llm = _ScriptedLLM([_bad_request_error()])
+
+        result = run_phase(console, {"imp": llm}, ssm, "imp")
+
+        assert result is False
+        assert console.choice_prompts == []
