@@ -1,0 +1,12 @@
+{
+  "id": "faq_accordion",
+  "tier": "html",
+  "title": "FAQ Accordion (static HTML/CSS)",
+  "language": "html",
+  "verify_files_dir": "verify",
+  "prompt": "Build a single static FAQ page with a working accordion: one index.html plus a stylesheet (linked style.css or a <style> block), no build tools, no server needed. Use the native HTML <details>/<summary> elements for the accordion (not a JavaScript show/hide div) -- each question is a <summary> inside a <details data-faq> element, with the answer as the rest of that <details> element's content. Include at least 5 FAQ items this way, each with a real question and a real, non-empty answer. Style it (spacing, borders, maybe an icon) so it looks like a real FAQ section, not unstyled default <details> markers. Add a short README.md explaining how to open it.",
+  "verify": {
+    "description": "Deterministic DOM-structure check via html.parser -- native <details>/<summary> means correct structure IS correct expand/collapse behavior, no headless browser needed. See benchmark/README.md's Evaluation methodology section.",
+    "command": "python3 verify_faq_accordion.py"
+  }
+}

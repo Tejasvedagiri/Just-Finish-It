@@ -1,0 +1,12 @@
+{
+  "id": "log_pipeline",
+  "tier": "data_engineering",
+  "title": "Log Pipeline Analytics (stdlib)",
+  "language": "python",
+  "module_file": "log_pipeline.py",
+  "hidden_tests_dir": "tests",
+  "prompt": "In this project directory, implement a Python module named log_pipeline.py (standard library only, no third-party packages needed) with one function:\n  - parse_logs(path: str) -> dict : reads a log file where each non-empty line has the format '<ISO8601 timestamp> <LEVEL> <service> <message text...>' (e.g. '2024-01-01T00:12:45 ERROR auth connection refused'), fields separated by single spaces, and returns a dict with exactly these keys:\n      - 'total_lines': total number of non-empty log lines.\n      - 'error_count_by_service': a dict mapping every distinct service name that appears anywhere in the log to the number of ERROR-level lines for that service (0 if that service has no ERROR lines).\n      - 'overall_error_rate': (number of ERROR lines) / total_lines, as a float rounded to 3 decimal places.\n      - 'busiest_hour': the two-digit hour ('00'-'23', the HH portion of the timestamp before the first ':') with the most log lines of any level, ties broken by the smallest hour.\nThere is a fixed input dataset at tests/access.log (do NOT modify it) and a hidden reference test suite at tests/test_log_pipeline.py (do NOT modify it either) that calls parse_logs('tests/access.log') and checks the exact expected values. Your Testing phase should run `pytest tests -q` (in addition to any tests you write yourself) and every test must pass. Also add a short README.md explaining the four output fields.",
+  "verify": {
+    "command": "PYTHONPATH=. pytest tests -q"
+  }
+}

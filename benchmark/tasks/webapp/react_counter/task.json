@@ -1,0 +1,13 @@
+{
+  "id": "react_counter",
+  "tier": "webapp",
+  "title": "React Counter (CDN React, no build step)",
+  "language": "javascript",
+  "verify_files_dir": "verify",
+  "prompt": "Build a single static index.html that renders an interactive counter using React 18, loaded from a CDN (e.g. https://unpkg.com/react@18/umd/react.production.min.js and the matching react-dom build) via plain <script src> tags -- no npm, no build step, no bundler, no dev server. Do NOT use JSX or Babel (there is no transpile step to run it through); write the component with plain React.createElement(...) calls. The page must render, inside a mount point, exactly:\n  - an element carrying data-testid=\"count\" whose text content is the current count, starting at 0\n  - a button carrying data-testid=\"increment\" that increases the count by 1 (using React state, e.g. useState) each time it's clicked\n  - a button carrying data-testid=\"reset\" that resets the count back to 0 when clicked\nAdd a short README.md explaining how to open it. Also test it yourself in your Testing phase by actually opening it (or using execute_command with a headless check) and clicking the buttons to confirm the count updates -- don't just eyeball the source.",
+  "verify_timeout": 90,
+  "verify": {
+    "description": "Loads the real index.html in jsdom (executing its actual CDN <script> tags) and drives it with real dispatchEvent clicks, asserting the DOM actually updates -- behavioral, not just structural. See benchmark/README.md's Evaluation methodology section.",
+    "command": "npm install --no-save --silent jsdom >/dev/null 2>&1 && node verify_react_counter.js"
+  }
+}

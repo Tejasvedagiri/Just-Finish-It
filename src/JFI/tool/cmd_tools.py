@@ -1,9 +1,22 @@
+import os
 import shlex
 import subprocess
 
 from JFI.tool.context_tools import load_context_cache, save_context_cache
 
 APPROVED_CMD_KEY = "approved-cmd"
+
+
+def auto_approve_enabled() -> bool:
+    """AUTO_APPROVE_COMMANDS=1: every execute_command call runs immediately,
+    with no approval prompt at all -- as if "Yes, for the rest of this
+    session" had been answered every time, without anything needing to be
+    there to answer it. Meant for unattended runs (CI, a scripted end-to-end
+    test) where nothing can respond to an interactive prompt; off by
+    default; approvals exist precisely because execute_command can do
+    anything a shell command can, so only turn this on for a run you already
+    trust completely."""
+    return os.environ.get("AUTO_APPROVE_COMMANDS", "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def execute_command(command: str, timeout: int = 300) -> str:
@@ -116,6 +129,9 @@ class CmdApprovalGate:
 
     def request(self, command: str) -> bool:
         """Returns True if `command` may run, prompting the user if needed."""
+        if auto_approve_enabled():
+            self.console.display_system(f"✅ Auto-approved (AUTO_APPROVE_COMMANDS=1): {command}")
+            return True
         if self.approve_all:
             return True
         if any(command.startswith(prefix) for prefix in get_approved_cmd_prefixes(self.cache_path)):

@@ -41,6 +41,24 @@ MODEL=qwen3:8b
 # to 10000 if unset.
 # STREAM_OUTPUT_CAP=10000
 
+# Max tokens (estimated) of reasoning_content alone -- before any real
+# content or tool call has started -- before that turn is abandoned and
+# retried, same as STREAM_OUTPUT_CAP but on a much tighter budget. Some
+# models can burn thousands of tokens per turn re-deliberating a decision
+# they already made ("wait, actually...") without ever tripping
+# STREAM_OUTPUT_CAP's larger limit, since they do eventually act -- this
+# catches that earlier. Defaults to 3000 if unset.
+# REASONING_OUTPUT_CAP=3000
+
+# Seconds to wait on a single LLM request (connect + read) before giving up
+# and offering Retry/Stop, instead of hanging with no feedback. Matters most
+# after idling: a local server that unloaded its model, or a dead localhost
+# socket, otherwise looks indistinguishable from a genuine freeze for a long
+# time. Raise it if your server is legitimately this slow to start
+# responding (e.g. a big model with cold prompt-eval on first token).
+# Defaults to 120 if unset.
+# LLM_REQUEST_TIMEOUT=120
+
 # Live-console color preset. Leave unset (or "auto") to detect your terminal's
 # background automatically. See README.md -> "Themes" for the full list (20
 # presets) or how to supply your own colors as inline JSON.
@@ -77,14 +95,50 @@ MODEL=qwen3:8b
 
 # --- Debugging -----------------------------------------------------------
 
+# Every execute_command call runs immediately, with no approval prompt at
+# all -- as if "Yes, for the rest of this session" had been answered every
+# time, without anything needing to be there to answer it. Meant for
+# unattended runs (CI, a scripted end-to-end test) where nothing can respond
+# to an interactive prompt. Off by default -- approvals exist precisely
+# because execute_command can do anything a shell command can, so only turn
+# this on for a run you already trust completely. Accepts 1/true/yes/on.
+# AUTO_APPROVE_COMMANDS=1
+
 # Prints every message sent to the LLM each turn, in full -- no truncation
 # anywhere, unlike the normal tool-result preview. Verbose by design; meant
 # for prompt-engineering and context-compression debugging, not everyday
 # runs. Accepts 1/true/yes/on.
 # SHOW_STREAM_PROMPTS=1
 
+# --- Optional: web dashboard (jfi-web) ---------------------------------------
+
+# Mirrors this session's live status to JFI/<session>/web_status.json and
+# accepts approval answers from JFI/<session>/web_answer.json, so the
+# `jfi-web` dashboard (pip install "just-finish-it[web]") can show live
+# progress and answer approval prompts from a browser instead of (or
+# alongside) the terminal. Off by default. Accepts 1/true/yes/on.
+# JFI_WEB_BRIDGE=1
+
+# Pauses at a failed-review boundary for an explicit Approve/Reject (from the
+# terminal, or from jfi-web if JFI_WEB_BRIDGE is also set) instead of
+# automatically starting another fix iteration. Off by default -- this
+# project's whole premise is finishing autonomously, so leave this unset
+# unless you specifically want a human checkpoint there. Accepts 1/true/yes/on.
+# REVIEW_LOOP_APPROVAL=1
+
+# Port the jfi-web dashboard listens on. Defaults to 7777 if unset (not
+# Streamlit's own default of 8501). Ignored if you pass --server.port
+# yourself on the jfi-web command line.
+# JFI_WEB_PORT=7777
+
 # --- Advanced ------------------------------------------------------------
 
 # Where the JFI/ session folder is created, relative to. Defaults to the
 # current working directory ("."); most people never need to set this.
 # SESSION_PATH=.
+
+# FlareSolverr endpoint the model falls back to (via execute_command/curl)
+# when a site's anti-bot/DoS protection (Cloudflare challenge, etc.) blocks a
+# direct curl request. Unset means no fallback is available -- the model is
+# just told the request was blocked. See https://github.com/FlareSolverr/FlareSolverr
+# FLARESOLVERR_URL=http://localhost:8192/

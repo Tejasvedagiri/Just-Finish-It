@@ -12,7 +12,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.data_structures import Point
-from prompt_toolkit.formatted_text.utils import split_lines
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
@@ -276,6 +275,19 @@ FORCE_PREFIX = "!"
 # forever burning tokens and context.
 DEFAULT_STREAM_OUTPUT_CAP = 10000
 
+# Overridable via REASONING_OUTPUT_CAP in .env — a tighter, separate cap that
+# aborts a turn once its reasoning_content alone (i.e. before any real content
+# or tool call has started) crosses this, distinct from STREAM_OUTPUT_CAP's
+# much larger budget for the whole turn. Observed in practice on smaller
+# local models: a turn can pour thousands of tokens into "wait, actually..."
+# self-second-guessing every single turn without ever exceeding
+# STREAM_OUTPUT_CAP, so nothing ever aborts it -- the turn eventually does
+# call a tool, so the stall-nudge in runner.py never fires either, and the
+# session just crawls. Cutting reasoning off on its own, smaller budget forces
+# the same "stop deliberating, commit to one action" AUTO-RECTIFY nudge much
+# sooner instead of only once the entire response is enormous.
+DEFAULT_REASONING_OUTPUT_CAP = 3000
+
 
 class PromptToolkitConsoleManager(AbstractManager):
     """
@@ -328,6 +340,14 @@ class PromptToolkitConsoleManager(AbstractManager):
         # --- output state (guarded, read during render) -------------------
         self._lock = threading.RLock()
         self._blocks: List[List[str]] = []  # [style, text] pairs, merged greedily
+        # 1 + (total '\n' count across all block text) -- exactly what
+        # split_lines() would yield (see _output_fragments), maintained
+        # incrementally in _write() instead of being recomputed by re-scanning
+        # the whole transcript on every render. That recompute used to run on
+        # every _invalidate() -- which fires per streamed character -- so a
+        # long session's redraw cost grew with total output size and made
+        # even keystrokes feel laggy by the time a transcript got long.
+        self._line_count = 1
         self._snapshot: Optional[tuple] = None  # (fragments, line_count) from the last render pass
         self._log_file = None  # open file handle from start_session_log(), or None
         self._follow = True
@@ -617,10 +637,11 @@ class PromptToolkitConsoleManager(AbstractManager):
         # another thread is still appending output.
         with self._lock:
             fragments = [(style, text) for style, text in self._blocks]
-            # split_lines() yields one line per '\n' plus always a final
-            # (possibly empty) line; its length is the true number of
-            # renderable logical lines for these fragments.
-            self._snapshot = (fragments, len(list(split_lines(fragments))))
+            # self._line_count is kept in lockstep with self._blocks by
+            # _write() -- see its comment -- and is exactly what
+            # len(list(split_lines(fragments))) would compute, without
+            # re-scanning the whole transcript on every render.
+            self._snapshot = (fragments, self._line_count)
             return fragments
 
     @staticmethod
@@ -822,6 +843,7 @@ class PromptToolkitConsoleManager(AbstractManager):
                 self._blocks[-1][1] += text
             else:
                 self._blocks.append([style, text])
+            self._line_count += text.count("\n")
             if self._log_file is not None:
                 try:
                     self._log_file.write(text)
@@ -972,17 +994,22 @@ class PromptToolkitConsoleManager(AbstractManager):
 
         Raises :class:`ResponseTooLongError` if the running char/4 estimate
         of what's streamed so far crosses ``STREAM_OUTPUT_CAP`` (default
-        :data:`DEFAULT_STREAM_OUTPUT_CAP`) — a runaway/looping generation is
-        abandoned mid-stream rather than allowed to grow without bound;
-        runner._is_retryable_llm_error folds this into the normal
-        retry-then-ask flow, so the phase just tries the turn again.
+        :data:`DEFAULT_STREAM_OUTPUT_CAP`), or if reasoning alone (with no
+        content or tool call yet) crosses the tighter ``REASONING_OUTPUT_CAP``
+        (default :data:`DEFAULT_REASONING_OUTPUT_CAP`) — either way a
+        runaway/looping generation is abandoned mid-stream rather than
+        allowed to grow without bound; runner._is_retryable_llm_error folds
+        this into the normal retry-then-ask flow, so the phase just tries the
+        turn again.
         """
         full_text = ""
         reasoning_started = False
         tool_calls_dict: Dict[int, Dict[str, Any]] = {}
         usage_seen = False
         streamed_chars = 0
+        reasoning_chars = 0
         cap = self._stream_output_cap()
+        reasoning_cap = self._reasoning_output_cap()
 
         self.set_status(state="streaming")
         self._line("class:out.assistant.tag", "🤖 Assistant")
@@ -1025,7 +1052,26 @@ class PromptToolkitConsoleManager(AbstractManager):
                     self._line("class:out.system", "💭 Reasoning")
                     reasoning_started = True
                 streamed_chars += len(reasoning_delta)
+                reasoning_chars += len(reasoning_delta)
                 self._write("class:out.system", reasoning_delta)
+
+            # Cut reasoning off on its own, tighter budget -- but only while
+            # it's still pure deliberation with nothing else out yet. Once
+            # content or a tool call has actually started, the model has
+            # already committed to an action, so only the much larger
+            # STREAM_OUTPUT_CAP below still applies.
+            if (reasoning_chars // 4 > reasoning_cap
+                    and not full_text and not tool_calls_dict):
+                self._line(
+                    "class:out.error",
+                    f" ⚠  Reasoning exceeded REASONING_OUTPUT_CAP ({reasoning_cap} tokens) "
+                    "with no content or tool call yet — aborting this turn.",
+                )
+                self.set_status(state="thinking")
+                raise ResponseTooLongError(
+                    f"Reasoning exceeded REASONING_OUTPUT_CAP ({reasoning_cap}) — generated "
+                    f"~{reasoning_chars // 4} reasoning tokens with no content or tool call yet."
+                )
 
             if delta.content is not None:
                 # Seen in practice: raw chat-template tokens (</s>,
@@ -1265,6 +1311,37 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._invalidate()
         self._apply_title()
 
+    def get_status_snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            awaiting = None
+            if self._awaiting is not None:
+                awaiting = {
+                    "prompt": self._awaiting,
+                    "options": [{"key": k, "label": lbl} for k, lbl in (self._choice_options or [])],
+                }
+            return {
+                "session": self._session,
+                "phase": self._phase,
+                "phases": list(self._phases),
+                "done_phases": list(self._done_phases),
+                "state": self._state,
+                "iteration": self._iteration,
+                "plan": list(self._plan) if self._plan else None,
+                "phase_plan": list(self._phase_plan) if self._phase_plan else None,
+                "task": self._task,
+                "tokens": list(self._tokens) if self._tokens else None,
+                "tokens_read": self._tokens_read,
+                "tokens_written": self._tokens_written,
+                "queue_size": len(self._queued_snapshot),
+                "awaiting": awaiting,
+            }
+
+    def submit_external_answer(self, key: str) -> None:
+        """Feeds `key` into the same answer channel a keypress would (see
+        get_user_choice) -- lets an external approver (e.g. the web
+        dashboard) answer a pending choice without touching the terminal."""
+        self._answers.put(key)
+
     def should_stop(self) -> bool:
         return self._stop.is_set()
 
@@ -1351,6 +1428,16 @@ class PromptToolkitConsoleManager(AbstractManager):
             return int(os.environ.get("STREAM_OUTPUT_CAP", DEFAULT_STREAM_OUTPUT_CAP))
         except ValueError:
             return DEFAULT_STREAM_OUTPUT_CAP
+
+    @staticmethod
+    def _reasoning_output_cap() -> int:
+        """REASONING_OUTPUT_CAP from .env, falling back to
+        DEFAULT_REASONING_OUTPUT_CAP for an unset or non-numeric value — never
+        crashes a turn over a typo'd override."""
+        try:
+            return int(os.environ.get("REASONING_OUTPUT_CAP", DEFAULT_REASONING_OUTPUT_CAP))
+        except ValueError:
+            return DEFAULT_REASONING_OUTPUT_CAP
 
     @staticmethod
     def _resolve_color_depth() -> ColorDepth:

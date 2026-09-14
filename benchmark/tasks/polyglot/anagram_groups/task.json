@@ -1,0 +1,12 @@
+{
+  "id": "anagram_groups",
+  "tier": "polyglot",
+  "title": "Anagram Groups (harder)",
+  "language": "python",
+  "module_file": "anagram_groups.py",
+  "hidden_tests_dir": "tests",
+  "prompt": "In this project directory, implement a Python module named anagram_groups.py with one function:\n  - group_anagrams(words: list[str]) -> list[list[str]] : groups words that are anagrams of each other (case-insensitive comparison -- 'Listen' and 'Silent' are anagrams of each other), preserving each word's original casing in the output. Within each group, sort the words using plain string/lexicographic ordering (Python's default `sorted()`, which is case-sensitive ASCII ordering). Sort the groups themselves by their (already-sorted) first word, also using plain string ordering. Words with no anagram partner still form their own singleton group. Duplicate words (identical strings) belong in the same group, one entry per occurrence (the multiset of input words is preserved, just grouped and reordered). An empty input list returns an empty list.\nThere is already a hidden reference test suite at tests/test_anagram_groups.py -- do NOT modify it. Your Testing phase should run `pytest tests -q` (in addition to any tests you write yourself) and every test must pass. Also add a short README.md explaining the grouping and ordering rules.",
+  "verify": {
+    "command": "PYTHONPATH=. pytest tests -q"
+  }
+}

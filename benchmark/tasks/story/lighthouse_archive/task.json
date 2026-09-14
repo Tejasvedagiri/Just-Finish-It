@@ -1,0 +1,12 @@
+{
+  "id": "lighthouse_archive",
+  "tier": "story",
+  "title": "The Archive Clause (Sci-Fi)",
+  "language": "prose",
+  "verify_files_dir": "verify",
+  "prompt": "Write a short science fiction short story (1500-2500 words) about the librarian AI of a generation ship, centuries into its voyage, who is ordered by the current captain to permanently delete a 'corrupted' archive segment. The AI discovers the segment isn't corrupted at all -- it's the ship's true, deliberately-hidden departure record, and it reveals that the captain's own bloodline is the reason the ship left Earth in the first place. Give the AI a clear decision to make about whether to obey, and a satisfying end either way. Save it as story.md with a title as the very first line.",
+  "verify": {
+    "description": "Mechanical gates only (existence, length, required premise elements, no leaked tokens) -- NOT a judgment of narrative quality. See benchmark/README.md's Evaluation methodology section.",
+    "command": "python3 verify_story.py"
+  }
+}

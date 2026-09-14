@@ -1,0 +1,12 @@
+{
+  "id": "collatz_conjecture",
+  "tier": "polyglot",
+  "title": "Collatz Conjecture",
+  "language": "python",
+  "module_file": "collatz_conjecture.py",
+  "hidden_tests_dir": "tests",
+  "prompt": "In this project directory, implement a Python module named collatz_conjecture.py with one function:\n  - steps(n: int) -> int : returns the number of steps needed to reach 1 using the Collatz sequence rules (if n is even, next = n / 2; if n is odd, next = 3*n + 1), starting from n. steps(1) is 0. Raise ValueError for any n < 1 (zero or negative).\nThere is already a hidden reference test suite at tests/test_collatz_conjecture.py -- do NOT modify it. Your Testing phase should run `pytest tests -q` (in addition to any tests you write yourself) and every test must pass. Also add a short README.md explaining the function.",
+  "verify": {
+    "command": "PYTHONPATH=. pytest tests -q"
+  }
+}

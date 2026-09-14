@@ -223,6 +223,27 @@ class AbstractManager(ABC):
         """Called at the top of every pipeline pass so the UI can reset progress."""
         pass
 
+    def get_status_snapshot(self) -> Dict[str, Any]:
+        """
+        A plain-data snapshot of everything set_status/mark_phase_done/
+        get_user_choice currently show — session, phase, state, progress,
+        tokens, and any choice a get_user_choice call is presently waiting
+        on. Meant for an external observer (e.g. web_bridge.WebBridge) that
+        can't reach into a manager's own UI state directly. Empty dict for
+        managers with nothing to report.
+        """
+        return {}
+
+    def submit_external_answer(self, key: str) -> None:
+        """
+        Answers a pending get_user_choice call from outside the manager's own
+        UI — as if `key` had been typed there. Used by an external approver
+        (e.g. a web dashboard) so it can resolve the same prompt a terminal
+        user would otherwise answer; whichever answers first wins. No-op
+        default for managers with no such external channel.
+        """
+        pass
+
     # ----------------------------------------------------------- lifecycle
 
     def should_stop(self) -> bool:

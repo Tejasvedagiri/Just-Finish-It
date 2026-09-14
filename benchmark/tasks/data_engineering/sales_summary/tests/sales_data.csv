@@ -1,0 +1,17 @@
+order_id,region,product,quantity,unit_price
+1,East,Widget,3,9.99
+2,East,Gadget,1,19.99
+3,West,Widget,5,9.99
+4,West,Gizmo,2,14.50
+5,North,Widget,4,9.99
+6,North,Gadget,3,19.99
+7,East,Gizmo,1,14.50
+8,South,Widget,2,9.99
+9,South,Gadget,2,19.99
+10,West,Gadget,6,19.99
+11,East,Widget,2,9.99
+12,North,Gizmo,3,14.50
+13,South,Gizmo,4,14.50
+14,West,Widget,1,9.99
+15,North,Widget,2,9.99
+16,East,Gadget,5,19.99

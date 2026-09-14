@@ -15,6 +15,7 @@ from openai import APIConnectionError, APIStatusError
 from JFI.llm.openai_compatable_stream import OpenAICompatableStream
 from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
+from JFI.manager.web_bridge import WebBridge
 
 # Session Management
 from JFI.session.simple_session_manager import (
@@ -29,6 +30,7 @@ from JFI.tool.context_tools import make_context_tools
 from JFI.tool.image_tools import capture_screenshot, view_image
 from JFI.tool.llm_tools import make_ask_llm
 from JFI.tool.web_tools import fetch_webpage_images
+from JFI.tool.video_tools import extract_video_frames
 
 # Dynamic mapping of tool names to their python functions
 TOOL_MAP = {
@@ -39,6 +41,7 @@ TOOL_MAP = {
     "execute_command": execute_command,
     "capture_screenshot": capture_screenshot,
     "fetch_webpage_images": fetch_webpage_images,
+    "extract_video_frames": extract_video_frames,
     # view_image returns (status_text, data_url) instead of a plain string —
     # every other tool's TOOL_MAP entry returns str; see the isinstance(tuple)
     # check in execute_tool_call, which is the one place that distinction
@@ -177,11 +180,25 @@ def _repair_directive(func_name: str, args: Dict[str, Any], result: str, attempt
                 "places. Extend old_string with the line above or below it so it matches once."
             )
 
-    if func_name in ("read_file", "write_file", "append_to_file", "view_image") and "does not exist" in lowered:
+    if func_name in ("read_file", "write_file", "append_to_file", "view_image", "extract_video_frames") \
+            and "does not exist" in lowered:
         return (
             "AUTO-RECTIFY: that path is wrong. Run execute_command with "
             "'ls -la .' (or the parent directory) to find the real path, then retry."
         )
+
+    if func_name == "extract_video_frames":
+        if "not installed" in lowered:
+            return (
+                "AUTO-RECTIFY: no video processing capability in this environment (the "
+                "'ffmpeg' binary is missing) — retrying will not help. Skip this step, note "
+                "the blocker in the plan, and continue without extracted frames."
+            )
+        if "no distinct frames" in lowered:
+            return (
+                "AUTO-RECTIFY: retry the same call with a lower threshold (e.g. 0.1) to catch "
+                "subtler scene changes."
+            )
 
     if func_name == "execute_command":
         if "timed out after" in lowered:
@@ -465,6 +482,29 @@ def collect_next_iteration(console: AbstractManager, review_path: Optional[str] 
 
 # ----------------------------------------------------------------- the phases
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _web_bridge_enabled() -> bool:
+    """JFI_WEB_BRIDGE=1: mirror this session's live status to
+    JFI/<session>/web_status.json and accept answers to get_user_choice
+    prompts from JFI/<session>/web_answer.json -- see web_bridge.WebBridge.
+    Off by default: nobody who isn't running the web dashboard should pay
+    for a background thread and a file write every tick."""
+    return _env_flag("JFI_WEB_BRIDGE")
+
+
+def _review_loop_approval_required() -> bool:
+    """REVIEW_LOOP_APPROVAL=1: pause at a failed-review boundary for an
+    explicit Approve/Reject (via get_user_choice -- answerable from the
+    terminal or, with JFI_WEB_BRIDGE also on, the web dashboard) instead of
+    automatically starting another fix iteration. Off by default: this
+    project's whole premise is finishing autonomously, so the default stays
+    exactly what it was before this flag existed."""
+    return _env_flag("REVIEW_LOOP_APPROVAL")
+
+
 def _show_stream_prompts() -> bool:
     """SHOW_STREAM_PROMPTS=1 (or true/yes/on) in .env: dump the exact
     messages sent to the LLM every turn — see dump_prompt. Read fresh each
@@ -725,6 +765,7 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
             console.display_error(str(e))
     console.set_status(session=session_name)
 
+    web_bridge: Optional[WebBridge] = None
     try:
         # 2. Gate execute_command behind the human's approval, backed by this
         # session's own context.json (approved "Save" prefixes live there,
@@ -732,6 +773,9 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
         TOOL_MAP["execute_command"] = make_gated_execute_command(console, ssm.context_cache_path)
         TOOL_MAP.update(make_context_tools(ssm.context_cache_path))
         console.start_session_log(ssm.session_path / "run.log")
+        if _web_bridge_enabled():
+            web_bridge = WebBridge(console, ssm.session_path)
+            web_bridge.start()
         # Requests queued but never drained before the process closed (killed,
         # crashed, or just quit) live in metadata.json — hand them back now, and
         # persist the queue from here on so this doesn't happen again.
@@ -792,6 +836,16 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
                     )
                     break
 
+                if _review_loop_approval_required():
+                    console.set_status(state="awaiting review approval")
+                    decision = console.get_user_choice(
+                        "Review failed — start another fix iteration?",
+                        [("y", "Approve — run another iteration"), ("n", "Reject — stop this session")],
+                    )
+                    if decision != "y":
+                        console.display_rule("⛔ REVIEW ITERATION REJECTED — ending the run.")
+                        break
+
             ssm.add_message(
                 "user",
                 f"USER FEEDBACK FOR ITERATION:\n{feedback}\n\n"
@@ -808,6 +862,8 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
         # review cap, natural completion, ...) so a later Ctrl+N restart —
         # or another process entirely — can use this session_id again
         # without waiting for this one to actually exit.
+        if web_bridge is not None:
+            web_bridge.stop()
         ssm.release_session_lock()
 
 

@@ -1,0 +1,12 @@
+{
+  "id": "difference_of_squares",
+  "tier": "polyglot",
+  "title": "Difference of Squares",
+  "language": "python",
+  "module_file": "difference_of_squares.py",
+  "hidden_tests_dir": "tests",
+  "prompt": "In this project directory, implement a Python module named difference_of_squares.py with two functions:\n  - square_of_sum(n: int) -> int : returns the square of the sum of the first n positive integers (1..n).\n  - sum_of_squares(n: int) -> int : returns the sum of the squares of the first n positive integers (1..n).\nThere is already a hidden reference test suite at tests/test_difference_of_squares.py -- do NOT modify it. Your Testing phase should run `pytest tests -q` (in addition to any tests you write yourself) and every test must pass. Also add a short README.md explaining the two functions.",
+  "verify": {
+    "command": "PYTHONPATH=. pytest tests -q"
+  }
+}

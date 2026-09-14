@@ -1,0 +1,12 @@
+{
+  "id": "recipe_card",
+  "tier": "html",
+  "title": "Recipe Card (static HTML/CSS)",
+  "language": "html",
+  "verify_files_dir": "verify",
+  "prompt": "Build a single static recipe card web page: one index.html plus a stylesheet (either a linked style.css or a <style> block), no build tools, no JavaScript required, no server needed -- it must look correct just opening index.html directly in a browser. It must show: a recipe title element carrying the attribute data-recipe-title (e.g. <h1 data-recipe-title>Grandma's Chili</h1>), at least 5 ingredient list items each carrying the attribute data-ingredient, at least 3 numbered preparation steps each carrying the attribute data-step, and at least one <img> tag (a placeholder src like a data URI or any image path is fine -- it does not need to resolve to a real file). Style it to look like a reasonably polished recipe card, not unstyled HTML. Add a short README.md explaining how to open it.",
+  "verify": {
+    "description": "Deterministic DOM-structure check via data-* attribute hooks (stdlib html.parser, no headless browser) -- checks the required content/structure exists, not visual polish. See benchmark/README.md's Evaluation methodology section.",
+    "command": "python3 verify_recipe_card.py"
+  }
+}

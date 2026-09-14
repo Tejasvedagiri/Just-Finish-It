@@ -1,0 +1,12 @@
+{
+  "id": "monster_hunter_secret",
+  "tier": "story",
+  "title": "What the Monsters Remember (Fantasy)",
+  "language": "prose",
+  "verify_files_dir": "verify",
+  "prompt": "Write a short fantasy short story (1500-2500 words) about a village's designated monster hunter, who has secretly been sparing every monster she's sent to kill for years -- faking evidence of each 'kill' and quietly relocating the monster instead. The story begins the day a monster she spared long ago walks calmly into the village square in broad daylight and asks for her by name, in front of everyone. Give her a real dilemma to navigate and a satisfying end. Save it as story.md with a title as the very first line.",
+  "verify": {
+    "description": "Mechanical gates only (existence, length, required premise elements, no leaked tokens) -- NOT a judgment of narrative quality. See benchmark/README.md's Evaluation methodology section.",
+    "command": "python3 verify_story.py"
+  }
+}
