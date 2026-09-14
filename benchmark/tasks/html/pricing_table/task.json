@@ -1,0 +1,12 @@
+{
+  "id": "pricing_table",
+  "tier": "html",
+  "title": "Pricing Table (static HTML/CSS)",
+  "language": "html",
+  "verify_files_dir": "verify",
+  "prompt": "Build a single static pricing/plans comparison page: one index.html plus a stylesheet (linked style.css or a <style> block), no build tools, no JavaScript required, no server needed. It must show exactly 3 pricing tiers side by side. Each tier's outer container must carry a data-plan attribute with the tier's name (e.g. <section data-plan=\"Pro\">), and inside each tier: an element carrying data-price whose text contains the price (e.g. <span data-price>$19/mo</span>), a list of at least 3 features as <li> items, and one call-to-action element (a <button> or <a>) carrying a data-cta attribute. Style it to look like a real pricing page, not unstyled HTML. Add a short README.md explaining how to open it.",
+  "verify": {
+    "description": "Deterministic DOM-structure check via data-* attribute hooks (stdlib html.parser, no headless browser) -- checks the required content/structure exists, not visual polish. See benchmark/README.md's Evaluation methodology section.",
+    "command": "python3 verify_pricing_table.py"
+  }
+}

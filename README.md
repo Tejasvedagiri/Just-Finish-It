@@ -66,9 +66,12 @@ Then answer two prompts: **session name** and **goal**, and let it work.
 | `CONTEXT_SIZE` *(optional)* | Context window of the served model, in tokens — history is compressed once a request would exceed `CONTEXT_SIZE × CONTEXT_COMPRESSION_RATIO`. Size it to what *fits on your machine*: 4096–16384 for an ~8GB setup with a small model, 32768+ for 27B/31B runs. Defaults to 32768 if unset. | `32768`              |
 | `CONTEXT_COMPRESSION_RATIO` *(optional)* | Headroom left for the model's own reply when deciding whether to compress history. Defaults to `0.7` if unset. | `0.7` |
 | `STREAM_OUTPUT_CAP` *(optional)* | Max tokens (estimated) for a single streamed response before it's abandoned as a runaway generation and retried as a fresh turn — see [When an LLM request fails](#when-an-llm-request-fails). Defaults to `10000` if unset. | `10000` |
+| `REASONING_OUTPUT_CAP` *(optional)* | Max tokens (estimated) of `reasoning_content` alone — before any real content or tool call has started — before that turn is abandoned and retried, same mechanism as `STREAM_OUTPUT_CAP` but on a much tighter budget. Catches a model that burns thousands of tokens re-deliberating a decision every turn without ever tripping the larger cap (since it does eventually act). Defaults to `3000` if unset. | `3000` |
+| `LLM_REQUEST_TIMEOUT` *(optional)* | Seconds to wait on a single LLM request (connect + read) before giving up and offering Retry/Stop, instead of hanging with no feedback — matters most after idling, when a local server that unloaded its model (or a dead localhost socket) otherwise looks indistinguishable from a genuine freeze. Can be overridden per phase like `MODEL`/`OPENAI_URL`. Defaults to `120` if unset. | `120` |
 | `THEME` *(optional)*| Live-console color preset — see [Themes](#themes)  | `dark-ocean`, `light-paper`, or empty for auto-detect |
 | `SHOW_STREAM_PROMPTS` *(optional, debug)* | Prints every message sent to the LLM each turn, in full — no truncation anywhere, unlike the normal tool-result preview. Verbose by design; meant for prompt-engineering and context-compression debugging, not everyday runs. Accepts `1`/`true`/`yes`/`on`. | `1` |
 | `SESSION_PATH` *(optional, advanced)* | Where the `JFI/` session folder is created, relative to. Defaults to the current working directory. | `.` |
+| `FLARESOLVERR_URL` *(optional)* | Base URL of a [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) instance. When a `curl` run via `execute_command` gets blocked by a site's anti-bot/DoS protection (Cloudflare challenge, etc.), the model is told to retry the request through this endpoint instead. Left unset, the model is just told the direct request was blocked. | `http://localhost:8192/` |
 
 Every one of `OPENAI_URL` / `OPENAI_API_KEY` / `MODEL` / `TEMPERATURE` / `FREQUENCY_PENALTY` can also be set **per phase**, prefixed `PLANNER_`, `IMP_`, `TESTING_`, or `REVIEWER_` (e.g. `REVIEWER_MODEL=gpt-4.1`, `IMP_OPENAI_URL=http://127.0.0.1:8080/v1`). A phase with no prefixed override falls back to the shared, unprefixed setting — so the default (unset) behavior is exactly one model for every phase, and you only add prefixed lines for the phases you actually want to route elsewhere (e.g. a cheap/fast model for `testing`, a stronger one for `reviewer`).
 
@@ -176,6 +179,26 @@ A skipped item (`- [○]`) is treated exactly like a finished one everywhere pro
 
 ---
 
+## Web dashboard (`jfi-web`)
+
+An optional Streamlit page for watching (and approving) a session from a browser instead of, or alongside, the terminal:
+
+```bash
+uv sync --extra web       # pulls in streamlit
+JFI_WEB_BRIDGE=1 ./JFI    # run jfi with the bridge enabled, in one terminal
+jfi-web                   # in another terminal (or another machine on the same network)
+```
+
+Serves on port **7777** by default (`http://localhost:7777`) — set `JFI_WEB_PORT` to change it, or pass `--server.port` directly to `jfi-web`.
+
+`JFI_WEB_BRIDGE=1` makes `./JFI` mirror its live phase/state/task/token/plan progress to `JFI/<session>/web_status.json` every half-second, and watch `JFI/<session>/web_answer.json` for answers — the two processes share nothing in memory, only those files, so `jfi-web` can run on a different machine as long as it can see the same `JFI/` folder (or a copy synced some other way).
+
+Whenever the terminal is waiting on a choice (an `execute_command` approval, an LLM-retry prompt, …), the dashboard shows the same prompt with clickable buttons; whichever side answers first — terminal keypress or dashboard click — wins, so nothing double-answers. With `REVIEW_LOOP_APPROVAL=1` also set, a failed review pauses for an explicit Approve/Reject before JFI starts another fix iteration, answerable the same way. Both flags default off — without them JFI runs exactly as it always has, no new files, no new prompts.
+
+The dashboard also shows `plan.md`'s checklist progress and the latest `review.md` (if any) for every session under `JFI/`, live status or not — only the live phase/state/tokens/approvals need the bridge running.
+
+---
+
 ## `uv run build` — standalone binary
 
 Builds a single native `jfi` executable with PyInstaller — the machine that runs it needs no Python install at all (unlike `./JFI`, which still needs a system Python to bootstrap its own venv on first run).
@@ -215,9 +238,13 @@ Just-Finish-It/
 │   │   ├── abstract_manager.py  # AbstractManager: the console API contract (display_*, get_user_input, print_agent_response, safe_get_user_input)
 │   │   ├── pt_console_manager.py# PromptToolkitConsoleManager: full-screen UI — header/task/status lines, streaming AI space,
 │   │   │                        #   always-live input line (queue/force/answer), scroll lock, theme presets, live run.log mirroring
-│   │   └── key_bindings.py      # teaches the terminal Shift+Enter/Ctrl+Enter encodings so multiline input works everywhere
+│   │   ├── key_bindings.py      # teaches the terminal Shift+Enter/Ctrl+Enter encodings so multiline input works everywhere
+│   │   └── web_bridge.py        # WebBridge: mirrors live status + relays approval answers to/from jfi-web, see "Web dashboard" below
 │   ├── orchestrator/
 │   │   └── basic_orchestrator.py# legacy single-turn orchestrator (kept for reference/testing; runner.py is what JFI actually runs)
+│   ├── web/                     # jfi-web: an optional Streamlit dashboard, see "Web dashboard" below
+│   │   ├── dashboard.py         # the app itself — reads JFI/<session>/*.json + plan.md/review.md/run.log
+│   │   └── launcher.py          # `jfi-web` console script — thin `streamlit run dashboard.py` wrapper
 │   └── tool/
 │       ├── schemas.py           # AVAILABLE_TOOLS: the JSON-schema tool definitions sent to every LLM request
 │       ├── file_tools.py        # write_file / read_file / append_to_file / replace_in_file (the exact functions documented in each phase prompt)
@@ -225,6 +252,7 @@ Just-Finish-It/
 │       ├── context_tools.py     # context_save / context_lookup — the model's fact store, see [Context cache](#context-cache)
 │       ├── image_tools.py       # capture_screenshot / view_image — the one tool pair that returns an image to the model, not just text
 │       ├── web_tools.py         # fetch_webpage_images — downloads a page's images to disk (view_image shows them, same as a screenshot)
+│       ├── video_tools.py       # extract_video_frames — dedupes a video down to its visually distinct frames (ffmpeg + a pure-Python pixel-diff pass)
 │       └── llm_tools.py         # ask_llm — a stateless one-off LLM call for text work with no dedicated tool
 │
 ├── src/build_binary/             # `uv run build` — PyInstaller onefile packaging of src/JFI/runner.py
@@ -270,12 +298,13 @@ It's meant to stay small — a handful of high-value facts, not a transcript.
 | `read_file`        | Read an existing file's content.                                                                 |
 | `append_to_file`   | Append to a file — the sanctioned way to build long documents in chunks instead of one oversized write. |
 | `replace_in_file`  | Replace exactly one substring, leaving everything else untouched. This is *the* mechanism for ticking plan checkboxes and making surgical edits; a bad match (0 or >1 hits) errors out rather than corrupting the file. |
-| `execute_command`  | Run any shell command; returns stdout+stderr. Times out after 300s by default — pass `timeout` to raise it for a slow install/build/test step.                                                    |
+| `execute_command`  | Run any shell command; returns stdout+stderr. Times out after 300s by default — pass `timeout` to raise it for a slow install/build/test step. Every call needs human approval first, unless `AUTO_APPROVE_COMMANDS=1` is set (unattended runs only — see `JFI_ENV_TEMPLATE`). |
 | `context_save`     | Save one fact to the persistent [context cache](#context-cache) in a single call — merges it in without touching any other key. |
 | `context_lookup`   | Search the context cache instead of reading it wholesale — call with no keyword to list every saved key, or a keyword to get the full text of just what matches. |
 | `capture_screenshot` | Snapshot the monitor to disk — used by the testing phase for visual verification where possible (fails cleanly with a "skip this step" hint if there's no display). |
 | `fetch_webpage_images` | Fetch a web page (http/https only) and download the images it references — Open Graph/Twitter preview image first, then every `<img>` tag — to disk, auto-numbered. Same "writes files, doesn't show you anything" design as `capture_screenshot`. |
 | `view_image`       | Attach an image file into the model's next turn (the only tool whose result becomes an actual image message, not just text) — this is how the agent can actually *see* screenshots it captured or images `fetch_webpage_images` downloaded. |
+| `extract_video_frames` | Turn a video into a small set of unique screenshots: extracts the first frame plus every later frame whose pixels differ from the last *kept* frame by at least `threshold` (default 50%), saved to disk auto-numbered. Same "writes files, doesn't show you anything" design as `capture_screenshot` — `view_image` each one afterward. Requires the `ffmpeg` binary. |
 | `ask_llm`          | A general-purpose escape hatch: sends `prompt` as a fresh, **stateless** single-turn LLM call (no tools, no conversation history, no plan/file access) and returns the reply. For one-off text work — a description, a clarification, a rephrase, brainstorming a name — that doesn't warrant its own dedicated tool. Uses whatever model the calling phase itself is configured for (see [per-phase models](#configuration-env) above); its cost still counts toward the header's cumulative ↓/↑ token totals, real usage if the server reports it, an estimate otherwise. |
 
 Every failed call gets a concrete `AUTO-RECTIFY:` instruction naming the exact tool/argument to change, and after 3 identical failures JFI tells the model to abandon that approach rather than loop — the difference between "retry forever" and "fix or move on."

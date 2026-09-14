@@ -1,6 +1,18 @@
 from JFI.llm.base_llm_stream import BaseLLMStream, phase_env
 from openai import OpenAI
 
+# The openai SDK's own default read timeout is 600s (10 minutes) with no
+# progress feedback in between -- so a connection that goes stale (a local
+# server that unloaded its model after idling, a dead localhost socket, ...)
+# looks indistinguishable from a genuine hang for up to ten minutes, and
+# Ctrl+C can't interrupt a blocking read already in flight on the worker
+# thread (pt_console_manager's "c-c" binding only sets a cooperative stop
+# flag). A much shorter default here means a stall surfaces quickly through
+# the existing Retry/Stop menu (runner.py::_format_llm_error) instead of
+# hanging silently. Override via LLM_REQUEST_TIMEOUT (seconds, per-phase
+# prefixable like MODEL/OPENAI_URL) if a slower server genuinely needs more.
+DEFAULT_REQUEST_TIMEOUT = 120.0
+
 
 def initial_service(prefix: str = "") -> OpenAI:
     base_url = phase_env(prefix, "OPENAI_URL")
@@ -9,7 +21,11 @@ def initial_service(prefix: str = "") -> OpenAI:
     if missing:
         hint = f" (or {prefix}_{missing[0]}, for the {prefix} phase)" if prefix else ""
         raise KeyError(f"Missing required .env setting(s): {', '.join(missing)}{hint}")
-    return OpenAI(base_url=base_url, api_key=api_key)
+    try:
+        timeout = float(phase_env(prefix, "LLM_REQUEST_TIMEOUT", str(DEFAULT_REQUEST_TIMEOUT)))
+    except ValueError:
+        timeout = DEFAULT_REQUEST_TIMEOUT
+    return OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
 
 
 class OpenAICompatableStream(BaseLLMStream):

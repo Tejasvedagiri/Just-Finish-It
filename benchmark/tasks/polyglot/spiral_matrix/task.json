@@ -1,0 +1,12 @@
+{
+  "id": "spiral_matrix",
+  "tier": "polyglot",
+  "title": "Spiral Matrix (harder)",
+  "language": "python",
+  "module_file": "spiral_matrix.py",
+  "hidden_tests_dir": "tests",
+  "prompt": "In this project directory, implement a Python module named spiral_matrix.py with one function:\n  - spiral(n: int) -> list[list[int]] : returns an n x n matrix (as a list of n lists, each of length n) filled with the integers 1..n*n in clockwise spiral order, starting at the top-left corner and spiraling inward. n=0 returns an empty list []. Raise ValueError for n < 0.\nThere is already a hidden reference test suite at tests/test_spiral_matrix.py -- do NOT modify it. Your Testing phase should run `pytest tests -q` (in addition to any tests you write yourself) and every test must pass. Also add a short README.md explaining the spiral rule with a small example.",
+  "verify": {
+    "command": "PYTHONPATH=. pytest tests -q"
+  }
+}

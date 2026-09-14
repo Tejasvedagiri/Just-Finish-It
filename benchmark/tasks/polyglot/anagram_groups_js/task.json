@@ -1,0 +1,12 @@
+{
+  "id": "anagram_groups_js",
+  "tier": "polyglot",
+  "title": "Anagram Groups (JavaScript, harder)",
+  "language": "javascript",
+  "module_file": "anagram_groups.js",
+  "hidden_tests_dir": "tests",
+  "prompt": "In this project directory, implement a Node.js CommonJS module named anagram_groups.js exporting one function via module.exports = { groupAnagrams }:\n  - groupAnagrams(words) : groups words that are anagrams of each other (case-insensitive comparison -- 'Listen' and 'Silent' are anagrams of each other), preserving each word's original casing in the output. Within each group, sort the words using plain string ordering (JavaScript's default Array.prototype.sort() on strings, which compares by UTF-16 code unit, i.e. plain ASCII ordering for these inputs). Sort the groups themselves by their (already-sorted) first word, also using plain string ordering. Words with no anagram partner still form their own singleton group. Duplicate words (identical strings) belong in the same group, one entry per occurrence (the multiset of input words is preserved, just grouped and reordered). An empty input array returns an empty array.\nThere is already a hidden reference test suite at tests/test_anagram_groups.test.js (uses Node's built-in node:test + node:assert, no npm install needed) -- do NOT modify it. Your Testing phase should run `node --test tests/*.test.js` from the project root (in addition to any tests you write yourself) and every test must pass. Also add a short README.md explaining the grouping and ordering rules.",
+  "verify": {
+    "command": "node --test tests/*.test.js"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "id": "run_length_encoding_js",
+  "tier": "polyglot",
+  "title": "Run-Length Encoding (JavaScript)",
+  "language": "javascript",
+  "module_file": "run_length_encoding.js",
+  "hidden_tests_dir": "tests",
+  "prompt": "In this project directory, implement a Node.js CommonJS module named run_length_encoding.js exporting two functions:\n  - encode(s) : run-length encodes a string. Each run of 2+ identical consecutive characters becomes '<count><char>' (e.g. 'aaabccc' -> '3abc3c'); a single occurrence stays as just the character with no count.\n  - decode(s) : reverses encode, expanding '<count><char>' pairs back to repeated characters and leaving lone characters unchanged.\nExport both via module.exports = { encode, decode }. Input strings contain only letters (no digits), which avoids ambiguity between a literal digit and a run count. decode(encode(x)) === x must hold for any such input. There is already a hidden reference test suite at tests/test_run_length_encoding.test.js (uses Node's built-in node:test + node:assert, no npm install needed) -- do NOT modify it. Your Testing phase should run `node --test tests/*.test.js` from the project root (in addition to any tests you write yourself) and every test must pass. Also add a short README.md explaining the encoding scheme.",
+  "verify": {
+    "command": "node --test tests/*.test.js"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "id": "calc",
+  "tier": "terminal",
+  "title": "CLI Calculator (end-to-end REPL)",
+  "language": "python",
+  "prompt": "Build a command-line calculator application in Python. The REPL entry point MUST be a file named main.py, runnable as `python3 main.py`, that reads one expression per line from stdin (e.g. '2 + 2') and prints its result, repeating until the user types exit or quit, at which point it must exit with status code 0. Each line is formatted as '<number> <op> <number>' with spaces around the operator, where <op> is one of + - * / ^ (^ is exponentiation). Division by zero and unparseable input must print a clear error message on one line (no traceback) and then continue the loop rather than crashing. Include a README.md explaining how to run it, and unit tests for the core arithmetic and error-handling logic using pytest (place them under tests/).",
+  "verify_files_dir": "verify",
+  "verify": {
+    "description": "Terminal-Bench-style: run the actual program end-to-end via stdin/stdout and check real output, not just that files exist.",
+    "command": "python3 verify_calc.py"
+  }
+}

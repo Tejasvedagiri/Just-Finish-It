@@ -1,0 +1,13 @@
+{
+  "id": "nextjs_static",
+  "tier": "webapp",
+  "title": "Next.js Static Site (npm build + export)",
+  "language": "javascript",
+  "verify_files_dir": "verify",
+  "prompt": "Build a Next.js site (pages router, JavaScript, not TypeScript) with exactly two pages:\n  - / (pages/index.js): a home page. Its outermost element must carry data-page=\"home\", and it must contain a <Link> (from next/link) to /about carrying data-testid=\"nav-about\".\n  - /about (pages/about.js): an about page whose outermost element carries data-page=\"about\" and contains some real text content.\nDo NOT add any API routes (pages/api/*) or middleware -- this project is statically exported, which is incompatible with server-side routes. Configure next.config.mjs (or .js) with `output: 'export'` so `npm run build` produces a static site under out/ with no server needed at runtime. Scaffold the project yourself (e.g. via `npx create-next-app` or by hand) inside this project directory -- package.json, next.config, and the pages/ directory must all end up at the project root. Add a short README.md explaining how to build and preview it. In your Testing phase, actually run `npm run build` yourself and fix any errors before finishing -- do not just assume it compiles.",
+  "verify_timeout": 300,
+  "verify": {
+    "description": "Runs the real `npm run build` (output:'export') and, only if that succeeds, checks the exported static HTML under out/ for the required data-* structural hooks -- same spirit as the 'html' tier's checks, applied to a real framework's compiled output. See benchmark/README.md's Evaluation methodology section.",
+    "command": "npm install --no-audit --no-fund --silent && npm run build && python3 verify_nextjs_static.py"
+  }
+}

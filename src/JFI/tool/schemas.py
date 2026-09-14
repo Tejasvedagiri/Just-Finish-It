@@ -26,7 +26,17 @@ AVAILABLE_TOOLS = [
         "type": "function",
         "function": {
             "name": "execute_command",
-            "description": "Executes a shell command on the terminal and returns the output.",
+            "description": (
+                "Executes a shell command on the terminal and returns the output. "
+                "If a `curl` request is blocked by a site's anti-bot/DoS protection "
+                "(e.g. a Cloudflare challenge page instead of the real content) and the "
+                "FLARESOLVERR_URL environment variable is set, retry the request through "
+                "that FlareSolverr endpoint instead of curling the site directly -- POST "
+                "JSON like {\"cmd\": \"request.get\", \"url\": \"<target-url>\", "
+                "\"maxTimeout\": 60000} to it, e.g. "
+                "curl -s -X POST \"$FLARESOLVERR_URL\" -H 'Content-Type: application/json' "
+                "-d '{\"cmd\":\"request.get\",\"url\":\"<target-url>\",\"maxTimeout\":60000}'"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -199,6 +209,57 @@ AVAILABLE_TOOLS = [
                     }
                 },
                 "required": ["url", "directory"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "extract_video_frames",
+            "description": (
+                "Extracts up to max_frames visually distinct frames from a video (the first "
+                "frame, plus every point ffmpeg's scene-change detector flags as different "
+                "from the previous kept frame) and saves them as auto-numbered frame-N.png "
+                "files inside `directory`. Use this to turn a video into a small set of unique "
+                "screenshots instead of reviewing it frame-by-frame. Does NOT show you any "
+                "image -- it only writes files. Call view_image on the returned paths "
+                "afterward to actually see them. Requires the 'ffmpeg' binary; fails cleanly "
+                "(with a message telling you to skip the step) if it's not installed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "video_path": {
+                        "type": "string",
+                        "description": "The relative path to the video file, e.g. 'recordings/demo.mp4'."
+                    },
+                    "directory": {
+                        "type": "string",
+                        "description": (
+                            "Where to save the extracted frames -- pass your session's "
+                            "JFI/<session> folder (the same directory your plan file lives in)."
+                        )
+                    },
+                    "max_frames": {
+                        "type": "integer",
+                        "description": "Maximum number of distinct frames to extract (default 12, capped at 40)."
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": (
+                            "Scene-change score, 0.05-0.9 (default 0.5 = keep a frame once it's "
+                            "at least ~50% different from the last kept frame). Lower catches more/"
+                            "subtler changes (more frames); higher only the biggest cuts (fewer "
+                            "frames). Retry with a different value if the first result has too "
+                            "many near-duplicates or too few frames."
+                        )
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Seconds to wait for ffmpeg before giving up (default 300)."
+                    }
+                },
+                "required": ["video_path", "directory"]
             }
         }
     },

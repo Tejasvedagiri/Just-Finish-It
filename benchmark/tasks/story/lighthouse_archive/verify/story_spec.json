@@ -1,0 +1,6 @@
+{
+  "filename": "story.md",
+  "min_words": 1200,
+  "max_words": 3000,
+  "required_keywords": ["archive", "captain", "ship"]
+}

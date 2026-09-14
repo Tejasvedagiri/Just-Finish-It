@@ -1,0 +1,14 @@
+{
+  "id": "sales_summary",
+  "tier": "data_engineering",
+  "title": "Sales Summary ETL (pandas)",
+  "language": "python",
+  "module_file": "sales_summary.py",
+  "hidden_tests_dir": "tests",
+  "prompt": "In this project directory, implement a Python module named sales_summary.py, using pandas, with one function:\n  - summarize(csv_path: str) -> dict : reads a CSV with columns order_id,region,product,quantity,unit_price and returns a dict with exactly these keys:\n      - 'total_revenue': the sum of quantity*unit_price across every row, as a float rounded to 2 decimal places.\n      - 'revenue_by_region': a dict mapping each distinct region to its total revenue (quantity*unit_price summed over that region's rows), each value a float rounded to 2 decimal places.\n      - 'top_product_by_quantity': the single product name with the highest total quantity sold across all rows (ties broken by picking the alphabetically-first product name among the tied products).\nThere is a fixed input dataset at tests/sales_data.csv (do NOT modify it) and a hidden reference test suite at tests/test_sales_summary.py (do NOT modify it either) that calls summarize('tests/sales_data.csv') and checks the exact expected values. Your Testing phase should run `pytest tests -q` (in addition to any tests you write yourself) and every test must pass. Also add a short README.md explaining the three output fields and how rounding/tie-breaking works.",
+  "verify_timeout": 180,
+  "verify": {
+    "description": "Ensures pandas is present regardless of whether the model's own session installed it, then runs the hidden pytest suite against the fixed CSV.",
+    "command": "pip install -q pandas 2>/dev/null; PYTHONPATH=. pytest tests -q"
+  }
+}

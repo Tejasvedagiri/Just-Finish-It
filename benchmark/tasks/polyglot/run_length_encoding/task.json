@@ -1,0 +1,12 @@
+{
+  "id": "run_length_encoding",
+  "tier": "polyglot",
+  "title": "Run-Length Encoding",
+  "language": "python",
+  "module_file": "run_length_encoding.py",
+  "hidden_tests_dir": "tests",
+  "prompt": "In this project directory, implement a Python module named run_length_encoding.py with two functions:\n  - encode(s: str) -> str : run-length encodes a string. Each run of 2+ identical consecutive characters becomes '<count><char>' (e.g. 'aaabccc' -> '3abc3c'); a single occurrence stays as just the character with no count.\n  - decode(s: str) -> str : reverses encode, expanding '<count><char>' pairs back to repeated characters and leaving lone characters unchanged.\nInput strings contain only letters (no digits), which avoids ambiguity between a literal digit and a run count. decode(encode(x)) == x must hold for any such input. There is already a hidden reference test suite at tests/test_run_length_encoding.py -- do NOT modify it. Your Testing phase should run `pytest tests -q` (in addition to any tests you write yourself) and every test must pass. Also add a short README.md explaining the encoding scheme.",
+  "verify": {
+    "command": "PYTHONPATH=. pytest tests -q"
+  }
+}

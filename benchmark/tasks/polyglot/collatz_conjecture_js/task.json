@@ -1,0 +1,12 @@
+{
+  "id": "collatz_conjecture_js",
+  "tier": "polyglot",
+  "title": "Collatz Conjecture (JavaScript)",
+  "language": "javascript",
+  "module_file": "collatz_conjecture.js",
+  "hidden_tests_dir": "tests",
+  "prompt": "In this project directory, implement a Node.js CommonJS module named collatz_conjecture.js exporting one function via module.exports = { steps }:\n  - steps(n) : returns the number of steps needed to reach 1 using the Collatz sequence rules (if n is even, next = n / 2; if n is odd, next = 3*n + 1), starting from n. steps(1) is 0. Throw an Error for any n < 1 (zero or negative).\nThere is already a hidden reference test suite at tests/test_collatz_conjecture.test.js (uses Node's built-in node:test + node:assert, no npm install needed) -- do NOT modify it. Your Testing phase should run `node --test tests/*.test.js` from the project root (in addition to any tests you write yourself) and every test must pass. Also add a short README.md explaining the function.",
+  "verify": {
+    "command": "node --test tests/*.test.js"
+  }
+}
