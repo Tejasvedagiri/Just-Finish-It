@@ -79,6 +79,7 @@ def test_session_id_is_lowercased_and_underscored(console, tmp_path):
         ("imp", "IMP_COMPLETE"),
         ("testing", "TESTING_COMPLETE"),
         ("reviewer", "REVIEWER_COMPLETE"),
+        ("cleanup", "CLEANUP_COMPLETE"),
     ],
 )
 def test_system_message_contains_plan_path_and_marker(phase, marker):
@@ -91,7 +92,7 @@ def test_system_message_default_plan_path():
     """The default fallback path is the JFI folder (not the old project root)."""
     assert DEFAULT_PLAN_PATH == "JFI/plan.md"
     # Every phase prompt defaults to that location.
-    for phase in ("planner", "imp", "testing", "reviewer"):
+    for phase in ("planner", "imp", "testing", "reviewer", "cleanup"):
         msg = get_system_message(phase)
         assert DEFAULT_PLAN_PATH in msg
 

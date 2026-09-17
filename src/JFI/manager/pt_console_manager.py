@@ -293,7 +293,7 @@ class PromptToolkitConsoleManager(AbstractManager):
     """
     Full-screen terminal UI where the bottom three lines belong to the user:
 
-        Just Finish It  ·  session: demo  ·  planner › imp › testing › reviewer
+        Just Finish It  ·  session: demo  ·  planner › imp › testing › reviewer › cleanup
         ────────────────────────────────────────────────────────────────────────
         <AI space: streaming output, scrollable>
         ────────────────────────────────────────────────────────────────────────
@@ -1338,9 +1338,25 @@ class PromptToolkitConsoleManager(AbstractManager):
 
     def submit_external_answer(self, key: str) -> None:
         """Feeds `key` into the same answer channel a keypress would (see
-        get_user_choice) -- lets an external approver (e.g. the web
-        dashboard) answer a pending choice without touching the terminal."""
+        get_user_choice/get_user_input) -- lets an external approver (e.g.
+        the web dashboard) answer a pending prompt without touching the
+        terminal."""
         self._answers.put(key)
+
+    def submit_external_queue_item(self, text: str) -> None:
+        """Queues `text` exactly as the plain (non-forced) branch of
+        _on_accept would for a typed line -- lets an external submitter
+        (e.g. the web dashboard) add a new follow-up request while nothing
+        is currently awaiting an answer, without touching the terminal."""
+        text = text.strip()
+        if not text:
+            return
+        self._queued.put(text)
+        with self._lock:
+            self._queued_snapshot.append(text)
+        self._notify_queue_change()
+        self._line("class:out.system", f" ⏳ queued #{self._queued.qsize()} ▸ {self._preview(text)} (via web)")
+        self._invalidate()
 
     def should_stop(self) -> bool:
         return self._stop.is_set()

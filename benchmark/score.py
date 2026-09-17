@@ -30,6 +30,12 @@ model (see the harness/README for the full story):
   - tool_call_error_rate: fraction of tool calls that came back as an
     Error -- a cheap, model-agnostic efficiency signal independent of
     whether the task ultimately passed.
+  - hidden_tests: whether a task's hidden_tests_dir (e.g. tests/, present
+    per task.json) survived the run. JFI's pipeline now ends with a
+    cleanup phase that has execute_command's mv/rm and is told to leave
+    the deliverable's own tests/ alone -- but it's new and autonomous, so
+    this makes "cleanup deleted/moved the oracle test file" a labeled
+    flag instead of a mysterious objective-verify failure.
 
 Usage:
     python3 score.py <project_dir> [--results bench_results.json]
@@ -40,6 +46,8 @@ import json
 import re
 from pathlib import Path
 from typing import Optional
+
+import harness
 
 
 def _read_history(history_path: Path) -> list:
@@ -67,6 +75,67 @@ def _plan_progress(plan_text: str) -> dict:
     skipped = len(re.findall(r"^[ \t]*[-*][ \t]*\[○\]", plan_text, re.M))
     todo = len(re.findall(r"^[ \t]*[-*][ \t]*\[ \]", plan_text, re.M))
     return {"done": done, "skipped": skipped, "todo": todo, "total": done + skipped + todo}
+
+
+# A leaf line's number (e.g. "1.1.1.1") shows its full path from the section
+# root per PLAN_FORMAT_RULES -- dot-count is therefore an exact, mechanical
+# depth signal straight from the numbering the planner is mandated to use,
+# not an indentation guess. Same shape for a parent bullet, just without the
+# checkbox.
+_LEAF_NUM_RE = re.compile(r"^[ \t]*[-*][ \t]*\[[xX ○]\][ \t]*(\d+(?:\.\d+)*)")
+# A top-level parent is often written "- 1. Description" (trailing period),
+# while a nested parent is "- 1.1 Description" (no period) -- both seen in
+# real plans -- so the period before the required whitespace is optional.
+_PARENT_NUM_RE = re.compile(r"^[ \t]*[-*][ \t]+(\d+(?:\.\d+)*)\.?[ \t]+\S")
+
+
+def _plan_structure_metrics(plan_text: str) -> dict:
+    """
+    Purely structural stats about the plan's tree shape: how deep it
+    recursed and how many leaves each top-level task ended up with.
+
+    Deliberately NOT a judgment call about whether any given leaf's
+    description is "too big" -- flagging that reliably would need real
+    language understanding of the leaf's own prose (see PLAN_FORMAT_RULES'
+    "+"/"and"/"/" heuristic, which is a authoring instruction for the model,
+    not something safe to re-implement here as a pass/fail check: e.g.
+    "division by zero and any unparseable line" is one legitimate leaf about
+    one error-handling contract, not two leaves wearing a trenchcoat, and no
+    regex can tell those two cases apart reliably). A wrong semantic guess
+    here would be worse than no signal, so this only reports the tree's
+    shape -- depth and leaves-per-top-level-task -- the same way
+    plan_rewrite_count reports write_file counts without judging the plan's
+    prose. Read alongside plan_progress's leaf total to spot a plan that's
+    suspiciously flat (many leaves, but max_leaf_depth stuck at 1-2, or one
+    top-level task hoarding most of the leaves while its siblings got one
+    each) -- worth a human/model second look, not an automatic fail.
+    """
+    leaf_depths = []
+    parent_count = 0
+    top_level_leaf_counts: dict = {}
+
+    for line in plan_text.splitlines():
+        m = _LEAF_NUM_RE.match(line)
+        if m:
+            number = m.group(1)
+            parts = number.split(".")
+            leaf_depths.append(len(parts))
+            top_level_leaf_counts[parts[0]] = top_level_leaf_counts.get(parts[0], 0) + 1
+            continue
+        if _PARENT_NUM_RE.match(line):
+            parent_count += 1
+
+    return {
+        "leaf_count": len(leaf_depths),
+        "parent_task_count": parent_count,
+        "max_leaf_depth": max(leaf_depths) if leaf_depths else 0,
+        "min_leaf_depth": min(leaf_depths) if leaf_depths else 0,
+        "avg_leaf_depth": round(sum(leaf_depths) / len(leaf_depths), 2) if leaf_depths else 0,
+        "top_level_task_count": len(top_level_leaf_counts),
+        "leaves_per_top_level_task": dict(sorted(
+            top_level_leaf_counts.items(), key=lambda kv: int(kv[0])
+        )),
+    }
 
 
 def _run_log_metrics(run_log_text: str) -> dict:
@@ -129,6 +198,27 @@ def _history_metrics(history: list, plan_basename: str) -> dict:
     }
 
 
+def _hidden_tests_status(task_id: str, project_dir: Path) -> Optional[dict]:
+    """Whether this task's hidden_tests_dir (if it declares one) is still
+    present and non-empty after the run -- see the module docstring's
+    hidden_tests bullet for why this specifically needs checking now that
+    a cleanup phase with mv/rm runs at the end of every JFI session."""
+    try:
+        task = harness.load_task(task_id)
+    except (FileNotFoundError, ValueError):
+        return None
+    hidden_dir = task.get("hidden_tests_dir")
+    if not hidden_dir:
+        return None
+    path = project_dir / hidden_dir
+    present = path.is_dir()
+    return {
+        "path": hidden_dir,
+        "present": present,
+        "empty": present and not any(path.iterdir()),
+    }
+
+
 def score_session(project_dir: Path, task_id: str, verify_result: Optional[dict]) -> dict:
     session_dir = project_dir / "JFI" / task_id
     run_log_path = session_dir / "run.log"
@@ -144,8 +234,10 @@ def score_session(project_dir: Path, task_id: str, verify_result: Optional[dict]
         "project_dir": str(project_dir),
         "objective_verify": verify_result,
         "plan_progress": _plan_progress(plan_text) if plan_text else None,
+        "plan_structure": _plan_structure_metrics(plan_text) if plan_text else None,
         **_run_log_metrics(run_log_text),
         **_history_metrics(history, Path(plan_path).name),
+        "hidden_tests": _hidden_tests_status(task_id, project_dir),
     }
 
     flags = []
@@ -157,8 +249,25 @@ def score_session(project_dir: Path, task_id: str, verify_result: Optional[dict]
         flags.append(f"{report['crash_events']} LLM backend crash(es) (HTML error page) -- likely local server instability, possibly context-window overflow")
     if report["review_loop_cap_hit"]:
         flags.append("hit the 3-failed-review cap -- never reached a clean review")
+    hidden_tests = report["hidden_tests"]
+    if hidden_tests and (not hidden_tests["present"] or hidden_tests["empty"]):
+        flags.append(
+            f"hidden test dir '{hidden_tests['path']}' is missing or empty after the run -- "
+            "the cleanup phase (or an earlier one) likely moved/deleted it"
+        )
     if verify_result and verify_result.get("ran") and not verify_result.get("passed"):
         flags.append("finished the pipeline but failed the objective hidden-test verification")
+    structure = report["plan_structure"]
+    # Advisory only -- see _plan_structure_metrics' docstring for why this
+    # doesn't try to judge any single leaf. A plan can legitimately never
+    # nest past depth 1 for a genuinely small task; this just surfaces the
+    # shape for a human/model to glance at, the same spirit as story's
+    # honestly-labeled weak grading.
+    if structure and structure["leaf_count"] >= 5 and structure["max_leaf_depth"] <= 1:
+        flags.append(
+            f"plan never nested past depth 1 despite {structure['leaf_count']} leaves -- "
+            "worth a second look for under-decomposition (see plan_structure)"
+        )
     report["flags"] = flags
 
     return report
@@ -192,13 +301,16 @@ def main():
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(scorecards, f, indent=2)
 
-    print(f"{'task':<24} {'harness':<14} {'verify':<8} {'plan':<10} {'rewrites':<9} {'stalls':<7} {'crashes':<8} {'tool_err%':<10}")
+    print(f"{'task':<24} {'harness':<14} {'verify':<8} {'plan':<10} {'depth':<7} {'rewrites':<9} {'stalls':<7} {'crashes':<8} {'tool_err%':<10}")
     for c in scorecards:
         verify = c["objective_verify"] or {}
         verify_str = "n/a" if verify.get("passed") is None else ("PASS" if verify["passed"] else "FAIL")
         plan = c["plan_progress"] or {}
         plan_str = f"{plan.get('done', 0)}/{plan.get('total', 0)}" if plan else "n/a"
-        print(f"{c['task_id']:<24} {c['harness_outcome']:<14} {verify_str:<8} {plan_str:<10} "
+        structure = c["plan_structure"] or {}
+        depth_str = (f"{structure.get('avg_leaf_depth', 0)}/{structure.get('max_leaf_depth', 0)}"
+                     if structure else "n/a")
+        print(f"{c['task_id']:<24} {c['harness_outcome']:<14} {verify_str:<8} {plan_str:<10} {depth_str:<7} "
               f"{c['plan_rewrite_count']:<9} {c['stall_nudges']:<7} {c['crash_events']:<8} {c['tool_call_error_rate']*100:<10.1f}")
         for flag in c["flags"]:
             print(f"    ⚠ {flag}")

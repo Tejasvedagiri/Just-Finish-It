@@ -193,3 +193,57 @@ def test_ensure_plan_file_counts_x_and_uppercase_ticks(console, manager):
     assert manager.ensure_plan_file() is True
     assert manager.plan_progress() == (2, 3)
     assert any("2/3" in msg for msg in console.system_messages)
+
+
+class TestEnsurePlanFileWarnsOnMissingRequiredHeaders:
+    """A planner that drifts away from the two literal '## Implementation'/
+    '## Testing' headers (a different name, its own extra headers instead of
+    nested bullets, ...) breaks phase_progress silently -- see
+    PLAN_FORMAT_RULES. ensure_plan_file must surface that immediately rather
+    than let it show up only as a mysteriously empty work queue deep into
+    the imp/testing phase."""
+
+    def test_no_warning_when_both_required_sections_have_items(self, console, manager):
+        _plan_with(
+            manager,
+            "## Implementation\n- [ ] 1.1 a\n## Testing\n- [ ] 2.1 b\n",
+        )
+        assert manager.ensure_plan_file() is True
+        assert not any("Implementation' section" in m or "Testing' section" in m
+                       for m in console.system_messages)
+
+    def test_warns_when_testing_header_is_missing(self, console, manager):
+        _plan_with(manager, "## Implementation\n- [ ] 1.1 a\n")
+        manager.ensure_plan_file()
+        assert any("no '## Testing' section" in m for m in console.system_messages)
+        assert not any("no '## Implementation' section" in m for m in console.system_messages)
+
+    def test_warns_when_implementation_header_is_missing(self, console, manager):
+        _plan_with(manager, "## Testing\n- [ ] 2.1 b\n")
+        manager.ensure_plan_file()
+        assert any("no '## Implementation' section" in m for m in console.system_messages)
+
+    def test_warns_on_both_when_a_planner_invents_its_own_headers_instead(self, console, manager):
+        """Reproduces the real failure: a custom '## Tasks' umbrella with its
+        own '### 1. ...' subsections instead of the two required headers --
+        items exist and are unchecked, but neither literal header appears
+        anywhere, so both phases would see an empty queue."""
+        _plan_with(
+            manager,
+            "## Tasks\n### 1. Scaffold\n- [ ] 1.1 a\n### 2. Verification\n- [ ] 2.1 b\n",
+        )
+        assert manager.ensure_plan_file() is True  # still tracked -- 2 items exist overall
+        assert any("no '## Implementation' section" in m for m in console.system_messages)
+        assert any("no '## Testing' section" in m for m in console.system_messages)
+
+    def test_warns_when_own_subsection_header_ends_the_required_section_early(self, console, manager):
+        """The subtler variant: '## Implementation' IS present, but a nested
+        markdown header (not a bullet) for the planner's own subgrouping
+        ends that section immediately, per the header-boundary mechanics
+        PLAN_FORMAT_RULES now calls out explicitly."""
+        _plan_with(
+            manager,
+            "## Implementation\n### Renderers\n- [ ] 1.1 a\n## Testing\n- [ ] 2.1 b\n",
+        )
+        manager.ensure_plan_file()
+        assert any("no '## Implementation' section" in m for m in console.system_messages)

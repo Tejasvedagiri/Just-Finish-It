@@ -11,6 +11,7 @@ PHASE_DISPLAY_NAMES: Dict[str, str] = {
     "imp": "Implement",
     "testing": "Test",
     "reviewer": "Review",
+    "cleanup": "Cleanup",
 }
 
 
@@ -236,11 +237,23 @@ class AbstractManager(ABC):
 
     def submit_external_answer(self, key: str) -> None:
         """
-        Answers a pending get_user_choice call from outside the manager's own
-        UI — as if `key` had been typed there. Used by an external approver
-        (e.g. a web dashboard) so it can resolve the same prompt a terminal
-        user would otherwise answer; whichever answers first wins. No-op
-        default for managers with no such external channel.
+        Answers a pending get_user_choice/get_user_input call from outside
+        the manager's own UI — as if `key` had been typed there. Used by an
+        external approver (e.g. a web dashboard) so it can resolve the same
+        prompt a terminal user would otherwise answer; whichever answers
+        first wins. No-op default for managers with no such external
+        channel.
+        """
+        pass
+
+    def submit_external_queue_item(self, text: str) -> None:
+        """
+        Queues `text` as a new follow-up request from outside the manager's
+        own UI — the external-channel equivalent of typing a line and
+        pressing Enter while nothing is currently awaiting an answer (see
+        set_queue_store). Used by an external approver (e.g. a web
+        dashboard) so a session can be driven entirely from there, not just
+        approved. No-op default for managers with no such external channel.
         """
         pass
 

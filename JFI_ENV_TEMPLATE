@@ -16,6 +16,12 @@ MODEL=qwen3:8b
 
 # --- Optional ----------------------------------------------------------------
 
+# Which SessionManager drives a session: "adaptive" (default) detects the
+# task type (python/javascript/story) from the goal and sends smaller,
+# type-specific planning rules instead of one generic block for every goal;
+# "simple" opts back into the original one-size-fits-all rules.
+# SESSION_MANAGER=adaptive
+
 # Sampling temperature. Defaults to 0.7 if unset.
 # TEMPERATURE=0.7
 

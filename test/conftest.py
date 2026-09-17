@@ -54,3 +54,15 @@ def make_manager(console):
         return SimpleSessionManager(console, session_id)
 
     return _make
+
+
+@pytest.fixture()
+def make_adaptive_manager(console):
+    """Factory: build an AdaptiveSessionManager for an arbitrary session id."""
+
+    def _make(session_id="demo"):
+        from JFI.session.adaptive_session_manager import AdaptiveSessionManager
+
+        return AdaptiveSessionManager(console, session_id)
+
+    return _make

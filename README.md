@@ -1,6 +1,6 @@
 # Just Finish It (JFI) 🤖
 
-**A multi-phase, plan-driven coding agent for local LLMs.** Give JFI a goal and it runs the full software-engineering loop — **planner → implementer → tester → reviewer** — end to end against any OpenAI-compatible endpoint, one checkbox at a time.
+**A multi-phase, plan-driven coding agent for local LLMs.** Give JFI a goal and it runs the full software-engineering loop — **planner → implementer → tester → reviewer → cleanup** — end to end against any OpenAI-compatible endpoint, one checkbox at a time.
 
 What makes it different from "just an autonomous mode" is that all of its state lives on disk:
 
@@ -12,9 +12,9 @@ JFI is token-hungry by design: every step re-sends the (growing) session history
 
 ---
 
-## The four-phase pipeline
+## The five-phase pipeline
 
-Every JFI session runs the same four phases in order:
+Every JFI session runs the same five phases in order:
 
 | Phase     | What it does                                                                                          |
 |-----------|--------------------------------------------------------------------------------------------------------|
@@ -22,6 +22,7 @@ Every JFI session runs the same four phases in order:
 | **imp**       | Implements the code, ticking each box with `replace_in_file` *immediately* after finishing that one item — never batched. |
 | **testing**   | Runs the test suite and fixes failures.                                                                |
 | **reviewer**  | Signs off (`REVIEWER_COMPLETE`) or writes a `review.md` report, which automatically schedules another full iteration. Up to 3 failed-review loops per session before JFI stops so a bad cycle is visible instead of looping forever. |
+| **cleanup**   | Tidies the working directory: moves anything worth keeping (debug screenshots, scratch scripts, ...) into `JFI/readme/` for reference, and deletes the rest. Never touches the deliverable itself or the session's own bookkeeping files. |
 
 The plan file is the single source of truth across phases *and* across restarts — every phase re-reads it, and resuming a session picks up at the first unticked item (see [Resuming](#resuming-a-session)).
 
@@ -30,8 +31,9 @@ The plan file is the single source of truth across phases *and* across restarts 
 1. You type a **session name**, then your **goal** (be as detailed as you want).
 2. The planner writes `plan.md`. As soon as its last line is written and the phase-complete marker is emitted, JFI moves on automatically — there is no approval gate between phases; the review loop *is* the quality gate.
 3. During **imp** and **testing**, the model works strictly one checkbox at a time: it does the work, then ticks exactly that one box in `plan.md` (byte-identical text, only `[ ]`→`[x]`). This is what makes the header's live progress bars — the current phase's own checklist (`implement ████░░░░ 8/18`) alongside the whole plan (`total ███░░░░░ 8/21`) — meaningful and makes resumption robust.
-4. The **reviewer** reads the finished work; if it finds real issues it writes `review.md`, JFI deletes that file, folds its contents into a fresh user message, and loops all four phases again (the header shows `loop #2`, etc.). A clean review ends the run.
-5. Once done — or if you queue more requests at any point (see [Live input](#live-input-queue-force-idle)) — JFI either idles with a live input line waiting for your next request, or exits.
+4. The **reviewer** reads the finished work; if it finds real issues it writes `review.md`, which — after **cleanup** still runs once more to tidy that pass — JFI deletes, folding its contents into a fresh user message and looping all five phases again (the header shows `loop #2`, etc.). A clean review just moves straight into cleanup.
+5. **cleanup** sweeps the working directory for stray files that aren't part of the deliverable — relocating anything worth keeping into the session's own `JFI/readme/` folder and deleting the rest — before the run considers this pass finished.
+6. Once done — or if you queue more requests at any point (see [Live input](#live-input-queue-force-idle)) — JFI either idles with a live input line waiting for your next request, or exits.
 
 The whole transcript is also written to `JFI/readme/<session>/run.log` as it happens (`tail -f` friendly), and every file the agent touches is tracked so a project-state summary can be folded into later iterations.
 
@@ -62,6 +64,7 @@ Then answer two prompts: **session name** and **goal**, and let it work.
 | `OPENAI_API_KEY`    | API key for that server                            | `ollama` / your real key                   |
 | `MODEL`             | Model name                                         | `gemma-4:31b`, `qwen3.5:35b-a3b`, …        |
 | `TEMPERATURE`       | Sampling temperature                               | `0.7`                                      |
+| `SESSION_MANAGER` *(optional)* | Which `SessionManager` drives a session. `adaptive` (default) detects the goal's task type (python/javascript/story) and sends smaller, type-specific planning rules instead of one generic block for everything — see [`task_rules.py`](src/JFI/session/task_rules.py). `simple` opts back into the original one-size-fits-all rules. An unrecognized value logs a hint and falls back to `adaptive`. | `simple` |
 | `FREQUENCY_PENALTY` *(optional)* | Penalizes tokens proportional to how often they've already appeared in the response so far — the standard lever against a model falling into a verbatim repetition loop (seen in practice on smaller/quantized models). Defaults to `0.0` (a no-op) if unset; try `0.3`–`0.5` if a model gets stuck repeating itself. | `0.3` |
 | `CONTEXT_SIZE` *(optional)* | Context window of the served model, in tokens — history is compressed once a request would exceed `CONTEXT_SIZE × CONTEXT_COMPRESSION_RATIO`. Size it to what *fits on your machine*: 4096–16384 for an ~8GB setup with a small model, 32768+ for 27B/31B runs. Defaults to 32768 if unset. | `32768`              |
 | `CONTEXT_COMPRESSION_RATIO` *(optional)* | Headroom left for the model's own reply when deciding whether to compress history. Defaults to `0.7` if unset. | `0.7` |
@@ -73,7 +76,7 @@ Then answer two prompts: **session name** and **goal**, and let it work.
 | `SESSION_PATH` *(optional, advanced)* | Where the `JFI/` session folder is created, relative to. Defaults to the current working directory. | `.` |
 | `FLARESOLVERR_URL` *(optional)* | Base URL of a [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) instance. When a `curl` run via `execute_command` gets blocked by a site's anti-bot/DoS protection (Cloudflare challenge, etc.), the model is told to retry the request through this endpoint instead. Left unset, the model is just told the direct request was blocked. | `http://localhost:8192/` |
 
-Every one of `OPENAI_URL` / `OPENAI_API_KEY` / `MODEL` / `TEMPERATURE` / `FREQUENCY_PENALTY` can also be set **per phase**, prefixed `PLANNER_`, `IMP_`, `TESTING_`, or `REVIEWER_` (e.g. `REVIEWER_MODEL=gpt-4.1`, `IMP_OPENAI_URL=http://127.0.0.1:8080/v1`). A phase with no prefixed override falls back to the shared, unprefixed setting — so the default (unset) behavior is exactly one model for every phase, and you only add prefixed lines for the phases you actually want to route elsewhere (e.g. a cheap/fast model for `testing`, a stronger one for `reviewer`).
+Every one of `OPENAI_URL` / `OPENAI_API_KEY` / `MODEL` / `TEMPERATURE` / `FREQUENCY_PENALTY` can also be set **per phase**, prefixed `PLANNER_`, `IMP_`, `TESTING_`, `REVIEWER_`, or `CLEANUP_` (e.g. `REVIEWER_MODEL=gpt-4.1`, `IMP_OPENAI_URL=http://127.0.0.1:8080/v1`). A phase with no prefixed override falls back to the shared, unprefixed setting — so the default (unset) behavior is exactly one model for every phase, and you only add prefixed lines for the phases you actually want to route elsewhere (e.g. a cheap/fast model for `testing`, a stronger one for `reviewer`).
 
 `.env` is loaded before anything else runs (see `runner.py::main()`), so a `THEME=...` line in it takes effect no matter how JFI was launched.
 
@@ -181,21 +184,24 @@ A skipped item (`- [○]`) is treated exactly like a finished one everywhere pro
 
 ## Web dashboard (`jfi-web`)
 
-An optional Streamlit page for watching (and approving) a session from a browser instead of, or alongside, the terminal:
+An optional Streamlit page for watching *and driving* a session from a browser instead of, or alongside, the terminal — the goal, approvals, and new follow-up requests can all be typed there:
 
 ```bash
 uv sync --extra web       # pulls in streamlit
-JFI_WEB_BRIDGE=1 ./JFI    # run jfi with the bridge enabled, in one terminal
-jfi-web                   # in another terminal (or another machine on the same network)
+JFI_WEB_BRIDGE=1 ./JFI    # single command: runs jfi AND auto-launches the dashboard for it
 ```
 
-Serves on port **7777** by default (`http://localhost:7777`) — set `JFI_WEB_PORT` to change it, or pass `--server.port` directly to `jfi-web`.
+`JFI_WEB_BRIDGE=1` does two things: it makes `./JFI` mirror its live phase/state/task/token/plan progress to `JFI/<session>/web_status.json` every half-second and watch `JFI/<session>/web_answer.json` for input, *and* it auto-launches the dashboard itself as a child process — no second terminal needed. Serves on port **7777** by default (`http://localhost:7777`) — set `JFI_WEB_PORT` to change it. Set `JFI_WEB_DASHBOARD=0` to keep just the status files without the auto-launch (e.g. you're running `jfi-web` on a different machine, which still works — the two processes share nothing in memory, only the files under `JFI/`, as long as `jfi-web` can see the same folder or a copy synced some other way).
 
-`JFI_WEB_BRIDGE=1` makes `./JFI` mirror its live phase/state/task/token/plan progress to `JFI/<session>/web_status.json` every half-second, and watch `JFI/<session>/web_answer.json` for answers — the two processes share nothing in memory, only those files, so `jfi-web` can run on a different machine as long as it can see the same `JFI/` folder (or a copy synced some other way).
+This works two ways, and picks whichever applies with no configuration needed: if `jfi-web` is on `PATH` (the `uv sync --extra web` case above), that's what gets launched; otherwise, if you're running the standalone `dist/jfi` binary (`uv run build`), it re-launches *itself* to serve the dashboard instead — streamlit is bundled into that binary (`build_binary` runs `--collect-all streamlit` whenever it's present at build time), so `JFI_WEB_BRIDGE=1` gives you the dashboard with nothing else installed, in any directory, even one with no Python at all. If neither applies (running from source without the `web` extra synced), you get one line explaining that and nothing else happens — the terminal still works normally either way.
 
-Whenever the terminal is waiting on a choice (an `execute_command` approval, an LLM-retry prompt, …), the dashboard shows the same prompt with clickable buttons; whichever side answers first — terminal keypress or dashboard click — wins, so nothing double-answers. With `REVIEW_LOOP_APPROVAL=1` also set, a failed review pauses for an explicit Approve/Reject before JFI starts another fix iteration, answerable the same way. Both flags default off — without them JFI runs exactly as it always has, no new files, no new prompts.
+The very first time `jfi-web` runs on a machine, `launcher.py` pre-creates `~/.streamlit/credentials.toml` (empty email) before starting Streamlit, so it never blocks on Streamlit's own first-run "Welcome to Streamlit! ... Email:" activation prompt — without that, a non-interactive launch (a background job, a service, no TTY on stdin) would just hang or die with nothing listening on the port and no obvious error. If you already have that file from using Streamlit for something else, it's left untouched.
 
-The dashboard also shows `plan.md`'s checklist progress and the latest `review.md` (if any) for every session under `JFI/`, live status or not — only the live phase/state/tokens/approvals need the bridge running.
+Whenever the terminal is waiting on input, the dashboard shows the same prompt — clickable buttons for a fixed choice (an `execute_command` approval, an LLM-retry prompt, …), a text box for a free-text one (the goal, or any other plain question); whichever side answers first — terminal keypress or dashboard submission — wins, so nothing double-answers. With `REVIEW_LOOP_APPROVAL=1` also set, a failed review pauses for an explicit Approve/Reject before JFI starts another fix iteration, answerable the same way. While nothing is pending, the dashboard instead shows a "queue a new request" box — the same thing as typing a line at the terminal's idle input, replayed once the current review phase lands. Both flags default off — without them JFI runs exactly as it always has, no new files, no new prompts, no auto-launched process.
+
+One prompt still has to happen at the terminal: the very first "session name" question, since the session's own folder (and everything the dashboard reads) doesn't exist until it's answered. Everything from the goal prompt onward is answerable from either side.
+
+The dashboard also shows `plan.md`'s checklist progress and the latest `review.md` (if any) for every session under `JFI/`, live status or not — only the live phase/state/tokens/approvals/new-request-box need the bridge running.
 
 ---
 
@@ -223,7 +229,7 @@ Just-Finish-It/
 ├── README.md                    # this file
 │
 ├── src/JFI/                     # the agent itself
-│   ├── runner.py                # main() + run_pipeline(): orchestrates the 4 phases, review loop, queue/force/idle
+│   ├── runner.py                # main() + run_pipeline(): orchestrates the 5 phases, review loop, queue/force/idle
 │   │                            #   • execute_tool_call() — runs one tool call, coaches on failure (AUTO-RECTIFY), tracks per-signature retry counts
 │   │                            #   • collect_next_iteration() / review_outcome() — the no-prompt loop back to planner after a failed review or queued request
 │   ├── llm/
@@ -239,7 +245,7 @@ Just-Finish-It/
 │   │   ├── pt_console_manager.py# PromptToolkitConsoleManager: full-screen UI — header/task/status lines, streaming AI space,
 │   │   │                        #   always-live input line (queue/force/answer), scroll lock, theme presets, live run.log mirroring
 │   │   ├── key_bindings.py      # teaches the terminal Shift+Enter/Ctrl+Enter encodings so multiline input works everywhere
-│   │   └── web_bridge.py        # WebBridge: mirrors live status + relays approval answers to/from jfi-web, see "Web dashboard" below
+│   │   └── web_bridge.py        # WebBridge: mirrors live status + relays answers/new-request text to/from jfi-web, see "Web dashboard" below
 │   ├── orchestrator/
 │   │   └── basic_orchestrator.py# legacy single-turn orchestrator (kept for reference/testing; runner.py is what JFI actually runs)
 │   ├── web/                     # jfi-web: an optional Streamlit dashboard, see "Web dashboard" below

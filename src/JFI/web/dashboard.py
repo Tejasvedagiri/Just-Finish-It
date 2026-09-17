@@ -1,17 +1,21 @@
-"""Streamlit dashboard for monitoring (and approving) a running `./jfi`
-session.
+"""Streamlit dashboard for monitoring, answering, and driving a running
+`./jfi` session -- the goal prompt, approvals, and new follow-up requests
+can all be typed here instead of at the terminal.
 
 Runs as its own process, completely separate from `./jfi` -- there's no
 in-memory link between them, so everything here comes from files under the
 session's own JFI/<session>/ folder:
 
 - web_status.json / web_answer.json: written/read by JFI.manager.web_bridge,
-  only present when the jfi process was started with JFI_WEB_BRIDGE=1. This
-  is what gives "live" state (current phase, streaming/thinking, tokens) and
-  lets a button click here answer a pending approval.
+  only present when the jfi process was started with JFI_WEB_BRIDGE=1 (which
+  also auto-launches this dashboard itself, see JFI.web.launcher and
+  runner._launch_web_dashboard, unless JFI_WEB_DASHBOARD=0). This is what
+  gives "live" state (current phase, streaming/thinking, tokens) and lets
+  this page answer a pending prompt (button or free text) or queue a brand-
+  new request while idle -- see _render_approval/_render_queue_input.
 - plan.md / review.md / run.log: written by jfi regardless of the bridge, so
   progress/history are visible here even for a session that isn't currently
-  running with the bridge enabled -- just not live.
+  running with the bridge enabled -- just not live, and not answerable.
 
 Launch with: streamlit run src/JFI/web/dashboard.py
 (or the `jfi-web` console script, see JFI.web.launcher)
@@ -92,13 +96,43 @@ def _load_status(session_path: Path) -> dict | None:
 
 
 def _render_approval(session_path: Path, awaiting: dict) -> None:
+    """Renders whatever `./jfi` is currently blocked on: a get_user_choice
+    menu (buttons, one per option) or a plain get_user_input prompt (the
+    goal, or any other free-text question) as a text box -- either way,
+    submitting writes web_answer.json for WebBridge._relay_answer to pick
+    up and feed into console.submit_external_answer()."""
     st.error(f"⏸️  Action required: {awaiting.get('prompt', '')}")
     options = awaiting.get("options") or []
-    cols = st.columns(len(options)) if options else []
-    for col, option in zip(cols, options):
-        if col.button(option["label"], key=f"answer-{option['key']}", use_container_width=True):
-            atomic_write_json(session_path / ANSWER_FILENAME, {"key": option["key"]})
-            st.toast(f"Sent: {option['label']}")
+    if options:
+        cols = st.columns(len(options))
+        for col, option in zip(cols, options):
+            if col.button(option["label"], key=f"answer-{option['key']}", use_container_width=True):
+                atomic_write_json(session_path / ANSWER_FILENAME, {"type": "answer", "key": option["key"]})
+                st.toast(f"Sent: {option['label']}")
+                time.sleep(0.3)
+                st.rerun()
+    else:
+        with st.form(key="answer-form", clear_on_submit=True):
+            reply = st.text_area("Your answer", label_visibility="collapsed", height=100)
+            if st.form_submit_button("Send") and reply.strip():
+                atomic_write_json(session_path / ANSWER_FILENAME, {"type": "answer", "key": reply.strip()})
+                st.toast("Sent")
+                time.sleep(0.3)
+                st.rerun()
+
+
+def _render_queue_input(session_path: Path) -> None:
+    """Shown instead of _render_approval when nothing is currently awaiting
+    an answer -- the dashboard equivalent of typing a line at the terminal's
+    idle input: queues a brand-new follow-up request via
+    console.submit_external_queue_item(), replayed once the current review
+    phase lands (or starts the pipeline back up if it was already idle)."""
+    with st.form(key="queue-form", clear_on_submit=True):
+        st.caption("Queue a new request (runs after the current review phase, or starts one up if idle):")
+        text = st.text_area("Request", label_visibility="collapsed", height=100)
+        if st.form_submit_button("Queue") and text.strip():
+            atomic_write_json(session_path / ANSWER_FILENAME, {"type": "queue", "text": text.strip()})
+            st.toast("Queued")
             time.sleep(0.3)
             st.rerun()
 
@@ -140,7 +174,10 @@ def main() -> None:
         st.sidebar.info(f"No sessions found under {root}/")
         st.info(
             f"No sessions found under `{root}/`. Run `./jfi` from this same directory "
-            "(or set SESSION_PATH to match) and start a session first."
+            "(or set SESSION_PATH to match) and enter a session name at its terminal prompt "
+            "first -- that one initial prompt still has to happen there, since the session's "
+            "own folder (and this page's way of seeing it) doesn't exist until it's answered. "
+            "Everything after that -- the goal, approvals, new requests -- can be typed here."
         )
         return
 
@@ -163,6 +200,8 @@ def main() -> None:
         awaiting = status.get("awaiting")
         if awaiting:
             _render_approval(session_path, awaiting)
+        else:
+            _render_queue_input(session_path)
         _render_status(status)
 
     st.subheader("Plan")

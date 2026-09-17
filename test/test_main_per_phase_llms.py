@@ -60,12 +60,12 @@ def test_main_builds_one_llm_stream_per_phase_honoring_overrides(monkeypatch):
     assert reviewer.temperature == "0.2"
     assert reviewer.stream_service.base_url.host == "reviewer.example"
 
-    for phase in ("planner", "imp", "testing"):
+    for phase in ("planner", "imp", "testing", "cleanup"):
         stream = llms[phase]
         assert stream.model == "shared-model"
         assert stream.temperature == "0.7"
         assert stream.stream_service.base_url.host == "shared.example"
 
-    # Every phase got its own instance -- not four names pointing at one
+    # Every phase got its own instance -- not five names pointing at one
     # shared object, which would silently defeat per-phase routing.
-    assert len({id(s) for s in llms.values()}) == 4
+    assert len({id(s) for s in llms.values()}) == len(runner.PHASES)

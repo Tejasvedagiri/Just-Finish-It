@@ -119,3 +119,51 @@ class TestConsoleQueueStore:
         ssm3 = make_manager("resume_queue")
         console3.set_queue_store(ssm3.load_queued_requests(), ssm3.save_queued_requests)
         assert console3.pending_input_count() == 0
+
+
+class TestSubmitExternalQueueItem:
+    """submit_external_answer's counterpart for a NEW request, not an answer
+    to something already pending -- the web dashboard's "queue a follow-up"
+    box (see WebBridge._relay_answer's "queue" branch) goes through this."""
+
+    def test_queues_text_like_a_typed_line(self):
+        from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
+
+        console = PromptToolkitConsoleManager()
+        console.submit_external_queue_item("do the thing")
+
+        assert console.pending_input_count() == 1
+        assert console.drain_queued_input() == ["do the thing"]
+
+    def test_blank_text_is_a_no_op(self):
+        from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
+
+        console = PromptToolkitConsoleManager()
+        console.submit_external_queue_item("   ")
+
+        assert console.pending_input_count() == 0
+
+    def test_reports_via_queue_store_callback(self):
+        from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
+
+        console = PromptToolkitConsoleManager()
+        seen = []
+        console.set_queue_store([], seen.append)
+
+        console.submit_external_queue_item("from the web")
+
+        assert seen[-1] == ["from the web"]
+
+    def test_abstract_manager_default_is_a_no_op(self):
+        """No-op default for managers with no such external channel (see
+        AbstractManager.submit_external_queue_item) -- must not raise."""
+        from JFI.manager.abstract_manager import AbstractManager
+
+        class _Bare(AbstractManager):
+            def display_system(self, *a, **k): pass
+            def display_assistant(self, *a, **k): pass
+            def display_user(self, *a, **k): pass
+            def get_user_input(self, *a, **k): pass
+            def print_agent_response(self, *a, **k): pass
+
+        _Bare().submit_external_queue_item("anything")

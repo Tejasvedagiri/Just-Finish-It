@@ -34,6 +34,7 @@ class TestPhaseCompleted:
             ("\nIMP_COMPLETE\n", "imp"),
             ("TESTING_COMPLETE", "testing"),
             ("REVIEWER_COMPLETE!", "reviewer"),
+            ("CLEANUP_COMPLETE", "cleanup"),
         ],
     )
     def test_standalone_marker_is_detected(self, content: str, phase: str) -> None:

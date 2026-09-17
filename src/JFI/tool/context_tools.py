@@ -127,6 +127,50 @@ def context_lookup(keyword: str, cache_path: str) -> str:
     return f"{len(hits)} match(es) for '{keyword}':\n" + "\n".join(lines)
 
 
+_AUTO_LOAD_VALUE_CAP = 500
+_AUTO_LOAD_TOTAL_CAP = 2500
+
+
+def render_facts_for_auto_load(cache_path: str) -> str:
+    """Formats every saved fact for automatic inclusion in the system message
+    (see CONTEXT_CACHE_RULES / _phase_system_message), so a fact survives
+    history compression without the model having to remember to call
+    context_lookup itself at the right moment.
+
+    Returns "" when the cache is empty (nothing to inject). Each value is
+    capped so one oversized fact can't blow the request budget on its own;
+    the whole block is capped too, dropping the least-recently-saved facts
+    first (dict insertion order) if it's still too big — a cache that's
+    grown past "a handful of facts" loses its oldest entries from auto-load
+    rather than crowding out the rest of the system message.
+    """
+    facts = _facts(cache_path)
+    if not facts:
+        return ""
+
+    lines = []
+    for key, value in facts.items():
+        text = value if isinstance(value, str) else json.dumps(value)
+        text = " ".join(text.split())
+        if len(text) > _AUTO_LOAD_VALUE_CAP:
+            text = text[:_AUTO_LOAD_VALUE_CAP] + "… [truncated]"
+        lines.append(f"- {key}: {text}")
+
+    block = "\n".join(lines)
+    if len(block) > _AUTO_LOAD_TOTAL_CAP:
+        kept = []
+        total = 0
+        for line in lines:
+            if total + len(line) + 1 > _AUTO_LOAD_TOTAL_CAP:
+                kept.append(f"… [{len(lines) - len(kept)} more fact(s) omitted — use "
+                             f"context_lookup to see them]")
+                break
+            kept.append(line)
+            total += len(line) + 1
+        block = "\n".join(kept)
+    return block
+
+
 def make_context_save(cache_path: str) -> Callable[[str, str], str]:
     """Binds context_save to one session's own context.json — mirrors
     cmd_tools.make_gated_execute_command's per-session binding pattern."""

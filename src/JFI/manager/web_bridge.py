@@ -13,12 +13,22 @@ Two files live inside the session's own JFI/<session>/ folder:
 
 - web_status.json  -- written by this bridge every _POLL_SECONDS from
   console.get_status_snapshot(). Read-only from the dashboard's side.
-- web_answer.json  -- written by the dashboard when a human clicks a button
-  answering a pending choice (get_status_snapshot()'s "awaiting" field).
-  This bridge picks it up, feeds it to console.submit_external_answer() --
-  the exact same channel a terminal keypress uses, so whichever answers
-  first simply wins -- and always deletes the file so a stale click can
-  never be replayed against some later, unrelated choice.
+- web_answer.json  -- written by the dashboard for two different things,
+  told apart by its "type" field:
+    - {"type": "answer", "key": ...} -- a human clicked a button or typed a
+      reply to a pending prompt (get_status_snapshot()'s "awaiting" field,
+      a get_user_choice menu or a plain get_user_input like the goal
+      prompt). Relayed via console.submit_external_answer() -- the exact
+      same channel a terminal keypress uses, so whichever answers first
+      simply wins. Dropped as stale if nothing is awaiting by the time this
+      bridge notices (e.g. the terminal answered first).
+    - {"type": "queue", "text": ...} -- a brand-new follow-up request typed
+      into the dashboard while nothing is currently awaiting an answer.
+      Relayed via console.submit_external_queue_item() -- the same channel
+      a terminal line typed at idle time uses.
+  Also accepted with no "type" (old dashboards, or a plain button click)
+  as an implicit "answer" for backward compatibility. Always deleted after
+  being read, whichever branch it took, so nothing can be replayed twice.
 """
 
 import json
@@ -103,11 +113,21 @@ class WebBridge:
             self._answer_path.unlink()
         except OSError:
             pass
-        if not snapshot.get("awaiting"):
-            return  # nothing pending right now -- a stale/late click, drop it
         try:
-            key = json.loads(raw).get("key")
+            payload = json.loads(raw)
         except (json.JSONDecodeError, AttributeError):
             return
+
+        if payload.get("type") == "queue":
+            text = payload.get("text")
+            if text:
+                self._console.submit_external_queue_item(str(text))
+            return
+
+        # "answer" (explicit or implied, for backward compatibility with any
+        # dashboard that only ever wrote {"key": ...}).
+        if not snapshot.get("awaiting"):
+            return  # nothing pending right now -- a stale/late click, drop it
+        key = payload.get("key")
         if key:
             self._console.submit_external_answer(str(key))

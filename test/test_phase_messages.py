@@ -85,6 +85,15 @@ class TestPhaseTriggers:
         trigger = get_phase_trigger("testing", plan_path=manager.plan_path)
         assert "Testing" in trigger and manager.plan_path in trigger
 
+    def test_cleanup_trigger_points_at_session_folder(self, manager):
+        from pathlib import Path
+        from JFI.session.simple_session_manager import get_phase_trigger
+
+        trigger = get_phase_trigger("cleanup", plan_path=manager.plan_path)
+        session_dir = str(Path(manager.plan_path).parent)
+        assert session_dir in trigger
+        assert "deliverable" in trigger
+
 
 class TestEmptyPlan:
     def test_imp_queue_noted_when_no_items(self, manager):

@@ -90,7 +90,10 @@ tasks/<tier>/<task_id>/
   task.json           # id, tier, prompt (the goal text handed to JFI), verify.command
   tests/               # optional: hidden_tests_dir -- copied into the project root BEFORE
                         #   JFI launches (so the model can see and run it, per its own
-                        #   Testing phase, but is told not to edit it)
+                        #   Testing phase, but is told not to edit it). JFI's final cleanup
+                        #   phase is told to leave the deliverable's own tests/ alone, and
+                        #   score.py's "hidden_tests" field/flag makes it visible if it
+                        #   didn't (moved/deleted before verify.command ran)
   verify/              # optional: verify_files_dir -- copied in AFTER JFI's session ends,
                         #   never seen by the model (e.g. calc's end-to-end checker script)
 ```

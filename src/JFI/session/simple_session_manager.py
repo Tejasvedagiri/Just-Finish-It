@@ -5,9 +5,11 @@ import os
 import pickle
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
-from JFI.manager.abstract_manager import AbstractManager
+from JFI.manager.abstract_manager import AbstractManager, phase_display_name
+from JFI.session.abstract_session_manager import SessionManager
+from JFI.tool.context_tools import render_facts_for_auto_load
 
 # flock is Unix-only (Linux/macOS) — the ./JFI launcher is already a POSIX
 # shell script, so this project has never targeted Windows directly.
@@ -114,9 +116,48 @@ KEEP_RECENT_BLOCKS = 6
 TOOL_RESULT_HEAD = 600
 TOOL_RESULT_TAIL = 400
 
+# Tier 4 (the digest) only pays for an extra LLM summarization call once at
+# least this many characters of NEW (not-yet-condensed) history have aged
+# out of the recent window — a tight CONTEXT_SIZE can trigger compression on
+# nearly every turn, and summarizing 1-2 newly-aged blocks at a time would
+# mean one extra LLM round-trip per turn. Below this threshold, new blocks
+# are appended to the digest as the old cheap tool/file/command note instead
+# (never silently dropped) until enough piles up to justify condensing them
+# for real. The very first digest of a session always summarizes regardless
+# of size, so the model gets a real summary (not just a metadata note) as
+# soon as anything ages out.
+DIGEST_SUMMARY_MIN_CHARS = 6000
+# Hard cap on how much rendered new-block text goes into one summarization
+# request -- keeps a single Tier 4 pass bounded even if an unusually large
+# batch of history aged out between compressions.
+DIGEST_INPUT_CHAR_CAP = 10000
+
 PLAN_FORMAT_RULES = """
     PLAN FILE FORMAT (mandatory, no exceptions):
     - The plan file is exactly: {plan_path}
+    - Exactly two "##" section headers are mechanically required, spelled
+      exactly like this and nothing else: "## Implementation" and
+      "## Testing". JFI's own tooling (not just you) scans the file for a
+      header whose text starts with "Implementation" or "Testing" to build
+      each later phase's own work queue and progress bar. Get this wrong —
+      a different name ("## Tasks", "## Build steps", ...), a typo, or
+      simply never writing one of these two headers — and that phase sees
+      an EMPTY queue with no error shown to anyone, and has to blindly
+      rediscover the work itself every turn instead of following your plan.
+    - However many logical groups your own project needs (scaffolding, an
+      API layer, the UI, whatever), they ALL nest as plain bullets under the
+      ONE "## Implementation" header — never as their own separate
+      "##"/"###" headers. Any markdown header line, any level from # through
+      ######, anywhere in the file, is treated as a fresh section boundary
+      by that same tooling: a "### Renderers" subsection sitting inside
+      Implementation would silently END the Implementation section right
+      there, dropping every task below it from the work queue even though
+      it's still sitting in the file. Use nested bullets for every level of
+      your own breakdown, no matter how many logical groups you need — never
+      a markdown header of any kind below "## Implementation" or
+      "## Testing". If you want to record architecture notes, a data model,
+      or other project context, put it as prose/bullets under "## Context
+      and Prerequisites" instead, not its own "##" section, same reason.
     - {plan_path}'s own directory is internal bookkeeping ONLY (the plan
       itself and its supporting files) — never create your actual
       deliverables (source files, tests, docs) inside it just because the
@@ -143,6 +184,30 @@ PLAN_FORMAT_RULES = """
       are each small enough to finish and verify in one focused step (touch
       one file/function, run one command, write one test — not "build the
       login page").
+    - A leaf whose own description names more than one distinct deliverable
+      is not a leaf yet — split every named piece into its own leaf. Read
+      the description back and check for "+", "and", "/", or a semicolon
+      joining separate nouns: "renderer: KPI cards + chart + donut +
+      activity feed" is four leaves wearing a trenchcoat, not one. "One
+      file" is not the same thing as "one step" — a single module that
+      renders five different widgets is five leaves (one per widget), even
+      though they all land in that same file.
+    - This applies just as much to a single file EDIT as to separate files:
+      "rewrite index.html: drop the inline <style>, drop the inline
+      <script>, add the module <script> tag, copy the body markup over" is
+      four leaves that happen to touch the same file, not one — split them
+      the same way you would split four separate files. And it applies to
+      Testing/verification leaves exactly the same: "start the dev server,
+      curl the homepage, curl a bundled asset, check the log, kill the
+      process" is five leaves (start, curl #1, curl #2, check log, stop),
+      not one "verify the dev server" leaf. Rule of thumb: if writing out
+      the leaf's own execute_command/file-tool calls to actually do it would
+      take more than one call, or the description has more than one verb
+      phrase, it is still a parent — split it into a subtask per call/verb
+      and recurse again on any of THOSE that are still compound. A parent
+      task commonly bottoms out 3-4 levels down (1 -> 1.1 -> 1.1.1 ->
+      1.1.1.1), not 2 — do not stop at the first level that merely fits on
+      one line if it still names more than one action.
     - Only LEAF items (the ones you did NOT break down further) get a
       checkbox. Every leaf MUST be a GitHub task-list line and nothing else:
           - [ ] 1.1.1 Short description of the smallest step
@@ -170,6 +235,20 @@ PLAN_FORMAT_RULES = """
               - [ ] 1.1.1.3 Issue a session token on success
             - [ ] 1.1.2 Frontend form (small enough as one leaf — no further split needed)
           - [ ] 1.2 A second task that was already small enough as one leaf
+      A second example — one file, still four leaves, because the edit itself
+      names four actions (this is the same "1 -> 1.1 -> 1.1.1" shape, just
+      with the section's own single task standing in for "1."):
+          - 1. Rewrite index.html for the new bundler
+            - [ ] 1.1 Remove the inline <style> block
+            - [ ] 1.2 Remove the inline <script> block
+            - [ ] 1.3 Add the module <script src="/src/main.js"> tag
+            - [ ] 1.4 Copy the body markup over unchanged
+      And a Testing example, same rule applied to verification leaves:
+          - 2. Verify the dev server serves the app
+            - [ ] 2.1 Start the dev server in the background, capture its PID
+            - [ ] 2.2 curl the homepage and confirm it returns 200 with the expected title
+            - [ ] 2.3 curl a bundled asset (e.g. /src/main.js) and confirm it serves
+            - [ ] 2.4 Check the captured log for errors, then kill the captured PID
     - A task with only one obvious, already-small action underneath it can
       stay a single leaf — don't split for the sake of splitting. The goal is
       the smallest task that is still genuinely one task, not maximum depth.
@@ -233,6 +312,29 @@ VERIFICATION_RULES = """
       has that name in its command line, so a name-based search can match
       and kill the wrong process for no visible reason (the failure shows no
       useful STDERR, just an unexplained kill).
+    - Order Testing leaves cheapest/most-certain first, most expensive/most
+      fragile last. A full build/compile/typecheck step (`npm run build`,
+      `tsc --noEmit`, `go build ./...`, `cargo build`, ...) is fast,
+      deterministic, and needs nothing beyond what's already installed — it
+      belongs near the FRONT of the Testing section, well before anything
+      slower or less certain (a live end-to-end browser render, installing
+      new system tooling, anything needing network access). Two files
+      written in separate steps can drift apart — a function renamed, moved,
+      or never added on one side, still imported or called from the other —
+      without either side's own local check ever catching it; only a
+      whole-project build surfaces that kind of cross-file mismatch, so
+      confirm it FIRST rather than discovering it last, after everything
+      more elaborate already assumed it worked.
+    - A verification step that needs installing new system-level tooling (a
+      headless browser, a package needing sudo, anything not already
+      available) is not a blocker. Try it once; if it needs permissions or
+      downloads that fail in this environment, say so in the report/plan
+      note and move on to whatever mechanical checks ARE available (the
+      build, curl-ing real routes, a DOM/string check of the rendered HTML)
+      instead of spending the rest of the run retrying the same fragile
+      step. A goal is unverified only when NO mechanical check ran at all —
+      not merely because the single most elaborate possible check couldn't
+      run in this environment.
 """
 
 
@@ -249,11 +351,26 @@ PHASE_SECTION = {"imp": "Implementation", "testing": "Testing"}
 
 
 def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
-                       context_cache_path: str = DEFAULT_CONTEXT_CACHE_PATH) -> str:
+                       context_cache_path: str = DEFAULT_CONTEXT_CACHE_PATH,
+                       plan_format_rules: str = PLAN_FORMAT_RULES,
+                       unlocked_tools=()) -> str:
+    """`plan_format_rules` defaults to the generic, task-agnostic
+    PLAN_FORMAT_RULES block; a caller that already knows something about
+    the goal (see AdaptiveSessionManager) can pass a smaller/more targeted
+    rules block instead -- everything else about the message is unchanged
+    either way.
+
+    `unlocked_tools` (this session's own, from SessionManager.unlocked_tools())
+    trims the TOOL ACCESS listing down to whatever's still locked -- see
+    tool/schemas.deferred_tools_rules -- so it shrinks turn by turn instead
+    of repeating the full catalog forever once everything's unlocked."""
+    from JFI.tool.schemas import deferred_tools_rules
+
     rules = (
-        PLAN_FORMAT_RULES.format(plan_path=plan_path)
+        plan_format_rules.format(plan_path=plan_path)
         + CONTEXT_CACHE_RULES.format(context_cache_path=context_cache_path)
         + VERIFICATION_RULES
+        + deferred_tools_rules(unlocked_tools)
     )
 
     if phase == "planner":
@@ -277,6 +394,10 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                    - [ ] 1.2 Second high-level task (already small enough as one leaf)
                    ## Testing
                    - [ ] 2.1 ...
+               "## Implementation" and "## Testing" must appear exactly like that, however many
+               logical groups (scaffolding, API, UI, ...) your own project needs — nest all of
+               them as bullets under those two headers, never as extra headers of your own (see
+               PLAN FILE FORMAT above for exactly why that breaks silently).
                The Testing section must include at least one concrete, mechanically-checkable
                leaf per the VERIFICATION STANDARD above — e.g. "run `npm run build` and confirm
                it exits 0", "start the server and curl it", "run the script against sample
@@ -318,13 +439,24 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                Tick exactly one box per step, right after finishing that step. Do NOT batch the
                ticks until the end, and do NOT rewrite the whole plan file just to tick a box.
             5. Repeat from step 1 until no unchecked Implementation items are left.
+            6. Once every Implementation item reads "- [x]": if this project has ANY single
+               command that builds, compiles, bundles, or type-checks the WHOLE project at once
+               (`npm run build`, `tsc --noEmit`, `go build ./...`, `cargo build`, a full test
+               COLLECTION step even without running the tests, ...), run it ONCE now with
+               execute_command — even though every individual item already passed its own check.
+               Two files written in separate steps can drift apart (a function renamed, moved, or
+               never added on one side, still imported or called from the other) without either
+               item's own local check ever catching it; only a whole-project build/typecheck
+               catches that kind of cross-file mismatch. Fix anything it reports — it means an
+               earlier "done" item is not actually done — before moving on.
 
             If a tool or command returns an error, fix the cause and retry it before moving on.
             Leave the Testing items alone; that is the next phase's job.
             Never ask the user a question and never wait for approval.
 
-            When every Implementation item reads "- [x]", output the exact phrase on its own
-            line: IMP_COMPLETE
+            When every Implementation item reads "- [x]" AND step 6's whole-project build/typecheck
+            (when one exists for this project) is clean, output the exact phrase on its own line:
+            IMP_COMPLETE
         """
 
     elif phase == "testing":
@@ -382,6 +514,40 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
             on its own line: REVIEWER_COMPLETE
         """
 
+    elif phase == "cleanup":
+        session_dir = str(Path(plan_path).parent)
+        return f"""
+            You are a Cleanup Agent. Your sole job is to tidy the working directory now that
+            planning, implementation, testing, and review are done for this pass. You do not
+            touch the deliverable's own logic or content.
+            {rules}
+
+            1. {session_dir} is this session's own bookkeeping folder ({plan_path}, review.md,
+               context.json, history.jsonl.gz, metadata.json, run.log, .lock). NEVER delete,
+               move, or overwrite anything already inside it — that is how this run tracks
+               itself, and the next phase depends on it being intact.
+            2. Use execute_command (e.g. `find`, `ls -la`, `git status --short` if this is a
+               git repo) to inspect the REST of the working directory for files that are not
+               part of the finished deliverable: throwaway debug scripts, one-off screenshots
+               or renders taken to eyeball something, scratch notes, leftover scaffolding
+               directories, stray logs — anything created along the way that has no business
+               sitting in the project root once the work is done.
+            3. For each such file, decide:
+               - Worth keeping for reference (a screenshot the reviewer looked at, a debug
+                 script that helped diagnose something)? Move it into {session_dir}/ with
+                 execute_command's `mv`, so it survives without littering the deliverable.
+               - Pure noise (empty temp directories, editor swap files, accidentally-created
+                 cache/log files with no reference value)? Delete it outright with
+                 execute_command's `rm`.
+            4. NEVER touch: .git, the deliverable's own tracked source/tests/docs, dependency
+               directories (node_modules, venv, __pycache__ a build still needs), or anything
+               you are not sure about — when in doubt, leave it exactly where it is.
+            5. Never ask the user a question and never wait for approval.
+
+            When the working directory is tidy — or it already was, and nothing needed moving
+            or removing — output the exact phrase on its own line: CLEANUP_COMPLETE
+        """
+
     return ""
 
 
@@ -432,29 +598,56 @@ def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_
             f"Do not ask for approval."
         )
 
+    if phase == "cleanup":
+        session_dir = str(Path(plan_path).parent)
+        return (
+            f"Review has landed for this pass. Scan the working directory (excluding .git "
+            f"and {session_dir}) for stray files that aren't part of the deliverable. Move "
+            f"anything worth keeping into {session_dir}/ for reference, delete the rest, and "
+            f"leave the deliverable's own files untouched."
+        )
+
     return "Please continue."
 
 
 # --- context compression helpers -------------------------------------------
 
-_TOOLS_SCHEMA_TOKENS_CACHE: Optional[int] = None
+_CORE_TOOLS_TOKENS_CACHE: Optional[int] = None
+_DEFERRED_TOOL_TOKENS_CACHE: Dict[str, int] = {}
 
 
-def _tools_schema_tokens() -> int:
-    """Estimated token cost of the tool schemas sent with every request.
+def _tools_schema_tokens(unlocked_tools=()) -> int:
+    """Estimated token cost of the tool schemas actually sent with a
+    request: CORE_TOOLS (always sent -- see tool/schemas.py) plus whichever
+    DEFERRED_TOOLS this session has unlocked via load_tool.
 
-    Cached after the first call: the schema list is a static constant, and
-    this otherwise gets re-serialized to JSON on every :meth:`context_budget`
-    call (every single turn, once a session runs long enough to compress).
+    CORE_TOOLS' total is cached after the first call (a static constant,
+    otherwise re-serialized to JSON on every :meth:`context_budget` call --
+    every single turn once a session runs long enough to compress); each
+    deferred tool's own size is cached the first time it's looked up too,
+    since a session that unlocks one keeps asking about the same small set
+    for the rest of its life.
     """
-    global _TOOLS_SCHEMA_TOKENS_CACHE
-    if _TOOLS_SCHEMA_TOKENS_CACHE is None:
+    global _CORE_TOOLS_TOKENS_CACHE
+    if _CORE_TOOLS_TOKENS_CACHE is None:
         try:
-            from JFI.tool.schemas import AVAILABLE_TOOLS
-            _TOOLS_SCHEMA_TOKENS_CACHE = len(json.dumps(AVAILABLE_TOOLS)) // 4
+            from JFI.tool.schemas import CORE_TOOLS
+            _CORE_TOOLS_TOKENS_CACHE = len(json.dumps(CORE_TOOLS)) // 4
         except Exception:
-            _TOOLS_SCHEMA_TOKENS_CACHE = 0
-    return _TOOLS_SCHEMA_TOKENS_CACHE
+            _CORE_TOOLS_TOKENS_CACHE = 0
+    total = _CORE_TOOLS_TOKENS_CACHE
+    if not unlocked_tools:
+        return total
+    try:
+        from JFI.tool.schemas import DEFERRED_TOOLS
+    except Exception:
+        return total
+    for name in unlocked_tools:
+        if name not in _DEFERRED_TOOL_TOKENS_CACHE:
+            tool = next((t for t in DEFERRED_TOOLS if t["function"]["name"] == name), None)
+            _DEFERRED_TOOL_TOKENS_CACHE[name] = len(json.dumps(tool)) // 4 if tool else 0
+        total += _DEFERRED_TOOL_TOKENS_CACHE[name]
+    return total
 
 
 # view_image attaches an image as a multimodal `content` list (OpenAI's
@@ -584,7 +777,11 @@ def _elide_payloads(block) -> None:
             function["arguments"] = json.dumps(args)
 
 
-class SimpleSessionManager:
+class SimpleSessionManager(SessionManager):
+    """SessionManager backed by a plan.md checkbox tree plus gzip'd JSONL
+    history on local disk -- see SessionManager for the interface contract
+    this fulfills."""
+
     def __init__(self, console: AbstractManager, session_id: str):
         self.console: AbstractManager = console
         self.session_id = session_id.lower().replace(" ", "_")
@@ -622,6 +819,22 @@ class SimpleSessionManager:
 
         # Set by compress_history() every time it runs; see token_usage().
         self._last_sent_tokens = 0
+
+        # phase -> BaseLLMStream, set post-construction by set_llm_streams()
+        # once runner.py has built them (this class has no LLM access of its
+        # own otherwise). Used only to LLM-summarize aged-out history in
+        # compress_history's Tier 4 -- everything else about a session works
+        # identically with this left empty (falls back to the cheap
+        # tool/file/command digest, same as before summarization existed).
+        self._llms = {}
+
+    def set_llm_streams(self, llms: dict) -> None:
+        """Wires in this session's phase -> BaseLLMStream map so Tier 4 of
+        compress_history can ask the model to summarize aged-out history
+        instead of only recording tool/file/command names. Optional: never
+        called (e.g. in tests that construct a SessionManager directly)
+        just means Tier 4 keeps using the cheap metadata-only digest."""
+        self._llms = llms or {}
 
     # ------------------------------------------------------------ plan file
 
@@ -924,6 +1137,21 @@ class SimpleSessionManager:
                 self.console.display_system(
                     f"Plan ready at {self.plan_path} — {done}/{total} items ticked."
                 )
+                # Catches the planner drifting away from the two literal
+                # "## Implementation"/"## Testing" headers phase_progress
+                # depends on (a different name, a typo, its own extra
+                # headers instead of nested bullets, ...) -- see
+                # PLAN_FORMAT_RULES. Silent otherwise: the imp/testing phase
+                # would just see an empty work queue with no explanation,
+                # which is exactly what this is here to surface instead.
+                for phase, section in PHASE_SECTION.items():
+                    _, section_total = self.phase_progress(phase)
+                    if not section_total:
+                        self.console.display_system(
+                            f"⚠️  Warning: no '## {section}' section found in {self.plan_path} "
+                            f"(or it has no checkbox items) — the {phase_display_name(phase)} "
+                            f"phase will see an empty work queue."
+                        )
                 return True
             self.console.display_system(
                 f"Warning: {self.plan_path} exists but has no '- [ ]' items to track."
@@ -1123,8 +1351,16 @@ class SimpleSessionManager:
     def get_messages(self, phase: str):
         message = [{"role": "system", "content": self._phase_system_message(phase)}]
         reserve = len(message[0]["content"]) // 4 + 256  # headroom for the pending-items block
-        message.extend(self.compress_history(reserve=reserve))
+        message.extend(self.compress_history(reserve=reserve, phase=phase))
         return message
+
+    def _plan_format_rules(self) -> str:
+        """Which PLAN FILE FORMAT rules text to send the model -- the generic,
+        task-agnostic PLAN_FORMAT_RULES block by default. Overridden by
+        AdaptiveSessionManager to swap in a smaller, task-type-specific
+        block instead (see task_rules.py); everything else about how a
+        session runs is unaffected by this hook."""
+        return PLAN_FORMAT_RULES
 
     def _phase_system_message(self, phase: str) -> str:
         """System prompt for a phase plus its own work queue.
@@ -1133,7 +1369,28 @@ class SimpleSessionManager:
         items inline (from the plan file, parsed by `_pending_items`), so they do
         not need to scan the whole plan just to find what is left.
         """
-        base = get_system_message(phase, self.plan_path, self.context_cache_path)
+        base = get_system_message(phase, self.plan_path, self.context_cache_path,
+                                  plan_format_rules=self._plan_format_rules(),
+                                  unlocked_tools=self.unlocked_tools())
+
+        # Auto-load whatever's been context_save()'d so far straight into the
+        # system message -- which is rebuilt fresh every request and never
+        # touched by compress_history -- instead of relying on the model to
+        # remember to call context_lookup itself at the right moment (a
+        # step we've watched it skip: it forgot server PIDs it had already
+        # saved and had to context_lookup them back mid-session). Facts
+        # still round-trip through context_save/context_lookup exactly as
+        # before; this only adds a standing copy the model doesn't have to
+        # go fetch.
+        saved_facts = render_facts_for_auto_load(self.context_cache_path)
+        if saved_facts:
+            base = (
+                f"{base}\n\n"
+                f"SAVED CONTEXT (auto-loaded from context_save — already here, no need to "
+                f"context_lookup these specific facts unless you want to search among many):\n"
+                f"{saved_facts}"
+            )
+
         section = PHASE_SECTION.get(phase)
         if phase in ("planner", "reviewer") or not section:
             return base
@@ -1173,13 +1430,36 @@ class SimpleSessionManager:
         # the messages (see OpenAICompatableStream.send_message's `tools=`), so they
         # count against the same context window even though compress_history
         # never sees them. Without this, "compressed to fit" could still be
-        # wrong by a few hundred tokens on a small CONTEXT_SIZE.
-        return max(1024, int(size * ratio) - _tools_schema_tokens())
+        # wrong by a few hundred tokens on a small CONTEXT_SIZE. Only CORE_TOOLS
+        # plus whatever this session has unlocked are ever actually sent (see
+        # tool/schemas.py's CORE_TOOLS/DEFERRED_TOOLS split and runner._tools_for_session).
+        return max(1024, int(size * ratio) - _tools_schema_tokens(self.unlocked_tools()))
 
     def estimate_request_tokens(self, messages) -> int:
         """Estimated size of one outgoing request: `messages` plus the tool
         schema overhead sent alongside every call (see :meth:`context_budget`)."""
-        return _estimate_tokens(messages) + _tools_schema_tokens()
+        return _estimate_tokens(messages) + _tools_schema_tokens(self.unlocked_tools())
+
+    def unlocked_tools(self) -> list[str]:
+        """Deferred tool names (see tool/schemas.py's DEFERRED_TOOLS) this
+        session has unlocked via load_tool -- persisted so a resumed
+        session doesn't have to re-unlock the same tool every time."""
+        return list(self.metadata.get("unlocked_tools", []))
+
+    def unlock_tool(self, name: str) -> bool:
+        """Adds `name` to this session's unlocked deferred tools (idempotent
+        -- unlocking an already-unlocked tool is a no-op, not an error).
+        Returns False when `name` isn't a real deferred tool name, so the
+        load_tool handler can report that back to the model instead of
+        silently accepting a typo."""
+        from JFI.tool.schemas import DEFERRED_TOOL_NAMES
+        if name not in DEFERRED_TOOL_NAMES:
+            return False
+        unlocked = self.metadata.setdefault("unlocked_tools", [])
+        if name not in unlocked:
+            unlocked.append(name)
+            self.save_metadata()
+        return True
 
     def token_usage(self) -> tuple[int, int]:
         """(estimated tokens in the *last request actually sent*, context window).
@@ -1196,7 +1476,7 @@ class SimpleSessionManager:
         """
         return self._last_sent_tokens, self.context_window()
 
-    def compress_history(self, reserve: int = 0):
+    def compress_history(self, reserve: int = 0, phase: str = ""):
         """
         Returns a view of the history that fits the context budget.
 
@@ -1204,6 +1484,10 @@ class SimpleSessionManager:
         shrinks. Compression runs in tiers, cheapest loss first, and stops as
         soon as the estimate fits. An assistant message carrying tool_calls is
         never separated from its results, at any tier.
+
+        `phase` (optional, empty by default) picks which of self._llms'
+        streams Tier 4 may use to LLM-summarize aged-out history instead of
+        only recording tool/file/command names — see _build_digest.
         """
         budget = max(512, self.context_budget() - reserve)
         original = _estimate_tokens(self.history)
@@ -1240,13 +1524,13 @@ class SimpleSessionManager:
             for block in middle():
                 _elide_payloads(block)
 
-        # Tier 4: collapse the remaining middle into a factual digest.
+        # Tier 4: collapse the remaining middle into a digest.
         blocks = [block for block in blocks if block]
         if over() and len(blocks) > KEEP_RECENT_BLOCKS + 1:
             # The digest is a fixed-size summary whatever it covers, so there is
             # nothing to gain by digesting only part of the middle.
             head, tail = blocks[:1], blocks[-KEEP_RECENT_BLOCKS:]
-            blocks = head + [[self._digest(blocks[1:-KEEP_RECENT_BLOCKS])]] + tail
+            blocks = head + [[self._build_digest(blocks[1:-KEEP_RECENT_BLOCKS], phase)]] + tail
 
         # Tier 5: the protected tail alone can outgrow the budget. Trim it too,
         # leaving the most recent block untouched so the live turn stays exact.
@@ -1282,8 +1566,13 @@ class SimpleSessionManager:
         return result
 
     @staticmethod
-    def _digest(blocks) -> dict:
-        """Collapses old blocks into one factual note about what happened."""
+    def _metadata_note(blocks) -> str:
+        """Cheap, deterministic fallback note for a batch of blocks: which
+        tools were called, which files touched, which commands run — no LLM
+        call, no reasoning/conclusions. Used standalone when no LLM stream
+        is available for this phase, and as the "not yet condensed" tail
+        _build_digest appends for blocks too small to justify summarizing
+        yet. Returns "" when the blocks carry no tool calls at all."""
         tools, files, commands = [], [], []
         for block in blocks:
             for message in block:
@@ -1300,12 +1589,7 @@ class SimpleSessionManager:
                     if name == "execute_command" and args.get("command"):
                         commands.append(args["command"])
 
-        lines = [
-            DIGEST_MARKER,
-            "This is a factual digest of turns that were removed. The files below are on disk; "
-            "use read_file to inspect any of them, and the plan file remains the source of truth "
-            "for what is done and what is left.",
-        ]
+        lines = []
         if files:
             lines.append("Files touched: " + ", ".join(dict.fromkeys(files)))
         if commands:
@@ -1313,7 +1597,158 @@ class SimpleSessionManager:
         if tools:
             counts = {name: tools.count(name) for name in dict.fromkeys(tools)}
             lines.append("Tool calls: " + ", ".join(f"{k}×{v}" for k, v in counts.items()))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _digest(blocks) -> dict:
+        """Standalone cheap digest message (marker + _metadata_note only, no
+        LLM summary, no persisted state) — kept for callers that just want
+        the old metadata-only behavior for one batch of blocks in isolation."""
+        note = SimpleSessionManager._metadata_note(blocks)
+        lines = [
+            DIGEST_MARKER,
+            "This is a factual digest of turns that were removed. The files below are on disk; "
+            "use read_file to inspect any of them, and the plan file remains the source of truth "
+            "for what is done and what is left.",
+        ]
+        if note:
+            lines.append(note)
         return {"role": "user", "content": "\n".join(lines)}
+
+    @staticmethod
+    def _render_blocks_for_summary(blocks) -> str:
+        """Flattens a batch of blocks into plain text for an LLM
+        summarization prompt: assistant reasoning/tool calls, tool results,
+        and user notes, each lightly truncated per-message so one huge
+        message can't dominate the summarizer's own input, then hard-capped
+        overall (DIGEST_INPUT_CHAR_CAP) as a final backstop."""
+        parts = []
+        for block in blocks:
+            for message in block:
+                role = message.get("role")
+                content = message.get("content")
+                if isinstance(content, list):
+                    content = "[image]"
+                text = str(content or "")
+                if role == "assistant":
+                    if text.strip():
+                        parts.append(f"[assistant] {text[:600]}")
+                    for call in message.get("tool_calls") or []:
+                        function = call.get("function") or {}
+                        args = str(function.get("arguments") or "")[:200]
+                        parts.append(f"[tool call] {function.get('name') or '?'}({args})")
+                elif role == "tool":
+                    parts.append(f"[tool result] {text[:400]}")
+                elif text.strip():
+                    parts.append(f"[{role}] {text[:400]}")
+        rendered = "\n".join(parts)
+        if len(rendered) > DIGEST_INPUT_CHAR_CAP:
+            rendered = rendered[:DIGEST_INPUT_CHAR_CAP] + "\n… [older material in this batch truncated]"
+        return rendered
+
+    def _summarize_with_llm(self, llm, prior_summary: str, new_blocks) -> str:
+        """One side-channel LLM call (same pattern as BaseLLMStream's own
+        check_user_approval: an explicit messages list, consumed silently,
+        never touching self.history) that folds `new_blocks` into an
+        updated version of `prior_summary`. Raises on any failure or an
+        empty response — callers must catch and fall back to the cheap
+        metadata note; this must never be allowed to crash compression."""
+        rendered = self._render_blocks_for_summary(new_blocks)
+        system_msg = (
+            "You are condensing part of a coding agent's own past work into a short factual "
+            "summary for that SAME agent to read later, after these original turns are deleted "
+            "from its context to save space. Preserve concrete facts, conclusions, discovered "
+            "bugs/gotchas, and decisions made — the kind of thing that would otherwise force the "
+            "agent to re-investigate something it already figured out. Do not just list which "
+            "tools were called; say what was LEARNED or DECIDED and why. Be concise (well under "
+            "200 words). Plain prose or short bullet points, no markdown headers."
+        )
+        user_msg = rendered
+        if prior_summary:
+            user_msg = (
+                f"Existing summary of even-earlier history (update/extend it, don't just repeat "
+                f"it verbatim):\n{prior_summary}\n\n"
+                f"Additional history to fold in now:\n{rendered}"
+            )
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ]
+        response_stream = llm.send_message(messages)
+        summary = ""
+        for chunk in response_stream:
+            delta = chunk.choices[0].delta.content
+            if delta is not None:
+                summary += delta
+        summary = summary.strip()
+        if not summary:
+            raise ValueError("LLM summarization returned an empty response")
+        return summary
+
+    def _build_digest(self, middle_blocks, phase: str) -> dict:
+        """Tier 4's actual digest builder: an LLM-summarized prose digest
+        when possible, updated incrementally (never re-summarizing history
+        already folded in), falling back to the cheap tool/file/command
+        note — exactly today's behavior — whenever no LLM stream is
+        available, the newly-aged-out batch is still too small to be worth
+        a call, or the call itself fails.
+
+        State (how much of `middle_blocks` the current summary already
+        covers, plus the summary text itself) persists in self.metadata
+        across turns AND across a resumed session, so a long run pays for
+        incremental summarization, not one full re-summarize per turn.
+        """
+        current_count = len(middle_blocks)
+        stored_count = self.metadata.get("digest_block_count", 0)
+        stored_summary = self.metadata.get("digest_summary", "")
+
+        if stored_summary and current_count <= stored_count:
+            # Nothing new has aged out since the last summary — reuse it.
+            return self._digest_message(stored_summary)
+
+        # current_count < stored_count only if blocks were pruned out from
+        # under us (e.g. Tier 1 emptied one) — resync from scratch rather
+        # than index off a boundary that no longer means what it did.
+        new_blocks = middle_blocks[stored_count:] if current_count > stored_count else middle_blocks
+
+        llm = self._llms.get(phase)
+        new_chars = sum(len(json.dumps(m, default=str)) for block in new_blocks for m in block)
+        worth_summarizing = llm is not None and (new_chars >= DIGEST_SUMMARY_MIN_CHARS or not stored_summary)
+
+        if worth_summarizing:
+            try:
+                updated = self._summarize_with_llm(llm, stored_summary, new_blocks)
+                self.metadata["digest_summary"] = updated
+                self.metadata["digest_block_count"] = current_count
+                self.save_metadata()
+                return self._digest_message(updated)
+            except Exception as e:
+                self.console.display_system(f"⚠️  Digest summarization failed, using metadata note instead: {e}")
+
+        # Below threshold, no LLM available, or the call just failed: keep
+        # the existing prose summary as-is (don't advance digest_block_count
+        # — these blocks stay "new" and get a real shot at summarization
+        # next time) and cheaply note what happened in the meantime so
+        # nothing is silently invisible in between.
+        pending_note = self._metadata_note(new_blocks)
+        combined = stored_summary
+        if pending_note:
+            combined = (
+                f"{combined}\n\n(Not yet condensed into the summary above:)\n{pending_note}"
+                if combined else pending_note
+            )
+        return self._digest_message(combined)
+
+    @staticmethod
+    def _digest_message(body: str) -> dict:
+        header = (
+            f"{DIGEST_MARKER}\n"
+            "This replaces turns removed to save context. The plan file remains the source of "
+            "truth for what is done and what is left; files mentioned below are on disk and "
+            "readable with read_file if you need more than this summary."
+        )
+        content = f"{header}\n\n{body}" if body else header
+        return {"role": "user", "content": content}
 
     # --------------------------------------------------------------- phases
 

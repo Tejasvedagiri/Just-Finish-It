@@ -3,6 +3,10 @@ import inspect
 import json
 import os
 import re
+import shutil
+import socket
+import subprocess
+import sys
 import time
 from importlib.metadata import PackageNotFoundError, version as _package_version
 from pathlib import Path
@@ -18,19 +22,44 @@ from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
 from JFI.manager.web_bridge import WebBridge
 
 # Session Management
+from JFI.session.abstract_session_manager import SessionManager
+from JFI.session.adaptive_session_manager import AdaptiveSessionManager
 from JFI.session.simple_session_manager import (
     DEFAULT_CONTEXT_CACHE_PATH, SessionInUseError, SimpleSessionManager, get_phase_trigger, phase_completed,
 )
 
 # Tools and Schemas
-from JFI.tool.schemas import AVAILABLE_TOOLS
+from JFI.tool.schemas import CORE_TOOLS, DEFERRED_TOOLS
 from JFI.tool.file_tools import write_file, read_file, append_to_file, replace_in_file
 from JFI.tool.cmd_tools import execute_command, make_gated_execute_command
 from JFI.tool.context_tools import make_context_tools
+from JFI.tool.deferred_tools import make_load_tool
 from JFI.tool.image_tools import capture_screenshot, view_image
 from JFI.tool.llm_tools import make_ask_llm
 from JFI.tool.web_tools import fetch_webpage_images
+from JFI.tool.browser_tools import browse_webpage
 from JFI.tool.video_tools import extract_video_frames
+
+# Looked up by name at request time — see _tools_for_session.
+_DEFERRED_TOOLS_BY_NAME = {t["function"]["name"]: t for t in DEFERRED_TOOLS}
+
+
+def _tools_for_session(ssm: SessionManager) -> list:
+    """CORE_TOOLS (always sent) plus whichever DEFERRED_TOOLS `ssm` has
+    unlocked via load_tool — see tool/schemas.py's module docstring for why
+    this split exists (every request used to pay for all ~13 tools'
+    schemas, including 5 browser/media ones most sessions never touch).
+    A SessionManager without unlocked_tools() (shouldn't happen for either
+    concrete implementation today, see abstract_session_manager.py) just
+    gets CORE_TOOLS, same as a session that hasn't unlocked anything."""
+    if not hasattr(ssm, "unlocked_tools"):
+        return CORE_TOOLS
+    extra = [
+        _DEFERRED_TOOLS_BY_NAME[name]
+        for name in ssm.unlocked_tools()
+        if name in _DEFERRED_TOOLS_BY_NAME
+    ]
+    return CORE_TOOLS + extra if extra else CORE_TOOLS
 
 # Dynamic mapping of tool names to their python functions
 TOOL_MAP = {
@@ -41,6 +70,7 @@ TOOL_MAP = {
     "execute_command": execute_command,
     "capture_screenshot": capture_screenshot,
     "fetch_webpage_images": fetch_webpage_images,
+    "browse_webpage": browse_webpage,
     "extract_video_frames": extract_video_frames,
     # view_image returns (status_text, data_url) instead of a plain string —
     # every other tool's TOOL_MAP entry returns str; see the isinstance(tuple)
@@ -56,16 +86,23 @@ TOOL_MAP = {
     # have its own model/endpoint — see PHASE_ENV_PREFIX) — this default
     # only matters before any phase has run.
     "ask_llm": lambda prompt="": "Error: ask_llm is not available yet — no phase is currently running.",
+    # Rebound to the actual session's SessionManager in _run_session, same
+    # as execute_command/context_save/context_lookup above — this default
+    # only matters before a session exists.
+    "load_tool": lambda name="": "Error: load_tool is not available yet — no session is active.",
 }
 
-PHASES = ["planner", "imp", "testing", "reviewer"]
+PHASES = ["planner", "imp", "testing", "reviewer", "cleanup"]
 
 # .env prefix each phase's model/endpoint override is read from (see
 # JFI.llm.base_llm_stream.phase_env) — e.g. PLANNER_MODEL, PLANNER_OPENAI_URL,
 # PLANNER_OPENAI_API_KEY, PLANNER_TEMPERATURE. Any that are unset fall back to
 # the shared MODEL/OPENAI_URL/OPENAI_API_KEY/TEMPERATURE, so a single model
 # for every phase (today's default) needs no per-phase vars at all.
-PHASE_ENV_PREFIX = {"planner": "PLANNER", "imp": "IMP", "testing": "TESTING", "reviewer": "REVIEWER"}
+PHASE_ENV_PREFIX = {
+    "planner": "PLANNER", "imp": "IMP", "testing": "TESTING", "reviewer": "REVIEWER",
+    "cleanup": "CLEANUP",
+}
 
 EXIT_WORDS = {"exit", "done", "quit", "no", "nothing"}
 
@@ -77,6 +114,18 @@ FAILURE_RETRY_LIMIT = 3
 # retried before giving up on this turn — see _is_retryable_llm_error.
 LLM_RETRY_LIMIT = 2
 LLM_RETRY_DELAY_SECONDS = 3.0
+
+# Defaults for _task_stuck_time_limit / _task_stuck_token_limit (see
+# _check_task_stuck) — how long the SAME plan leaf (ssm.current_task_title)
+# may stay current before run_phase forces a decomposition nudge instead of
+# letting it grind on one oversized leaf indefinitely. Observed in practice:
+# a leaf that turned out to hide real diagnose-and-fix work (not just a
+# quick check) ran for hours and 700k+ tokens of re-sent context without
+# ever splitting itself up, spawning a pile of throwaway scripts along the
+# way. Either threshold alone can fire; both are generous defaults meant to
+# catch genuine sprawl, not a normal multi-turn leaf.
+DEFAULT_TASK_STUCK_TIME_LIMIT_SECONDS = 300.0
+DEFAULT_TASK_STUCK_TOKEN_LIMIT = 150_000
 
 
 # ------------------------------------------------------------------ LLM errors
@@ -251,7 +300,7 @@ def _announce_context_lookup_hit(console: AbstractManager, result: str) -> None:
     )
 
 
-def execute_tool_call(console: AbstractManager, ssm: SimpleSessionManager,
+def execute_tool_call(console: AbstractManager, ssm: SessionManager,
                       tool_call: Dict[str, Any], failures: Dict[tuple, int]) -> tuple[str, Optional[str]]:
     """
     Runs one tool call and turns any failure into actionable guidance.
@@ -339,7 +388,7 @@ def execute_tool_call(console: AbstractManager, ssm: SimpleSessionManager,
 
 # ------------------------------------------------------------------ the queue
 
-def drain_forced_input(console: AbstractManager, ssm: SimpleSessionManager) -> None:
+def drain_forced_input(console: AbstractManager, ssm: SessionManager) -> None:
     """
     Folds forced input ('!something') into the AI's very next turn, mid-phase.
     Plain queued input is left alone for :func:`collect_next_iteration`.
@@ -351,7 +400,7 @@ def drain_forced_input(console: AbstractManager, ssm: SimpleSessionManager) -> N
         )
 
 
-def handle_skip_request(console: AbstractManager, ssm: SimpleSessionManager, phase: str) -> None:
+def handle_skip_request(console: AbstractManager, ssm: SessionManager, phase: str) -> None:
     """
     Ctrl+K: skips the current checklist item outright, independent of
     whatever the model is doing right now — marks it "- [○]" in the plan
@@ -374,7 +423,7 @@ def handle_skip_request(console: AbstractManager, ssm: SimpleSessionManager, pha
     )
 
 
-def handle_skip_all_request(console: AbstractManager, ssm: SimpleSessionManager, phase: str) -> None:
+def handle_skip_all_request(console: AbstractManager, ssm: SessionManager, phase: str) -> None:
     """
     Ctrl+Q: skips every remaining checklist item in the current phase in one
     go (see SimpleSessionManager.skip_remaining_tasks), then tells the model
@@ -486,13 +535,141 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
+_SESSION_MANAGER_CLASSES = {"simple": SimpleSessionManager, "adaptive": AdaptiveSessionManager}
+
+
+def _session_manager_class(console: AbstractManager):
+    """SESSION_MANAGER=simple|adaptive in .env selects which SessionManager
+    drives a session. Defaults to "adaptive": task-type-specific planning
+    rules (python/javascript/story -- see JFI.session.task_rules) instead
+    of one generic rule block for every goal, which both cuts context cost
+    for smaller models (a javascript task no longer pays for python/story
+    guidance it'll never use, and vice versa) and adds architecture
+    guidance the generic rules never gave (componentization for frontend
+    work, dispatch tables over near-duplicate leaves for python, beat-based
+    decomposition for prose) -- see adaptive_session_manager.py for the
+    real run that motivated this. "simple" opts back into the original
+    one-size-fits-all rules. An unrecognized value logs a hint and falls
+    back to the default, same never-crash-on-a-typo convention as THEME."""
+    raw = os.environ.get("SESSION_MANAGER", "").strip().lower()
+    if not raw:
+        return AdaptiveSessionManager
+    cls = _SESSION_MANAGER_CLASSES.get(raw)
+    if cls is None:
+        console.display_system(
+            f"⚠️  Unknown SESSION_MANAGER={raw!r} in .env (expected 'simple' or "
+            f"'adaptive') — falling back to 'adaptive'."
+        )
+        return AdaptiveSessionManager
+    return cls
+
+
 def _web_bridge_enabled() -> bool:
     """JFI_WEB_BRIDGE=1: mirror this session's live status to
-    JFI/<session>/web_status.json and accept answers to get_user_choice
-    prompts from JFI/<session>/web_answer.json -- see web_bridge.WebBridge.
-    Off by default: nobody who isn't running the web dashboard should pay
-    for a background thread and a file write every tick."""
+    JFI/<session>/web_status.json and accept answers to get_user_choice /
+    get_user_input prompts, plus new queued requests, from
+    JFI/<session>/web_answer.json -- see web_bridge.WebBridge. Also makes
+    run_pipeline auto-launch the jfi-web dashboard itself (see
+    _launch_web_dashboard) unless JFI_WEB_DASHBOARD=0. Off by default:
+    nobody who isn't running the web dashboard should pay for a background
+    thread and a file write every tick."""
     return _env_flag("JFI_WEB_BRIDGE")
+
+
+def _web_dashboard_disabled() -> bool:
+    """JFI_WEB_DASHBOARD=0 (or false/no/off): with JFI_WEB_BRIDGE=1, ./jfi
+    normally auto-launches the `jfi-web` dashboard itself as a child
+    process -- see _launch_web_dashboard -- so a single command gives both
+    the terminal and the browser. Set this when you want the bridge's
+    status files written but the dashboard run separately, e.g. on another
+    machine (the split-process setup the README's Web dashboard section
+    documents) -- the bridge itself stays on regardless of this flag."""
+    return os.environ.get("JFI_WEB_DASHBOARD", "").strip().lower() in ("0", "false", "no", "off")
+
+
+def _web_dashboard_port() -> int:
+    from JFI.web.launcher import DEFAULT_PORT
+    try:
+        return int(os.environ.get("JFI_WEB_PORT", "").strip() or DEFAULT_PORT)
+    except ValueError:
+        return DEFAULT_PORT
+
+
+def _port_listening(port: int, host: str = "127.0.0.1") -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.3)
+        return sock.connect_ex((host, port)) == 0
+
+
+def _web_dashboard_command() -> Optional[List[str]]:
+    """
+    How to launch the dashboard as a separate process, or None if there's no
+    way to.
+
+    Prefers the real `jfi-web` console script when it's on PATH (the normal
+    pip-installed/dev-venv case: cheap, and reuses whatever env that script
+    itself resolves to). Falls back to re-invoking THIS SAME process's own
+    executable with a hidden flag when running as a frozen standalone binary
+    (see build_binary -- it bundles streamlit in via --collect-all so the
+    binary is self-sufficient) -- `sys.executable` in a PyInstaller onefile
+    app is the running binary itself, so this needs no separate install.
+    """
+    jfi_web = shutil.which("jfi-web")
+    if jfi_web:
+        return [jfi_web]
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "--internal-web-dashboard"]
+    return None
+
+
+def _launch_web_dashboard(console: AbstractManager) -> Optional[subprocess.Popen]:
+    """
+    Best-effort auto-start of the dashboard as a child process, so a single
+    `./jfi` (with JFI_WEB_BRIDGE=1) gives both the terminal and the browser
+    without a second command in a second terminal. Every failure here is
+    reported as one display_system line, never an exception: the terminal
+    is the one surface that must always work regardless of whether the
+    dashboard can be started.
+
+    Skips launching -- leaving whatever's already there alone -- when
+    something is already listening on the target port: either a dashboard
+    the user started themselves, or one left over from an earlier `./jfi`.
+    """
+    port = _web_dashboard_port()
+    if _port_listening(port):
+        console.display_system(f"🌐 Web dashboard already running — http://localhost:{port}")
+        return None
+
+    cmd = _web_dashboard_command()
+    if cmd is None:
+        console.display_system(
+            "ℹ️  JFI_WEB_BRIDGE is on but 'jfi-web' isn't installed/on PATH — the dashboard "
+            "was not auto-started (install it with: pip install just-finish-it[web], or set "
+            "JFI_WEB_DASHBOARD=0 to silence this if you're running the dashboard elsewhere)."
+        )
+        return None
+
+    try:
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        console.display_system(f"ℹ️  Web dashboard failed to start ({e}); continuing with the terminal only.")
+        return None
+
+    console.display_system(
+        f"🌐 Web dashboard starting — http://localhost:{port} "
+        f"(set JFI_WEB_DASHBOARD=0 to stop this auto-start)"
+    )
+    return proc
+
+
+def _stop_web_dashboard(proc: Optional[subprocess.Popen]) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 def _review_loop_approval_required() -> bool:
@@ -503,6 +680,25 @@ def _review_loop_approval_required() -> bool:
     project's whole premise is finishing autonomously, so the default stays
     exactly what it was before this flag existed."""
     return _env_flag("REVIEW_LOOP_APPROVAL")
+
+
+def _task_stuck_time_limit() -> float:
+    """TASK_STUCK_TIME_LIMIT_SECONDS override (default
+    DEFAULT_TASK_STUCK_TIME_LIMIT_SECONDS) — see _check_task_stuck. Read
+    fresh each call, same reasoning as _show_stream_prompts."""
+    try:
+        return float(os.environ.get("TASK_STUCK_TIME_LIMIT_SECONDS", DEFAULT_TASK_STUCK_TIME_LIMIT_SECONDS))
+    except ValueError:
+        return DEFAULT_TASK_STUCK_TIME_LIMIT_SECONDS
+
+
+def _task_stuck_token_limit() -> int:
+    """TASK_STUCK_TOKEN_LIMIT override (default DEFAULT_TASK_STUCK_TOKEN_LIMIT)
+    — see _check_task_stuck."""
+    try:
+        return int(os.environ.get("TASK_STUCK_TOKEN_LIMIT", DEFAULT_TASK_STUCK_TOKEN_LIMIT))
+    except ValueError:
+        return DEFAULT_TASK_STUCK_TOKEN_LIMIT
 
 
 def _show_stream_prompts() -> bool:
@@ -550,7 +746,31 @@ def dump_prompt(console: AbstractManager, phase: str, messages: List[Dict[str, A
     console.display_rule("END PROMPT")
 
 
-def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream], ssm: SimpleSessionManager,
+def _stuck_task_directive(task_title: str, elapsed_seconds: float, tokens_spent: int) -> str:
+    """Forced message for when the same plan leaf has stayed "current" too
+    long (see _task_stuck_time_limit/_task_stuck_token_limit in run_phase) —
+    tells the model to stop and split THIS leaf into numbered sub-leaves
+    (a leaf numbered 3.1 becomes parent 3.1 with children 3.1.1, 3.1.2,
+    3.1.3, ...) instead of continuing to grind on one oversized item.
+    Reported facts (elapsed minutes / tokens spent) are included so the
+    model doesn't have to guess why it's being interrupted."""
+    return (
+        f"AUTO-RECTIFY: the current task has stayed the same for {elapsed_seconds / 60:.1f} "
+        f"minutes and ~{tokens_spent:,} tokens of re-sent context without being ticked off:\n"
+        f"  {task_title}\n"
+        f"That is a strong sign this leaf was never actually small enough — it hid more work "
+        f"than one focused step (a diagnose-then-fix, several distinct checks bundled together, "
+        f"a fix plus its own verification, ...). Stop whatever you were about to do next and "
+        f"instead, right now: edit the plan file to turn this ONE leaf into a parent with 2 or "
+        f"more numbered sub-leaves — e.g. a leaf numbered 3.1 becomes parent '- 3.1 <original "
+        f"description>' with children '- [ ] 3.1.1 ...', '- [ ] 3.1.2 ...', '- [ ] 3.1.3 ...' and "
+        f"so on (same nesting rule as everywhere else in this plan), each one small enough to "
+        f"finish and verify in a single focused step. The split itself is the required action "
+        f"this turn, before any further tool calls toward actually finishing the work."
+    )
+
+
+def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream], ssm: SessionManager,
               phase: str) -> bool:
     """
     Drives one phase to completion. Returns False if the run should stop early
@@ -572,6 +792,16 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
 
     failures: Dict[tuple, int] = {}
 
+    # Tracks how long/how many re-sent tokens the SAME leaf (current_task)
+    # has stayed current, so a leaf that turns out to hide far more work
+    # than one focused step gets forced to split itself up instead of
+    # grinding indefinitely — see _stuck_task_directive. Local to this one
+    # phase run (like `failures` above): a manual restart earns a fresh
+    # window, same tradeoff already made for the failure-retry counter.
+    stuck_task_title = ""
+    stuck_since = time.monotonic()
+    stuck_tokens = 0
+
     while not console.should_stop():
         # Ctrl+P: hold here, between turns, so an in-flight tool call or LLM
         # response is never interrupted mid-way.
@@ -582,8 +812,28 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
         drain_forced_input(console, ssm)
         handle_skip_request(console, ssm, phase)
         handle_skip_all_request(console, ssm, phase)
+        current_task = ssm.current_task_title(phase) or ""
         console.set_status(plan=ssm.plan_progress(), phase_plan=ssm.phase_progress(phase),
-                           task=ssm.current_task_title(phase) or "")
+                           task=current_task)
+
+        if current_task != stuck_task_title:
+            # Progress since last turn (ticked a box, or a fresh phase) —
+            # this is a new leaf's own window now.
+            stuck_task_title = current_task
+            stuck_since = time.monotonic()
+            stuck_tokens = 0
+        elif current_task:
+            elapsed = time.monotonic() - stuck_since
+            if elapsed > _task_stuck_time_limit() or stuck_tokens > _task_stuck_token_limit():
+                ssm.add_message(
+                    "user", _stuck_task_directive(current_task, elapsed, stuck_tokens)
+                )
+                # Give it a fresh window to actually act on the split rather
+                # than firing again next turn while it's busy doing so; if
+                # it's ignored, the same leaf staying current re-trips this
+                # after another full window.
+                stuck_since = time.monotonic()
+                stuck_tokens = 0
 
         messages = ssm.get_messages(phase)
         # get_messages() is what actually runs compress_history() and updates
@@ -593,12 +843,13 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
         # thinking out loud, an auto-nudge reply, ...) would otherwise leave
         # ctx showing a stale figure from several turns back.
         console.set_status(tokens=ssm.token_usage())
+        stuck_tokens += ssm.token_usage()[0]
         if _show_stream_prompts():
             dump_prompt(console, phase, messages)
         attempt = 0
         while True:
             try:
-                response = llm.send_message(messages, tools=AVAILABLE_TOOLS)
+                response = llm.send_message(messages, tools=_tools_for_session(ssm))
                 parsed_response = console.print_agent_response(
                     response, prompt_tokens_estimate=ssm.estimate_request_tokens(messages)
                 )
@@ -744,12 +995,12 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
 def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStream]) -> None:
     """
     Runs exactly one session end-to-end: gather its name/goal, then drive
-    planner -> imp -> testing -> reviewer, looping on failed reviews or
-    queued follow-ups, until the review passes and the idle queue stays
-    empty. Returns either because the run should stop for good (Ctrl+C, an
-    unrecoverable LLM failure, the review-loop cap) or because the user
-    asked to start a new session (Ctrl+N while idle) — run_pipeline tells
-    the two apart via console.should_restart() and loops accordingly.
+    planner -> imp -> testing -> reviewer -> cleanup, looping on failed
+    reviews or queued follow-ups, until the review passes and the idle queue
+    stays empty. Returns either because the run should stop for good
+    (Ctrl+C, an unrecoverable LLM failure, the review-loop cap) or because
+    the user asked to start a new session (Ctrl+N while idle) — run_pipeline
+    tells the two apart via console.should_restart() and loops accordingly.
     """
     # 1. Gather Session Name — retrying if it's already locked by another
     # running JFI process (SessionInUseError) instead of racing on the same
@@ -760,10 +1011,17 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
         if not session_name or console.should_stop():
             return
         try:
-            ssm = SimpleSessionManager(console, session_name)
+            ssm = _session_manager_class(console)(console, session_name)
         except SessionInUseError as e:
             console.display_error(str(e))
     console.set_status(session=session_name)
+    # Optional hook (SimpleSessionManager only, not part of the required
+    # SessionManager interface): lets compress_history's digest tier
+    # LLM-summarize aged-out history using each phase's own configured
+    # model instead of only recording tool/file/command names. A session
+    # manager that doesn't define it just keeps the cheap metadata digest.
+    if hasattr(ssm, "set_llm_streams"):
+        ssm.set_llm_streams(llms)
 
     web_bridge: Optional[WebBridge] = None
     try:
@@ -772,6 +1030,7 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
         # alongside whatever facts the LLM itself has stashed there).
         TOOL_MAP["execute_command"] = make_gated_execute_command(console, ssm.context_cache_path)
         TOOL_MAP.update(make_context_tools(ssm.context_cache_path))
+        TOOL_MAP["load_tool"] = make_load_tool(ssm)
         console.start_session_log(ssm.session_path / "run.log")
         if _web_bridge_enabled():
             web_bridge = WebBridge(console, ssm.session_path)
@@ -876,15 +1135,22 @@ def run_pipeline(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
         "the queue is idle, Ctrl+N starts a brand-new session from scratch."
     )
 
-    while True:
-        _run_session(console, llms)
-        # should_restart() is only ever set by Ctrl+N, which is only live
-        # while _run_session was idling on wait_for_queued_input — so it
-        # can't be true after a Ctrl+C stop or an unrecoverable failure.
-        if console.should_stop() or not console.should_restart():
-            break
-        console.clear_restart()
-        console.display_rule("🔄 STARTING A NEW SESSION (Ctrl+N)")
+    web_dashboard_proc = None
+    if _web_bridge_enabled() and not _web_dashboard_disabled():
+        web_dashboard_proc = _launch_web_dashboard(console)
+
+    try:
+        while True:
+            _run_session(console, llms)
+            # should_restart() is only ever set by Ctrl+N, which is only live
+            # while _run_session was idling on wait_for_queued_input — so it
+            # can't be true after a Ctrl+C stop or an unrecoverable failure.
+            if console.should_stop() or not console.should_restart():
+                break
+            console.clear_restart()
+            console.display_rule("🔄 STARTING A NEW SESSION (Ctrl+N)")
+    finally:
+        _stop_web_dashboard(web_dashboard_proc)
 
     console.set_status(phase="", state="finished", task="")
     console.display_rule("🎉 JUST FINISH IT — SESSION TERMINATED 🎉")
@@ -907,6 +1173,11 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         description="Just Finish It -- a multi-phase, plan-driven coding agent for local LLMs.",
     )
     parser.add_argument("--version", action="store_true", help="Print the installed version and exit.")
+    # Internal only -- not meant to be typed by a person. This is how
+    # _launch_web_dashboard re-invokes a frozen standalone binary to serve
+    # the dashboard itself when no separate `jfi-web` is on PATH (see
+    # _web_dashboard_command); suppressed from --help accordingly.
+    parser.add_argument("--internal-web-dashboard", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 
 
@@ -914,6 +1185,11 @@ def main():
     args = _parse_args()
     if args.version:
         print(f"JFI {_version()}")
+        return
+
+    if args.internal_web_dashboard:
+        from JFI.web.launcher import main as run_web_dashboard
+        run_web_dashboard(extra_args=[])
         return
 
     # Load the project's .env from an explicit path (searched upward from the
