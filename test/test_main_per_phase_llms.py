@@ -1,13 +1,15 @@
 """End-to-end coverage for runner.main()'s per-phase LLM construction:
 
-    llms = {phase: OpenAICompatableStream(prefix) for phase, prefix in PHASE_ENV_PREFIX.items()}
+    llms = {phase: make_llm_stream(prefix) for phase, prefix in PHASE_ENV_PREFIX.items()}
 
 phase_env() itself (the {PREFIX}_{KEY}-with-fallback resolution) is unit-
 tested elsewhere, but nothing previously exercised main() actually wiring
-PHASE_ENV_PREFIX through to one real OpenAICompatableStream per phase --
-this pins that a phase with its own .env override gets its own model/
-endpoint, and a phase without one falls back to the shared default,
-through the real construction path.
+PHASE_ENV_PREFIX through to one real stream per phase (the default,
+LLM_BACKEND unset, OpenAICompatableStream path -- see
+llm/backend_select.py for the other backends) -- this pins that a phase
+with its own .env override gets its own model/endpoint, and a phase
+without one falls back to the shared default, through the real
+construction path.
 """
 
 
@@ -60,12 +62,12 @@ def test_main_builds_one_llm_stream_per_phase_honoring_overrides(monkeypatch):
     assert reviewer.temperature == "0.2"
     assert reviewer.stream_service.base_url.host == "reviewer.example"
 
-    for phase in ("planner", "imp", "testing"):
+    for phase in ("planner", "imp", "testing", "cleanup"):
         stream = llms[phase]
         assert stream.model == "shared-model"
         assert stream.temperature == "0.7"
         assert stream.stream_service.base_url.host == "shared.example"
 
-    # Every phase got its own instance -- not four names pointing at one
+    # Every phase got its own instance -- not five names pointing at one
     # shared object, which would silently defeat per-phase routing.
-    assert len({id(s) for s in llms.values()}) == 4
+    assert len({id(s) for s in llms.values()}) == len(runner.PHASES)

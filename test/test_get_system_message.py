@@ -63,6 +63,90 @@ class TestLLMUsesTools:
         assert "write_file" in msg and "plan.md" in msg
 
 
+class TestImplementationWholeProjectBuildGate:
+    """The imp phase must not sign off (IMP_COMPLETE) until it has also run
+    a whole-project build/typecheck once, when one exists -- catches two
+    files drifting apart (a renamed/missing export still imported
+    elsewhere) that neither file's own local check would ever notice on
+    its own. See the real StockUI failure this was added for: renderers.js
+    importing drawAreaLineChart/drawSparkline that charts.js never
+    exported, only caught by an actual `npm run build`."""
+
+    def test_imp_prompt_requires_a_whole_project_build_before_completion(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("imp", manager.plan_path).lower()
+        assert "npm run build" in msg
+        assert "whole project" in msg
+        assert "imp_complete" in msg  # still the required completion marker
+
+    def test_other_phases_do_not_carry_the_imp_specific_build_gate_wording(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        for phase in ("planner", "testing", "reviewer", "cleanup"):
+            assert "step 6" not in get_system_message(phase, manager.plan_path).lower()
+
+
+class TestVerificationOrderingGuidance:
+    """Shared VERIFICATION_RULES text (imp/testing/reviewer/cleanup all get
+    it): a full build/compile check belongs at the FRONT of Testing, and a
+    fragile check needing new system tooling (a headless browser, sudo, ...)
+    must not block the whole run -- see the real failure this covers:
+    T.2 blocked forever on `playwright install --with-deps` needing sudo,
+    while T.3 (`npm run build`, which would have caught the actual bug)
+    never got a chance to run."""
+
+    def test_mentions_build_ordering(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("testing", manager.plan_path).lower()
+        assert "cheapest" in msg
+        assert "front" in msg
+
+    def test_mentions_fragile_check_fallback(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("testing", manager.plan_path).lower()
+        assert "not a blocker" in msg
+        assert "sudo" in msg
+
+
+class TestStructuredProcessToolsGuidance:
+    """VERIFICATION_RULES points at start_background_process/
+    stop_background_process (handle-based, never a raw pid/name pattern)
+    as the default for anything long-running, instead of a shell `&` plus
+    hand-tracked PID -- see process_tools.py's own module docstring for the
+    self-inflicted `pkill -f` failure this replaces."""
+
+    def test_mentions_structured_process_tools(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("testing", manager.plan_path)
+        assert "start_background_process" in msg
+        assert "stop_background_process" in msg
+
+    def test_still_warns_about_name_based_search_as_fallback(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("testing", manager.plan_path)
+        assert "pgrep" in msg or "pkill" in msg
+
+
+class TestReadFilePreferredOverCat:
+    def test_imp_prompt_prefers_read_file_over_cat(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("imp", manager.plan_path)
+        assert "prefer read_file" in msg
+        assert "`cat`" in msg
+
+    def test_testing_prompt_prefers_read_file_over_cat(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("testing", manager.plan_path)
+        assert "prefer read_file over" in msg
+
+
 class TestPendingItems:
     def test_pending_items_returns_unchecked_under_section(self, manager):
         manager.plan_file.write_text(
@@ -99,13 +183,13 @@ class TestContextCache:
     def test_get_system_message_references_the_cache_path(self, manager):
         from JFI.session.simple_session_manager import get_system_message
 
-        for phase in ("planner", "imp", "testing", "reviewer"):
+        for phase in ("planner", "imp", "testing", "reviewer", "cleanup"):
             msg = get_system_message(phase, manager.plan_path, manager.context_cache_path)
             assert manager.context_cache_path in msg
             assert "CONTEXT CACHE" in msg
 
     def test_phase_system_message_threads_context_cache_path(self, manager):
-        for phase in ("planner", "imp", "testing", "reviewer"):
+        for phase in ("planner", "imp", "testing", "reviewer", "cleanup"):
             msg = manager._phase_system_message(phase)
             assert manager.context_cache_path in msg
 
@@ -116,6 +200,32 @@ class TestContextCache:
 
         msg = get_system_message("imp", "JFI/demo/plan.md")
         assert isinstance(msg, str) and "context.json" in msg
+
+
+class TestRunCommandsPersistence:
+    """Observed failure this guidance exists to prevent: a session discovers
+    the correct interpreter/command the hard way (plain `python3` fails with
+    ModuleNotFoundError, THEN `.venv/bin/python`/`uv run` is tried), and then
+    re-discovers it the same way again later once the turn that figured it
+    out ages out of context. The fix is the SAME context-cache auto-load
+    mechanism other durable facts already use (see CONTEXT_CACHE_RULES /
+    render_facts_for_auto_load) — a stable "run_commands" key, not a new
+    file or tool."""
+
+    def test_context_cache_rules_instruct_saving_run_commands(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        for phase in ("planner", "imp", "testing", "reviewer", "cleanup"):
+            msg = get_system_message(phase, manager.plan_path, manager.context_cache_path)
+            assert "run_commands" in msg
+            assert "context_save" in msg
+
+    def test_names_the_python3_then_uv_failure_pattern(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("imp", manager.plan_path, manager.context_cache_path)
+        assert "ModuleNotFoundError" in msg
+        assert "uv run" in msg
 
 
 class TestReviewerSystemMessage:
@@ -154,3 +264,37 @@ class TestReviewerSystemMessage:
 
         for phase in ("planner", "imp", "testing"):
             assert "review.md" not in get_system_message(phase, manager.plan_path)
+
+
+class TestCleanupSystemMessage:
+    """The cleanup phase's sole job: sweep the working directory for stray,
+    non-deliverable files and relocate anything worth keeping into this
+    session's own JFI/<session_id>/ folder for reference, deleting the rest
+    -- while never touching the bookkeeping files already inside that
+    folder."""
+
+    def test_names_the_session_folder_as_the_move_target(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("cleanup", manager.plan_path)
+        assert "JFI/demo" in msg
+        assert "mv" in msg  # instructed via execute_command's mv
+
+    def test_protects_bookkeeping_files_from_deletion(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = " ".join(get_system_message("cleanup", manager.plan_path).lower().split())
+        assert "never delete, move, or overwrite" in msg
+        assert "history.jsonl.gz" in msg and "context.json" in msg
+
+    def test_completion_marker_present(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("cleanup", manager.plan_path)
+        assert "CLEANUP_COMPLETE" in msg
+
+    def test_other_phases_do_not_carry_cleanup_instructions(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        for phase in ("planner", "imp", "testing", "reviewer"):
+            assert "CLEANUP_COMPLETE" not in get_system_message(phase, manager.plan_path)

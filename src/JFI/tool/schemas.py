@@ -1,6 +1,21 @@
 # tools/schemas.py
+#
+# CORE_TOOLS are sent with EVERY request (see runner._tools_for_session) --
+# the ones used almost every turn for real coding/verification work.
+# DEFERRED_TOOLS' full schemas are withheld by default and only added to a
+# session's own request once the model calls load_tool(name) to unlock one
+# (see tool/deferred_tools.py and DEFERRED_TOOLS_RULES below) -- this
+# mirrors this exact model's own experience of deferred tools it has to
+# fetch definitions for before calling. Measured cost at the time this was
+# added: ~2700 tokens total across 13 tools, resent unconditionally on
+# EVERY turn for the life of a session (hundreds to low thousands of turns
+# on a long-running one) regardless of whether that turn ever touches a
+# browser or a video file -- DEFERRED_TOOLS alone were ~1180 of those
+# tokens (browse_webpage/capture_screenshot/view_image/
+# fetch_webpage_images/extract_video_frames), paid on every single turn of
+# every session whether or not that session ever uses them.
 
-AVAILABLE_TOOLS = [
+CORE_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -132,6 +147,34 @@ AVAILABLE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "load_tool",
+            "description": (
+                "Unlocks one deferred tool's full schema starting on your NEXT turn, without "
+                "paying its schema cost on every turn until you actually need it. See SAVED "
+                "CONTEXT / the deferred-tools list in this system message for what's available "
+                "and each one's one-line purpose -- call this once per tool name, then use it "
+                "normally from then on for the rest of this session."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Exact deferred tool name, e.g. 'browse_webpage'."
+                    }
+                },
+                "required": ["name"]
+            }
+        }
+    },
+]
+
+# Withheld by default -- see the module docstring above and
+# tool/deferred_tools.py's load_tool handler / DEFERRED_TOOLS_RULES text.
+DEFERRED_TOOLS = [
+    {
+        "type": "function",
+        "function": {
             "name": "capture_screenshot",
             "description": (
                 "Captures the primary monitor and saves it as an auto-numbered "
@@ -215,6 +258,64 @@ AVAILABLE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "browse_webpage",
+            "description": (
+                "Loads a URL (http/https only) in a real headless browser with JavaScript "
+                "execution — unlike fetch_webpage_images (a plain HTTP GET), this actually "
+                "runs the page's JS, so a single-page app or client-rendered content shows up. "
+                "Returns the rendered page's title and visible text. Use this only when JS "
+                "execution genuinely matters (an SPA, content that renders/updates client-side, "
+                "verifying your own app after a real interaction) — a plain static page is "
+                "cheaper via curl or fetch_webpage_images. Stateless: one call = one throwaway "
+                "browser session (navigate, optionally click once, read, close) — there is no "
+                "persistent session across calls."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The page URL to load, e.g. 'https://example.com/app'."
+                    },
+                    "click_selector": {
+                        "type": "string",
+                        "description": (
+                            "Optional CSS selector to click once before reading (e.g. "
+                            "'button.load-more') — use to open a menu/tab or trigger a "
+                            "client-side action, then read what appeared."
+                        )
+                    },
+                    "wait_selector": {
+                        "type": "string",
+                        "description": (
+                            "Optional CSS selector to wait for before reading — use for content "
+                            "that renders asynchronously after the initial page load. Ignored "
+                            "if click_selector is also given."
+                        )
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "description": "Seconds allowed for navigation and the optional click/wait (default 15)."
+                    },
+                    "eval_js": {
+                        "type": "string",
+                        "description": (
+                            "Optional JS EXPRESSION (not a statement) to run in the page after "
+                            "the click/wait, e.g. \"document.body.getAttribute('data-theme')\" "
+                            "or \"document.querySelectorAll('.item').length\" — its result is "
+                            "returned as 'Eval result: ...'. Use this to check DOM state visible "
+                            "text can't show (an attribute, a class, a computed style, an "
+                            "element count) instead of a custom scripting workaround."
+                        )
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "extract_video_frames",
             "description": (
                 "Extracts up to max_frames visually distinct frames from a video (the first "
@@ -263,6 +364,105 @@ AVAILABLE_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_background_process",
+            "description": (
+                "Starts a command as a detached background process (a dev/test server you need "
+                "running while you do other work) and returns a HANDLE for use with "
+                "list_processes/stop_background_process -- never a raw OS pid. Use this instead of "
+                "execute_command with a trailing `&`: a process started this way is tracked, so "
+                "stopping it later can never accidentally match and kill an unrelated process (the "
+                "risk with `pkill`/`kill` by guessed pid or name pattern)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to run in the background, e.g. 'uvicorn main:app --port 8000'."
+                    },
+                    "log_file": {
+                        "type": "string",
+                        "description": (
+                            "Optional path to capture the process's stdout+stderr -- read it back with "
+                            "read_file or `tail` once the process has produced output. Omit to discard output."
+                        )
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_processes",
+            "description": (
+                "Lists every process THIS SESSION started with start_background_process (never the "
+                "whole OS process table) -- handle, pid, running/exited state, and exit code once "
+                "exited. Use this instead of `ps aux`/`ps -ef` to find a background process this "
+                "session itself started."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_background_process",
+            "description": (
+                "Stops a process by the HANDLE start_background_process/list_processes gave you -- "
+                "never a raw pid or a name pattern, so this can never match and kill something this "
+                "session didn't itself start. Sends SIGTERM to the whole process group first, then "
+                "SIGKILL if it hasn't exited within `timeout` seconds. This is the safe replacement "
+                "for `pkill`/`kill` by guessed pid or pattern."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "handle": {
+                        "type": "string",
+                        "description": "The handle returned by start_background_process, e.g. 'bg1'."
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Seconds to wait for a clean exit before force-killing (default 5)."
+                    }
+                },
+                "required": ["handle"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_finished_processes",
+            "description": (
+                "Prunes every EXITED background process's bookkeeping entry (never a still-"
+                "running one) from list_processes/the dashboard's background-processes panel. "
+                "Sends no signal -- the OS process is already gone. Use this to tidy up after a "
+                "long session accumulates several one-off verification servers you already "
+                "confirmed are done with, so the list only shows what's still relevant."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+]
+
+# These three were already defined after the deferred/media tools in this
+# file before the CORE/DEFERRED split -- still CORE_TOOLS (always sent),
+# just appended here rather than reordering everything above.
+CORE_TOOLS += [
     {
         "type": "function",
         "function": {
@@ -337,3 +537,84 @@ AVAILABLE_TOOLS = [
         }
     },
 ]
+
+# load_tool is the ONLY tool ever sent by default -- every other tool,
+# including the ones used almost every turn (write_file, execute_command,
+# read_file, ...), is unlocked on demand. This looks aggressive but the
+# economics favor it: unlocking a tool persists for the rest of the session
+# (SimpleSessionManager.unlock_tool), so each tool name costs its schema
+# exactly ONCE, ever, no matter how many hundreds of turns follow --
+# while the per-turn savings from not resending every OTHER tool's schema
+# compound for the entire rest of the session. A model that needs several
+# tools right away can call load_tool several times in the SAME turn (one
+# tool_call per name) to unlock everything it expects to need in one round
+# trip instead of paying the bootstrap cost tool-by-tool.
+_ALL_TOOLS_BEFORE_SPLIT = CORE_TOOLS + DEFERRED_TOOLS
+_load_tool_schema = next(t for t in _ALL_TOOLS_BEFORE_SPLIT if t["function"]["name"] == "load_tool")
+CORE_TOOLS = [_load_tool_schema]
+DEFERRED_TOOLS = [t for t in _ALL_TOOLS_BEFORE_SPLIT if t is not _load_tool_schema]
+
+# One-line purpose per deferred tool, shown in every system message (see
+# DEFERRED_TOOLS_RULES below) so the model knows these exist and roughly
+# what each is for WITHOUT paying their full parameter-schema cost until it
+# actually calls load_tool(name) to unlock one for real use.
+_DEFERRED_TOOL_SUMMARIES = {
+    "write_file": "write code/text to a file, creating directories as needed",
+    "execute_command": "run a shell command and get its output",
+    "read_file": "read an existing file's contents",
+    "append_to_file": "append a chunk to a file (build a long document in several smaller calls)",
+    "replace_in_file": "replace one exact substring in a file, leaving the rest untouched (tick a checkbox, patch a few lines)",
+    "context_save": "save one fact to your persistent context cache (survives history compression)",
+    "context_lookup": "search/list your persistent context cache",
+    "ask_llm": "a fresh, single-turn, STATELESS LLM call for a one-off text task (no file/conversation access)",
+    "capture_screenshot": "capture the primary monitor to a PNG (headless environments fail cleanly)",
+    "view_image": "attach an image file (a screenshot, a project asset, ...) so you can actually see it next turn",
+    "fetch_webpage_images": "plain-HTTP-GET a page and download the images it references (no JS execution)",
+    "browse_webpage": "load a URL in a real headless browser with JS execution, optionally click/wait/eval_js, and read the rendered page",
+    "extract_video_frames": "pull visually-distinct frames out of a video file as PNGs (needs ffmpeg)",
+    "start_background_process": "start a dev/test server (or any long-running command) in the background, tracked by a handle -- not a raw pid",
+    "list_processes": "list background processes THIS session started (not the whole OS) -- use instead of `ps`",
+    "stop_background_process": "stop a background process by its handle -- use instead of `pkill`/`kill` by guessed pid or pattern",
+    "clear_finished_processes": "prune exited processes' bookkeeping entries so list_processes/the dashboard only shows what's still relevant",
+}
+
+DEFERRED_TOOL_NAMES = frozenset(_DEFERRED_TOOL_SUMMARIES)
+assert DEFERRED_TOOL_NAMES == {t["function"]["name"] for t in DEFERRED_TOOLS}, (
+    "_DEFERRED_TOOL_SUMMARIES must list exactly the tools actually in DEFERRED_TOOLS"
+)
+
+def deferred_tools_rules(unlocked_tools=()) -> str:
+    """The TOOL ACCESS block for the system message -- lists only the
+    deferred tools NOT YET unlocked for this session, so it shrinks (and
+    disappears entirely once every tool this session ever needs has been
+    unlocked) instead of repeating the full 13-tool catalog on every turn
+    forever, including turns long after everything's already available.
+    """
+    remaining = {
+        name: summary for name, summary in _DEFERRED_TOOL_SUMMARIES.items()
+        if name not in unlocked_tools
+    }
+    if not remaining:
+        return ""
+    return (
+        "\n    TOOL ACCESS: only load_tool's own schema is available by default -- EVERY\n"
+        "    tool listed below is locked until you call load_tool(name) to unlock it.\n"
+        "    Unlocking persists for the rest of THIS session (you only ever pay for a given\n"
+        "    tool's schema once, no matter how many times you use it after that), so call\n"
+        "    load_tool once per name for every tool you expect to need soon (multiple\n"
+        "    load_tool calls in the SAME turn are fine and encouraged -- unlock several\n"
+        "    together rather than one per turn). Still locked:\n"
+        + "\n".join(f"    - {name}: {summary}" for name, summary in remaining.items())
+        + "\n"
+    )
+
+
+# Backward-compatible default (nothing unlocked yet) -- the one real caller
+# (simple_session_manager.get_system_message) always calls
+# deferred_tools_rules(...) with this session's own unlocked_tools() instead.
+DEFERRED_TOOLS_RULES = deferred_tools_rules()
+
+# Kept for any caller that wants the full combined list (e.g. offline
+# tooling/inspection) -- normal request traffic never sends this whole
+# thing at once; see runner._tools_for_session for what actually goes out.
+AVAILABLE_TOOLS = CORE_TOOLS + DEFERRED_TOOLS

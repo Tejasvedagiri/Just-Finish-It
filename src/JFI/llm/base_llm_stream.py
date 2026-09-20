@@ -9,9 +9,9 @@ def phase_env(prefix: str, key: str, fallback: str = "") -> str:
     `{prefix}_{key}` wins when `prefix` is given and that variable is set
     and non-empty (e.g. PLANNER_MODEL) — otherwise falls back to the shared
     `{key}` (e.g. MODEL), then to `fallback`. This is what lets .env give
-    each phase (planner/imp/testing/reviewer) its own model and endpoint
-    without requiring it: with no per-phase vars set, every phase resolves
-    to the same shared default, exactly like before this existed.
+    each phase (planner/imp/testing/reviewer/cleanup) its own model and
+    endpoint without requiring it: with no per-phase vars set, every phase
+    resolves to the same shared default, exactly like before this existed.
     """
     if prefix:
         value = os.environ.get(f"{prefix}_{key}")
@@ -24,7 +24,7 @@ class BaseLLMStream(ABC):
     def __init__(self, prefix: str = ""):
         # prefix is the phase's env-var prefix (e.g. "PLANNER"); empty means
         # "always use the shared, unprefixed settings" — used for anything
-        # that isn't one of the four phases (e.g. legacy orchestrator use).
+        # that isn't one of the five phases (e.g. legacy orchestrator use).
         self.prefix = prefix
         self.model = phase_env(prefix, "MODEL", "glm-5.3-flash-colibri")
         self.temperature = phase_env(prefix, "TEMPERATURE", "0.7")

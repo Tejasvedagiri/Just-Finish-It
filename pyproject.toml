@@ -13,6 +13,7 @@ dependencies = [
     "inputimeout>=1.0.4",
     "mss>=9.0.1",
     "openai>=3.8.0",
+    "playwright>=1.62.0",
     "prompt-toolkit>=3.0.53",
     "python-dotenv>=1.2.3",
 ]
@@ -21,12 +22,24 @@ dependencies = [
 # Only needed for `jfi-web` / src/JFI/web/dashboard.py -- the core agent has
 # no dependency on this, so it stays opt-in rather than in the base install.
 web = ["streamlit>=1.38"]
+# Only needed for a session reporting to a fleet master
+# (src/JFI/manager/socket_reporter.py, gated on MASTER_WS_URL being set) --
+# the core agent has no dependency on this either. The master itself is a
+# separate Node project (frontend/, `npm run master`), not Python -- see
+# "Fleet dashboard" in README.
+master = ["websockets>=13"]
+# Only needed for LLM_BACKEND=anthropic (see src/JFI/llm/anthropic_stream.py
+# and backend_select.py) -- everything else (the default OpenAI-compatible
+# path, which already covers Ollama/llama.cpp/vLLM/LM Studio) needs no
+# extra dependency at all.
+anthropic = ["anthropic>=0.40"]
 
 [project.scripts]
 jfi = "JFI.runner:main"
 JFI = "JFI.runner:main"
 jfi-web = "JFI.web.launcher:main"
 build = "build_binary:main"
+create-env = "JFI.create_env:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/JFI", "src/build_binary"]

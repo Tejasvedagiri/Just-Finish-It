@@ -5,6 +5,7 @@ import queue
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -20,6 +21,8 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension as D
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.styles import Style
+
+from JFI.tool.process_tools import snapshot_processes
 
 from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.manager.key_bindings import add_shift_enter_newline, teach_terminal_shift_enter
@@ -288,12 +291,18 @@ DEFAULT_STREAM_OUTPUT_CAP = 10000
 # sooner instead of only once the entire response is enormous.
 DEFAULT_REASONING_OUTPUT_CAP = 3000
 
+# Per-task token-cost entries kept for get_status_snapshot's task_history
+# field (a fleet-dashboard tasks-vs-tokens heatmap) -- see
+# record_task_tokens. Bounded the same way _log_tail is: a long session
+# accumulates far more leaves than any heatmap needs to show at once.
+MAX_TASK_HISTORY = 300
+
 
 class PromptToolkitConsoleManager(AbstractManager):
     """
     Full-screen terminal UI where the bottom three lines belong to the user:
 
-        Just Finish It  ·  session: demo  ·  planner › imp › testing › reviewer
+        Just Finish It  ·  session: demo  ·  planner › imp › testing › reviewer › cleanup
         ────────────────────────────────────────────────────────────────────────
         <AI space: streaming output, scrollable>
         ────────────────────────────────────────────────────────────────────────
@@ -368,7 +377,10 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._iteration = 1
         self._plan = None  # (ticked, total) checkbox progress, whole plan
         self._phase_plan = None  # (ticked, total) checkbox progress, current phase's section only
+        self._plan_markdown: Optional[str] = None  # raw plan.md text, for a remote checklist view
         self._task: Optional[str] = None  # current plan item's text (imp/testing only)
+        self._task_started_at: Optional[float] = None  # wall-clock start of the current task
+        self._stage: str = ""  # short sub-phase tag, e.g. planner's Arc/Lead/Journy/Func/Task
         self._tokens = None  # (estimated tokens used, context window)
         self._tokens_read = 0  # cumulative prompt tokens sent this run
         self._tokens_written = 0  # cumulative completion tokens generated this run
@@ -384,6 +396,12 @@ class PromptToolkitConsoleManager(AbstractManager):
         # the worker thread in drain_queued_input/wait_for_queued_input).
         self._queued_snapshot: List[str] = []
         self._queue_on_change: Optional[Callable[[List[str]], None]] = None
+        # Per-task token cost, oldest first, capped -- see record_task_tokens.
+        self._task_history: List[Dict[str, Any]] = []
+        # Same formatted lines run.log gets (see _log), kept in memory too
+        # so a remote fleet-dashboard viewer -- no filesystem access to
+        # this machine at all -- can still show a live log tail.
+        self._log_tail: deque = deque(maxlen=400)
         self._stop = threading.Event()
         # Ctrl+N (restart): only actionable while idle after a review, see
         # wait_for_queued_input/_idle_wait below.
@@ -672,6 +690,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             iteration, plan, tokens = self._iteration, self._plan, self._tokens
             phase_plan = self._phase_plan
             tokens_read, tokens_written = self._tokens_read, self._tokens_written
+            stage = self._stage
 
         frags = [("class:header", f" {self.title}")]
         if tokens_read or tokens_written:
@@ -698,7 +717,8 @@ class PromptToolkitConsoleManager(AbstractManager):
                 if name in done:
                     frags.append(("class:header.phase.done", f"✓ {label}"))
                 elif name == phase:
-                    frags.append(("class:header.phase.active", f"▸ {label}"))
+                    active_label = f"▸ {label} ({stage})" if stage else f"▸ {label}"
+                    frags.append(("class:header.phase.active", active_label))
                 else:
                     frags.append(("class:header.phase", label))
         if phase_plan and phase_plan[1]:
@@ -737,15 +757,20 @@ class PromptToolkitConsoleManager(AbstractManager):
         item currently being worked. Falls back to a plain divider when idle
         (no phase set), matching the look this line had before it did
         anything — planner/reviewer show just the phase, since they have no
-        per-item task concept.
+        per-item task concept -- except planner's own internal stage tag
+        (Arc/Lead/Journy/Func/Task, see runner.PLANNER_STAGES), which rides the
+        phase label itself rather than the task slot.
         """
         with self._lock:
-            phase, task = self._phase, self._task
+            phase, task, stage = self._phase, self._task, self._stage
 
         if not phase:
             return [("class:rule", "─" * self._width())]
 
-        frags = [("class:tasktitle.phase", f" ▸ {phase_display_name(phase).upper()}")]
+        phase_label = phase_display_name(phase).upper()
+        if stage:
+            phase_label += f" ({stage})"
+        frags = [("class:tasktitle.phase", f" ▸ {phase_label}")]
         if task:
             frags += [("class:tasktitle.dim", "  ·  "), ("class:tasktitle", task)]
         return frags
@@ -844,13 +869,43 @@ class PromptToolkitConsoleManager(AbstractManager):
             else:
                 self._blocks.append([style, text])
             self._line_count += text.count("\n")
+        self._invalidate()
+
+    def _log(self, tag: str, text: str) -> None:
+        """Writes ONE clean, plain-text, timestamped record to run.log —
+        independent of whatever's drawn in the live TUI pane (see _write/
+        _line for that).
+
+        run.log used to be a byte-for-byte mirror of the TUI (see git
+        history): emoji prefixes, box-drawing rule lines sized to the LIVE
+        terminal's column count, and the SAME truncated previews the
+        terminal uses to avoid flooding a fixed-width pane. None of that
+        makes sense for a file meant to be tailed or grepped after the
+        fact — a log file has no width constraint, so callers pass this the
+        FULL text where the TUI equivalent would truncate (display_tool_call's
+        60-char arg preview, display_tool_result's 8-line/width-capped
+        preview, ...). Each line gets its own "[HH:MM:SS] TAG: ..." prefix
+        so `grep '^\\[.*\\] TOOL_RESULT:'` (etc.) works directly on the file.
+        """
+        if not text:
+            return
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        lines = text.splitlines() or [""]
+        with self._lock:
+            # Kept in memory regardless of whether the file write below
+            # succeeds -- get_status_snapshot's log_tail field (a fleet
+            # dashboard's live log view) has no filesystem access to
+            # run.log at all once the viewer is remote, so this ring
+            # buffer is the only way that view gets log content.
+            for line in lines:
+                self._log_tail.append(f"[{timestamp}] {tag}: {line}")
             if self._log_file is not None:
                 try:
-                    self._log_file.write(text)
+                    for line in lines:
+                        self._log_file.write(f"[{timestamp}] {tag}: {line}\n")
                     self._log_file.flush()
                 except OSError:
                     self._log_file = None
-        self._invalidate()
 
     def _line(self, style: str, text: str) -> None:
         with self._lock:
@@ -867,23 +922,29 @@ class PromptToolkitConsoleManager(AbstractManager):
 
     def display_user(self, text: str) -> None:
         self._line("class:out.user", f"🧑 you ▸ {text}")
+        self._log("USER", text)
 
     def display_assistant(self, text: str) -> None:
         self._line("class:out.assistant", f"🤖 {text}")
+        self._log("ASSISTANT", text)
 
     def display_system(self, text: str) -> None:
         for line in str(text).splitlines() or [""]:
             self._line("class:out.system", f" ⚙  {line}")
+        self._log("SYSTEM", text)
 
     def display_error(self, text: str) -> None:
         self._line("class:out.error", f" ✗  {text}")
+        self._log("ERROR", text)
 
     def display_tool_call(self, name: str, args: Optional[Dict[str, Any]] = None) -> None:
         preview = ""
+        log_bits = []
         if args:
             bits = []
             for key, value in args.items():
                 flat = " ".join(str(value).split())
+                log_bits.append(f"{key}={flat}")  # log gets every arg in FULL, no truncation
                 # execute_command's command is worth seeing in full — with a
                 # long-running or backgrounded command especially, knowing
                 # exactly what's running matters more than staying short.
@@ -896,6 +957,7 @@ class PromptToolkitConsoleManager(AbstractManager):
                     bits.append(f"{key}={flat[:60]}{'…' if len(flat) > 60 else ''}")
             preview = "  (" + ", ".join(bits) + ")"
         self._line("class:out.tool", f" ⚙️ {name}{preview}")
+        self._log("TOOL_CALL", f"{name}(" + ", ".join(log_bits) + ")" if log_bits else f"{name}()")
 
     def display_tool_result(self, text: str) -> None:
         flat = str(text).strip()
@@ -905,6 +967,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             self._line("class:out.result", f"    │ {line[:self._width() - 8]}")
         if len(lines) > len(head):
             self._line("class:out.result", f"    └ … {len(lines) - len(head)} more line(s)")
+        self._log("TOOL_RESULT", flat)  # full text — the log has no width/line cap to fit
 
     def display_rule(self, label: str = "") -> None:
         width = self._width() - 2
@@ -913,6 +976,10 @@ class PromptToolkitConsoleManager(AbstractManager):
             left = max(0, (width - len(label)) // 2)
             right = max(0, width - left - len(label))
             self._line("class:out.rule", " " + "─" * left + label + "─" * right)
+            # Labels already say what they mark (e.g. "PHASE: IMPLEMENT",
+            # "END PROMPT") -- a generic RULE tag avoids stuttering into
+            # "PHASE: PHASE: IMPLEMENT" for the common case.
+            self._log("RULE", label.strip())
         else:
             self._line("class:out.rule", " " + "─" * width)
 
@@ -1003,6 +1070,7 @@ class PromptToolkitConsoleManager(AbstractManager):
         turn again.
         """
         full_text = ""
+        full_reasoning = ""
         reasoning_started = False
         tool_calls_dict: Dict[int, Dict[str, Any]] = {}
         usage_seen = False
@@ -1053,6 +1121,7 @@ class PromptToolkitConsoleManager(AbstractManager):
                     reasoning_started = True
                 streamed_chars += len(reasoning_delta)
                 reasoning_chars += len(reasoning_delta)
+                full_reasoning += reasoning_delta
                 self._write("class:out.system", reasoning_delta)
 
             # Cut reasoning off on its own, tighter budget -- but only while
@@ -1128,6 +1197,17 @@ class PromptToolkitConsoleManager(AbstractManager):
 
         self._write("class:out.assistant", "" if full_text.endswith("\n") else "\n")
         self.set_status(state="thinking")
+
+        # Clean end-of-turn log records (see _log) — one each for reasoning
+        # and content, written once the full text is known rather than
+        # per-chunk, so the log reads as complete thoughts, not a scatter of
+        # streamed fragments. Tool calls are logged separately by
+        # display_tool_call (runner.execute_tool_call passes the FULL args
+        # there, same fidelity), so they are not repeated here.
+        if full_reasoning:
+            self._log("REASONING", full_reasoning.strip())
+        if full_text.strip():
+            self._log("ASSISTANT", full_text.strip())
 
         return {
             "content": full_text.strip() if full_text else None,
@@ -1262,16 +1342,24 @@ class PromptToolkitConsoleManager(AbstractManager):
     def set_status(self, session: Optional[str] = None, phase: Optional[str] = None,
                    state: Optional[str] = None, phases: Optional[List[str]] = None,
                    plan: Optional[tuple] = None, phase_plan: Optional[tuple] = None,
-                   tokens: Optional[tuple] = None, task: Optional[str] = None) -> None:
+                   tokens: Optional[tuple] = None, task: Optional[str] = None,
+                   stage: Optional[str] = None, plan_markdown: Optional[str] = None,
+                   task_started_at: Optional[float] = None) -> None:
         with self._lock:
             if plan is not None:
                 self._plan = plan
             if phase_plan is not None:
                 self._phase_plan = phase_plan
+            if plan_markdown is not None:
+                self._plan_markdown = plan_markdown
             if tokens is not None:
                 self._tokens = tokens
             if task is not None:
                 self._task = task
+            if task_started_at is not None:
+                self._task_started_at = task_started_at
+            if stage is not None:
+                self._stage = stage
             if session is not None:
                 self._session = session
             if phase is not None:
@@ -1306,10 +1394,26 @@ class PromptToolkitConsoleManager(AbstractManager):
             self._done_phases = []
             self._phase = ""
             self._task = None
+            self._task_started_at = None
+            self._stage = ""
             if phases is not None:
                 self._phases = list(phases)
         self._invalidate()
         self._apply_title()
+
+    def record_task_tokens(self, task: str, tokens: int,
+                           started_at: Optional[float] = None, ended_at: Optional[float] = None,
+                           phase: Optional[str] = None) -> None:
+        if not task or tokens <= 0:
+            return
+        with self._lock:
+            self._task_history.append({
+                "task": task, "tokens": tokens, "phase": phase,
+                "started_at": started_at, "ended_at": ended_at,
+            })
+            overflow = len(self._task_history) - MAX_TASK_HISTORY
+            if overflow > 0:
+                del self._task_history[:overflow]
 
     def get_status_snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -1325,22 +1429,74 @@ class PromptToolkitConsoleManager(AbstractManager):
                 "phases": list(self._phases),
                 "done_phases": list(self._done_phases),
                 "state": self._state,
+                "is_paused": self._paused.is_set(),
                 "iteration": self._iteration,
                 "plan": list(self._plan) if self._plan else None,
                 "phase_plan": list(self._phase_plan) if self._phase_plan else None,
                 "task": self._task,
+                "task_started_at": self._task_started_at,
+                "stage": self._stage,
                 "tokens": list(self._tokens) if self._tokens else None,
                 "tokens_read": self._tokens_read,
                 "tokens_written": self._tokens_written,
                 "queue_size": len(self._queued_snapshot),
+                "queued_items": list(self._queued_snapshot),
                 "awaiting": awaiting,
+                # Live view of every process THIS session started via
+                # start_background_process (see tool/process_tools.py) --
+                # command/pid/host/port/status. Riding along on the same
+                # snapshot both web UIs already relay (web_bridge.py's
+                # file-based mirror for jfi-web, socket_reporter.py's
+                # WebSocket mirror for jfi-master) means neither had to be
+                # taught anything new about processes specifically.
+                "background_processes": snapshot_processes(),
+                # Per-task token cost (see record_task_tokens) and the last
+                # 400 formatted log lines (see _log) -- both kept in memory
+                # specifically so a remote fleet-dashboard viewer, with no
+                # filesystem access to this machine, can still show a
+                # tasks-vs-tokens heatmap and a live log tail.
+                "task_history": list(self._task_history),
+                "log_tail": list(self._log_tail),
+                # Raw plan.md text -- a remote fleet-dashboard viewer has no
+                # filesystem access to this machine, so the full checklist
+                # (not just the [done, total] counts above) has to ride
+                # along in the snapshot too. See set_status's plan_markdown.
+                "plan_markdown": self._plan_markdown,
             }
 
     def submit_external_answer(self, key: str) -> None:
         """Feeds `key` into the same answer channel a keypress would (see
-        get_user_choice) -- lets an external approver (e.g. the web
-        dashboard) answer a pending choice without touching the terminal."""
+        get_user_choice/get_user_input) -- lets an external approver (e.g.
+        the web dashboard) answer a pending prompt without touching the
+        terminal."""
         self._answers.put(key)
+
+    def submit_external_pause(self, paused: bool) -> None:
+        already = self._paused.is_set()
+        if paused == already:
+            return
+        if paused:
+            self._paused.set()
+            self._line("class:out.system", " ⏸  Paused (via web) — will hold before the next turn.")
+        else:
+            self._paused.clear()
+            self._line("class:out.system", " ▶  Resumed (via web).")
+        self._invalidate()
+
+    def submit_external_queue_item(self, text: str) -> None:
+        """Queues `text` exactly as the plain (non-forced) branch of
+        _on_accept would for a typed line -- lets an external submitter
+        (e.g. the web dashboard) add a new follow-up request while nothing
+        is currently awaiting an answer, without touching the terminal."""
+        text = text.strip()
+        if not text:
+            return
+        self._queued.put(text)
+        with self._lock:
+            self._queued_snapshot.append(text)
+        self._notify_queue_change()
+        self._line("class:out.system", f" ⏳ queued #{self._queued.qsize()} ▸ {self._preview(text)} (via web)")
+        self._invalidate()
 
     def should_stop(self) -> bool:
         return self._stop.is_set()
