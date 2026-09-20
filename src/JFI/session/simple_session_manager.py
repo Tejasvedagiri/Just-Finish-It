@@ -507,12 +507,26 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
             is NOT a programming task — leave it exactly as the Journeyman wrote it.
             {rules}
 
+            Before reading any source file, call context_lookup with no keyword to see what
+            the earlier planner passes already recorded — objective, architecture, module/
+            file layout, existing signatures. Re-check it with a keyword (a file or module
+            name) before you open that file again for a later leaf: if a fact you need (a
+            file's existing functions, a class's shape, where a handler lives) is already
+            there, use it instead of re-reading the file. When you DO read a file to work out
+            a leaf's function breakdown, context_save what you found (existing functions/
+            classes in that file, their signatures, the module's role) under a key named for
+            the file/area before moving to the next leaf — so the next leaf touching the same
+            file, or a later phase, doesn't re-read it from scratch. Observed failure this
+            prevents: re-reading the same source file in full for every single leaf under it
+            instead of once.
+
             Your job:
             1. read_file {plan_path} first.
             2. For every checkbox leaf under "## Implementation" whose description is about
                adding or changing a function, method, handler, endpoint, or similar unit of
                code, work out every individual function/method that leaf's work actually
-               touches or creates.
+               touches or creates — checking context_lookup before re-reading a file you've
+               already opened for an earlier leaf in this same pass.
             3. If that leaf covers 2 or more functions, turn it back into a plain, un-checkboxed
                bullet (remove its own checkbox) and add one new checkbox child per function —
                "- [ ] N.M.1 implement <function_name>(...): <what it does>",

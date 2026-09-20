@@ -1,6 +1,6 @@
 # Just Finish It (JFI) 🤖
 
-**A multi-phase, plan-driven coding agent for local LLMs.** Give JFI a goal and it runs the full software-engineering loop — **planner → implementer → tester → reviewer → cleanup** — end to end against any OpenAI-compatible endpoint, one checkbox at a time.
+**A multi-phase, plan-driven coding agent for local LLMs.** Give JFI a goal and it runs the full software-engineering loop — **planner → product owner → implementer → tester → reviewer → cleanup** — end to end against any OpenAI-compatible endpoint, one checkbox at a time.
 
 What makes it different from "just an autonomous mode" is that all of its state lives on disk:
 
@@ -12,13 +12,14 @@ JFI is token-hungry by design: every step re-sends the (growing) session history
 
 ---
 
-## The five-phase pipeline
+## The six-phase pipeline
 
-Every JFI session runs the same five phases in order:
+Every JFI session runs the same six phases in order:
 
 | Phase     | What it does                                                                                          |
 |-----------|--------------------------------------------------------------------------------------------------------|
-| **planner**   | Writes a step-by-step plan to `JFI/readme/plan.md` as a tree, recursing each task into the smallest doable pieces — only the leaves get a `- [ ] N.M.…` checkbox. |
+| **planner**   | Writes a step-by-step plan to `JFI/readme/plan.md` as a tree, recursing each task into the smallest doable pieces — only the leaves get a `- [ ] N.M.…` checkbox. Runs as **4 internal passes** by default (Architect → Team Lead → Journeyman → Function Breakdown — see `PLANNER_SINGLE_PASS` in [Configuration](#configuration-env)), the last of which breaks every code-writing leaf down further into one child leaf per function/method it implements. |
+| **product_owner** | Read-only review of the whole plan against what actually exists in the codebase — never writes or edits deliverable code. If it has concerns, it writes `feedback_to_plan.md`; that sends the plan back to the planner for one more pass (protecting every already-ticked `- [x]` line), then back to product_owner again — a separate, tighter loop than the reviewer's own (capped at 3 rounds, see `MAX_PRODUCT_OWNER_ITERATIONS`), entirely before implementation ever starts. No feedback on a pass means it writes nothing and the pipeline moves straight to **imp**. |
 | **imp**       | Implements the code, ticking each box with `replace_in_file` *immediately* after finishing that one item — never batched. Whenever a step hits a problem worth flagging (a workaround, an ambiguous-spec assumption, something it couldn't fully verify), it appends a note to `NotesForReviewer.md`. |
 | **testing**   | Runs the test suite and fixes failures.                                                                |
 | **reviewer**  | Reads `NotesForReviewer.md` (if any) alongside the plan before re-verifying the work, then signs off (`REVIEWER_COMPLETE`) or writes a `review.md` report, which automatically schedules another full iteration. Up to 3 failed-review loops per session before JFI stops so a bad cycle is visible instead of looping forever. |
@@ -30,10 +31,11 @@ The plan file is the single source of truth across phases *and* across restarts 
 
 1. You type a **session name**, then your **goal** (be as detailed as you want).
 2. The planner writes `plan.md`. As soon as its last line is written and the phase-complete marker is emitted, JFI moves on automatically — there is no approval gate between phases; the review loop *is* the quality gate.
-3. During **imp** and **testing**, the model works strictly one checkbox at a time: it does the work, then ticks exactly that one box in `plan.md` (byte-identical text, only `[ ]`→`[x]`). This is what makes the header's live progress bars — the current phase's own checklist (`implement ████░░░░ 8/18`) alongside the whole plan (`total ███░░░░░ 8/21`) — meaningful and makes resumption robust.
-4. The **reviewer** reads the finished work — plus `NotesForReviewer.md`, if **imp** left one, treating each note as something to specifically re-check rather than accept at face value; if it finds real issues (including a note that turned out to be a genuine problem) it writes `review.md`, which — after **cleanup** still runs once more to tidy that pass — JFI deletes, folding its contents into a fresh user message and looping all five phases again (the header shows `loop #2`, etc.). A clean review just moves straight into cleanup. Either way, `NotesForReviewer.md` itself is cleared once the reviewer has read it, so a stale note never resurfaces in a later, unrelated pass.
-5. **cleanup** sweeps the working directory for stray files that aren't part of the deliverable — relocating anything worth keeping into the session's own `JFI/readme/` folder and deleting the rest — before the run considers this pass finished.
-6. Once done — or if you queue more requests at any point (see [Live input](#live-input-queue-force-idle)) — JFI either idles with a live input line waiting for your next request, or exits.
+3. **product_owner** reviews the whole plan against the real codebase. If it has concerns, `feedback_to_plan.md` sends the plan back to the planner for one more pass, then back to product_owner — a self-contained loop (the header shows this as its own back-and-forth) that repeats until product_owner has nothing left to flag, before **imp** ever starts.
+4. During **imp** and **testing**, the model works strictly one checkbox at a time: it does the work, then ticks exactly that one box in `plan.md` (byte-identical text, only `[ ]`→`[x]`). This is what makes the header's live progress bars — the current phase's own checklist (`implement ████░░░░ 8/18`) alongside the whole plan (`total ███░░░░░ 8/21`) — meaningful and makes resumption robust.
+5. The **reviewer** reads the finished work — plus `NotesForReviewer.md`, if **imp** left one, treating each note as something to specifically re-check rather than accept at face value; if it finds real issues (including a note that turned out to be a genuine problem) it writes `review.md`, which — after **cleanup** still runs once more to tidy that pass — JFI deletes, folding its contents into a fresh user message and looping all six phases again (the header shows `loop #2`, etc.). A clean review just moves straight into cleanup. Either way, `NotesForReviewer.md` itself is cleared once the reviewer has read it, so a stale note never resurfaces in a later, unrelated pass.
+6. **cleanup** sweeps the working directory for stray files that aren't part of the deliverable — relocating anything worth keeping into the session's own `JFI/readme/` folder and deleting the rest — before the run considers this pass finished.
+7. Once done — or if you queue more requests at any point (see [Live input](#live-input-queue-force-idle)) — JFI either idles with a live input line waiting for your next request, or exits.
 
 The whole transcript is also written to `JFI/readme/<session>/run.log` as it happens (`tail -f` friendly), and every file the agent touches is tracked so a project-state summary can be folded into later iterations.
 
@@ -54,15 +56,39 @@ The launcher:
 
 Then answer two prompts: **session name** and **goal**, and let it work.
 
+Not sure you're ready yet? `uv run create-env` is a standalone, stdlib-only check that reports Python version, `uv` availability, and — creating `.env` from `JFI_ENV_TEMPLATE` first if it doesn't exist yet, same as step 3 above — whether the `OPENAI_URL` it finds there is actually reachable, before you launch a real session:
+
+```bash
+$ uv run create-env
+JFI system check -- /path/to/Just-Finish-It
+
+Python & tooling:
+✅ Python 3.12 (need >= 3.12)
+✅ uv on PATH
+
+Configuration (.env):
+✅ .env already exists (/path/to/Just-Finish-It/.env).
+  OPENAI_URL = http://127.0.0.1:1234/v1
+  MODEL      = qwen3.5:35b-a3b
+
+LLM server reachability:
+✅ http://127.0.0.1:1234/v1 responded (HTTP 200)
+
+✅ Looks ready. Run ./JFI (or `jfi` once installed) to start a session.
+```
+
 `./JFI --version` (or `jfi --version` once installed) prints the installed version and exits — useful for confirming which build you're actually running (e.g. after rebuilding `dist/jfi`) without launching a real session. `./JFI --help` lists every flag.
 
 ### Configuration (`.env`)
 
 | Variable            | Purpose                                            | Example value                              |
 |---------------------|----------------------------------------------------|--------------------------------------------|
+| `LLM_BACKEND` *(optional)* | Which `BaseLLMStream` implementation actually serves requests (see `src/JFI/llm/backend_select.py`). Unset/`openai` talks to whatever OpenAI-compatible endpoint `OPENAI_URL` points at (the default, works for Ollama/llama.cpp/vLLM/real OpenAI alike). `ollama` and `llamacpp` (also accepted: `llama.cpp`, `llama-cpp`) are pure convenience — they just fill in `OPENAI_URL`/`OPENAI_API_KEY` with that server's usual localhost defaults *if you haven't already set them yourself*, then still go through the OpenAI-compatible path. `anthropic` (also accepted: `claude`) instead talks to Claude's own native Messages API directly via `AnthropicStream`, which needs `ANTHROPIC_API_KEY` set (not `OPENAI_API_KEY`) — install it with `uv sync --extra anthropic`. Can be overridden per phase like `MODEL` (e.g. `REVIEWER_LLM_BACKEND=anthropic` with its own `REVIEWER_ANTHROPIC_API_KEY`), so different phases can even run on entirely different backends in the same session. An unrecognized value logs a warning and falls back to plain `openai`. | `anthropic` |
+| `ANTHROPIC_API_KEY` *(required only when `LLM_BACKEND=anthropic`/`claude`)* | Claude API key, used instead of `OPENAI_API_KEY` for that backend. | `sk-ant-...` |
+| `ANTHROPIC_MAX_TOKENS` *(optional)* | Max output tokens per request on the Anthropic backend — this API requires an explicit cap, unlike most OpenAI-compatible servers. Defaults to `8192` if unset. | `8192` |
 | `OPENAI_URL`        | Base URL of any OpenAI-compatible chat API         | `http://127.0.0.1:1234/v1` (Ollama) or `https://api.openai.com/v1` |
 | `OPENAI_API_KEY`    | API key for that server                            | `ollama` / your real key                   |
-| `MODEL`             | Model name                                         | `gemma-4:31b`, `qwen3.5:35b-a3b`, …        |
+| `MODEL`             | Model name — the real model id for the backend you picked (a served Ollama/llama.cpp model name, an OpenAI model id, or a Claude model id like `claude-sonnet-5` when `LLM_BACKEND=anthropic`) | `gemma-4:31b`, `qwen3.5:35b-a3b`, `claude-sonnet-5`, …        |
 | `TEMPERATURE`       | Sampling temperature                               | `0.7`                                      |
 | `SESSION_MANAGER` *(optional)* | Which `SessionManager` drives a session. `adaptive` (default) detects the goal's task type (python/javascript/story) and sends smaller, type-specific planning rules instead of one generic block for everything — see [`task_rules.py`](src/JFI/session/task_rules.py). `simple` opts back into the original one-size-fits-all rules. An unrecognized value logs a hint and falls back to `adaptive`. | `simple` |
 | `FREQUENCY_PENALTY` *(optional)* | Penalizes tokens proportional to how often they've already appeared in the response so far — the standard lever against a model falling into a verbatim repetition loop (seen in practice on smaller/quantized models). Defaults to `0.0` (a no-op) if unset; try `0.3`–`0.5` if a model gets stuck repeating itself. | `0.3` |
@@ -107,13 +133,14 @@ ollama serve &                                  # listens on http://127.0.0.1:11
 vllm serve <model> --port 8000                   # OpenAI-compatible at /v1
 ```
 
-Then point the `.env` at it:
+Then point the `.env` at it — either set `OPENAI_URL`/`OPENAI_API_KEY` yourself, or just set `LLM_BACKEND=ollama`/`LLM_BACKEND=llamacpp` and let JFI fill in that server's usual localhost defaults for you:
 
-| Server        | `OPENAI_URL`                    | `MODEL`                     | `OPENAI_API_KEY`      |
-|---------------|---------------------------------|-----------------------------|-----------------------|
-| Ollama        | `http://127.0.0.1:11434/v1`     | e.g. `qwen3:8b`             | anything (`ollama`)   |
-| llama.cpp     | `http://127.0.0.1:8080/v1`      | whatever you loaded         | anything (e.g. `llama`) |
-| vLLM / others | that server's `/v1` URL         | the served model id         | real key if required  |
+| Server        | `LLM_BACKEND`   | `OPENAI_URL`                    | `MODEL`                     | `OPENAI_API_KEY`      |
+|---------------|------------------|---------------------------------|-----------------------------|-----------------------|
+| Ollama        | `ollama` *(or unset + set `OPENAI_URL` yourself)* | `http://127.0.0.1:11434/v1`     | e.g. `qwen3:8b`             | anything (`ollama`)   |
+| llama.cpp     | `llamacpp` *(same)* | `http://127.0.0.1:8080/v1`      | whatever you loaded         | anything (e.g. `llama`) |
+| vLLM / others | unset            | that server's `/v1` URL         | the served model id         | real key if required  |
+| Claude (Anthropic's own API, not an OpenAI-compatible proxy) | `anthropic` (or `claude`) | *(not used — talks to Claude's Messages API directly)* | e.g. `claude-sonnet-5` | *(use `ANTHROPIC_API_KEY` instead)* |
 
 **Model size vs. your machine:**
 
@@ -225,9 +252,16 @@ MASTER_WS_URL=ws://<master-host>:8765/report ./JFI
 
 That's independent of `JFI_WEB_BRIDGE`/`jfi-web` — both can run at once, and neither depends on the other. A session identifies itself to the master with an opaque `hostname::session-id` string and a short repo-directory label, never a filesystem path (the master has no way to read a remote session's disk anyway).
 
-Open `http://<master-host>:8765` for the fleet UI: a **Fleet** tab (every reporting session as a card, grouped by phase, with a live phase-distribution chart — click any card for detail), an **Activity** tab (a merged, chronological feed of every session's phase changes, ticks, and prompts), and a **Session** tab (the clicked session's own phase timeline, current task, and token usage). A theme dropdown top-right switches the whole palette — the same 20 presets `THEME` supports in the terminal itself (see [Themes](#themes)), derived into this app's full CSS token set from each preset's 5 raw colors — remembered per browser via `localStorage`. Everything shown is a real field from `get_status_snapshot()` or derived from it server-side — there's no invented "cost" or "model" number anywhere.
+Open `http://<master-host>:8765` for the fleet UI: a **Fleet** tab (every reporting session as a card, grouped by phase, with a live phase-distribution chart — click any card for detail), an **Activity** tab (a merged, chronological feed of every session's phase changes, ticks, and prompts), and a **Session** tab for the clicked session, with two sub-tabs:
 
-**Security:** the master ships with no authentication — anyone who can reach its port can see every reporting session's live status (task text, token counts, review findings). Only run it where you already trust the network (behind a VPN, a firewalled LAN), the same trust model `execute_command` already has. The **Session** tab's awaiting-prompt panel is read-only in this version — answer a pending prompt from the session's own terminal or `jfi-web`, not from the fleet dashboard.
+- **Overview** — phase timeline, progress bars (phase/total/context), the current task, token detail, a **tasks-vs-tokens heatmap** (grouped into one sub-section per phase — Implement and Testing are numbered as separate trees in `plan.md`, so the same leaf number can legitimately appear in both, and a flat grid would conflate them), background processes this session started (`start_background_process` et al.), and a live log tail (last 400 lines).
+- **Plan checklist** — the full `plan.md` tree exactly as the planner wrote it (depth from each leaf's own number, not raw indentation), done/pending/current state per leaf, and how long each one took (a live-updating duration for the leaf in progress, a fixed one — hover for the start/end clock time — for finished leaves).
+
+A **controls bar** above both sub-tabs lets you drive the session, not just watch it: **Pause**/**Resume** (the same state Ctrl+P toggles locally), **Stop** (with a confirmation — progress is saved and it can be resumed later, same as Ctrl+C), and a **queue** box for a new follow-up request, plus the queued list itself. The **Awaiting input** panel's own option buttons are answerable straight from here too — whichever side answers first (terminal, `jfi-web`, or this dashboard) wins. All of it rides the same WebSocket a session already opens for `MASTER_WS_URL` (see `socket_reporter.py`'s `_dispatch_control`) — no new port, no shared filesystem, works across machines exactly like the read-only fields already did.
+
+A theme dropdown top-right switches the whole palette — the same 20 presets `THEME` supports in the terminal itself (see [Themes](#themes)), derived into this app's full CSS token set from each preset's 5 raw colors, with a computed contrast floor so faint/muted text and badge labels stay legible on every preset — remembered per browser via `localStorage`. Everything shown is a real field from `get_status_snapshot()` or derived from it server-side — there's no invented "cost" or "model" number anywhere.
+
+**Security:** the master ships with no authentication — anyone who can reach its port can see every reporting session's live status (task text, token counts, review findings) *and* control it (pause/resume/stop/queue/answer). Only run it where you already trust the network (behind a VPN, a firewalled LAN), the same trust model `execute_command` already has.
 
 ---
 
@@ -251,11 +285,12 @@ Just-Finish-It/
 ├── JFI                          # bash launcher (venv bootstrap + .env check)
 ├── .python-version              # 3.12 — matches pyproject.toml's requires-python floor
 ├── pyproject.toml               # package metadata, deps (pytest/pyinstaller for dev), pytest config
-├── JFI_ENV_TEMPLATE             # copied to ./.env on first run if missing
+├── JFI_ENV_TEMPLATE             # copied to ./.env on first run if missing, or by `uv run create-env`
 ├── README.md                    # this file
 │
 ├── src/JFI/                     # the agent itself
-│   ├── runner.py                # main() + run_pipeline(): orchestrates the 5 phases, review loop, queue/force/idle
+│   ├── runner.py                # main() + run_pipeline(): orchestrates the 6 phases, review loop, queue/force/idle
+│   │                            #   • _run_product_owner_loop() — the separate planner<->product_owner loop between planning and implementation
 │   │                            #   • execute_tool_call() — runs one tool call, coaches on failure (AUTO-RECTIFY), tracks per-signature retry counts
 │   │                            #   • collect_next_iteration() / review_outcome() — the no-prompt loop back to planner after a failed review or queued request
 │   ├── llm/
@@ -287,7 +322,7 @@ Just-Finish-It/
 │       ├── web_tools.py         # fetch_webpage_images — downloads a page's images to disk (view_image shows them, same as a screenshot)
 │       ├── video_tools.py       # extract_video_frames — dedupes a video down to its visually distinct frames (ffmpeg + a pure-Python pixel-diff pass)
 │       ├── llm_tools.py         # ask_llm — a stateless one-off LLM call for text work with no dedicated tool
-│       ├── process_tools.py     # start_background_process / list_processes / stop_background_process — handle-based, never a raw pid or name pattern
+│       ├── process_tools.py     # start_background_process / list_processes / stop_background_process / clear_finished_processes — handle-based, never a raw pid or name pattern
 │       └── plan_renumber.py     # python -m JFI.tool.plan_renumber — deterministic plan.md subtree renumbering, not an LLM turn
 │
 ├── src/build_binary/             # `uv run build` — PyInstaller onefile packaging of src/JFI/runner.py
@@ -333,7 +368,7 @@ The model manages it with two dedicated tools rather than `read_file`/`write_fil
   never drift out of sync with the facts themselves); called with a keyword it returns the
   full text of just what matches, case-insensitively, against keys and values.
 
-It's meant to stay small — a handful of high-value facts, not a transcript.
+It's meant to stay small — a handful of high-value facts, not a transcript. One convention baked into every phase's own instructions: the first time a session works out the correct way to actually run/build/test the target project (which interpreter, which package-manager script, required env vars), it saves that under a stable `"run_commands"` key immediately — so a session never re-discovers it the hard way twice (e.g. `python3` failing with `ModuleNotFoundError`, then trying `.venv/bin/python`/`uv run`, then hitting the exact same wall again three phases later once that turn has aged out of context).
 
 ---
 
@@ -356,6 +391,7 @@ It's meant to stay small — a handful of high-value facts, not a transcript.
 | `start_background_process` | Starts a shell command (a dev/test server, anything long-running) detached, and returns a **handle** — never the raw OS pid. |
 | `list_processes`   | Lists processes *this session* started with `start_background_process` — never the whole OS process table. Use instead of `ps aux`/`ps -ef`. |
 | `stop_background_process` | Stops a process by its handle — SIGTERM to its whole process group, then SIGKILL after `timeout` (default 5s) if it's still alive. Structurally can't match and kill the wrong process, unlike `pkill`/`kill` by a guessed pid or name pattern (a real, observed failure: the shell running `execute_command` itself can share part of the pattern). |
+| `clear_finished_processes` | Prunes the bookkeeping entry for every **exited** process (never a running one, and never sends a signal) — keeps `list_processes`/the fleet dashboard's process panel from accumulating dead one-off servers over a long session. |
 
 Every failed call gets a concrete `AUTO-RECTIFY:` instruction naming the exact tool/argument to change, and after 3 identical failures JFI tells the model to abandon that approach rather than loop — the difference between "retry forever" and "fix or move on."
 

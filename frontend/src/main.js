@@ -520,9 +520,27 @@ function renderSessionTab(entries) {
   if (sessionSubTab === "checklist") {
     paintSection(
       "sd-checklist",
-      JSON.stringify([d.plan_markdown, d.task, d.task_started_at, d.task_history, d.phase]),
+      JSON.stringify([d.plan_markdown, d.task, d.task_started_at, d.task_history, d.phase, checklistPath]),
       () => renderPlanChecklist(d.plan_markdown, d.task, d.task_started_at, d.task_history, d.phase),
-      { preserveScrollSelector: ".pc-list" }
+      {
+        preserveScrollSelector: ".pc-cards-wrap",
+        afterPaint: (el) => {
+          el.querySelectorAll("[data-pc-depth]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              const depth = Number(btn.dataset.pcDepth);
+              checklistPath[depth] = btn.dataset.pcValue;
+              checklistPath.length = depth + 1;
+              render();
+            });
+          });
+          el.querySelectorAll("[data-pc-crumb]").forEach((btn) => {
+            btn.addEventListener("click", () => {
+              checklistPath.length = Number(btn.dataset.pcCrumb) + 1;
+              render();
+            });
+          });
+        },
+      }
     );
     return;
   }
@@ -659,21 +677,23 @@ function fmtDuration(seconds) {
 // exact mapping.
 const CHECKLIST_SECTION_PHASE = { "## implementation": "imp", "## testing": "testing" };
 
-// Renders plan.md's own checklist tree exactly as the planner wrote it --
-// depth comes from each leaf's OWN number's dot-count (e.g. "5.6.1" -> depth
-// 2), the same rule tool/plan_renumber.py uses, not from raw indentation
-// (which can drift from the intended nesting -- see that module's own
-// docstring for a real example this bit us on). Each item is also tagged
-// with which section (phase) it fell under: "## Implementation" and
-// "## Testing" are SEPARATELY-numbered trees, so the same number (e.g.
-// "1.1") legitimately exists in both -- current-task and timing lookups
-// below match on (phase, number) together, never number alone, or a
-// Testing leaf's timing could silently overwrite an Implementation leaf's
-// (observed while building this: two "1.1"s ended up showing the same,
-// wrong duration before phase was added to the match).
-function parsePlanChecklist(markdown) {
+// Parses EVERY bulleted line in plan.md -- both checkbox leaves ("- [ ] 1.1
+// ...") and plain parent bullets with no checkbox ("- 1. ..."). Per the
+// planner's own format rules, only leaves ever carry a checkbox; a parent
+// stays a plain bullet for its whole life -- so a parent's own label/done-
+// state has to come from aggregating its children, not from itself. Depth
+// comes from each item's OWN number's dot-count (e.g. "5.6.1" -> depth 2,
+// same rule tool/plan_renumber.py uses), not raw indentation, which can
+// drift from the intended nesting.
+function parsePlanLines(markdown) {
   if (!markdown) return [];
-  const checkboxRe = /^\s*-\s\[( |x|X)\]\s+(\S+)\s+(.*)$/;
+  // A top-level PARENT bullet is written "- 1. Description" (number, then a
+  // literal period, then the text) -- that trailing period must be dropped,
+  // not captured as part of the number, or "1." can never match as an
+  // ancestor prefix of a real leaf like "1.1.1" (observed: every single
+  // parent number came through with a trailing dot, so NOTHING nested and
+  // the whole tree flattened into dozens of bogus top-level roots).
+  const bulletRe = /^\s*-\s(?:\[( |x|X)\]\s+)?(\d+(?:\.\d+)*)\.?\s+(.*)$/;
   const items = [];
   let sectionPhase = null;
   for (const raw of markdown.split("\n")) {
@@ -682,55 +702,235 @@ function parsePlanChecklist(markdown) {
       sectionPhase = CHECKLIST_SECTION_PHASE[heading];
       continue;
     }
-    const m = raw.match(checkboxRe);
-    if (!m) continue;
+    const m = raw.match(bulletRe);
+    if (!m || !sectionPhase) continue;
     const [, mark, number, desc] = m;
     const depth = (number.match(/\./g) || []).length;
-    items.push({ done: mark.toLowerCase() === "x", number, desc: desc.trim(), depth, phase: sectionPhase });
+    items.push({
+      number, desc: desc.trim(), depth, phase: sectionPhase,
+      isLeaf: mark !== undefined, done: mark ? mark.toLowerCase() === "x" : false,
+    });
   }
   return items;
 }
 
+// Rebuilds the tree structure from parsePlanLines' flat, depth-tagged list --
+// document order already puts a parent immediately before its own children,
+// so a running "last node seen at each depth" stack is enough to attach
+// each item under its real parent, per phase ("## Implementation" and
+// "## Testing" are SEPARATELY-numbered trees, so the same number can
+// legitimately exist in both -- kept as two independent root sets).
+function buildPlanTree(markdown) {
+  const roots = {}; // phase -> { number: node }
+  const stack = []; // stack[d] = last node seen at depth d, for the CURRENT phase
+  for (const item of parsePlanLines(markdown)) {
+    if (item.phase !== stack.phase) {
+      stack.length = 0;
+      stack.phase = item.phase;
+    }
+    const node = { ...item, children: {} };
+    // Nearest ancestor already on the stack whose OWN number is a real
+    // dot-prefix of this item's number -- not just "whatever happens to
+    // sit at depth-1". A leaf numbered deeper than its nearest WRITTEN
+    // ancestor (e.g. "1.1.1" directly under a "1" bullet, with no separate
+    // "1.1" bullet ever written -- a real shape, not just malformed input)
+    // still nests correctly instead of becoming a bogus extra root that
+    // silently mixes into a shallower level's own leaf list.
+    let parent = null;
+    for (let d = item.depth - 1; d >= 0; d--) {
+      const candidate = stack[d];
+      if (candidate && item.number.startsWith(candidate.number + ".")) {
+        parent = candidate;
+        break;
+      }
+    }
+    if (parent) {
+      parent.children[item.number] = node;
+    } else {
+      (roots[item.phase] ||= {})[item.number] = node;
+    }
+    stack[item.depth] = node;
+    stack.length = item.depth + 1;
+  }
+  return roots;
+}
+
+function sortByNumber(nodes) {
+  return nodes.slice().sort((a, b) => {
+    const pa = a.number.split(".").map(Number);
+    const pb = b.number.split(".").map(Number);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const d = (pa[i] || 0) - (pb[i] || 0);
+      if (d) return d;
+    }
+    return 0;
+  });
+}
+
+// A parent's own done/total is never stored on it directly (it has no
+// checkbox) -- always the sum over its leaf descendants.
+function subtreeCounts(node) {
+  const kids = Object.values(node.children);
+  if (!kids.length) return [node.done ? 1 : 0, 1];
+  let done = 0;
+  let total = 0;
+  for (const kid of kids) {
+    const [d, t] = subtreeCounts(kid);
+    done += d;
+    total += t;
+  }
+  return [done, total];
+}
+
+// A ring meter, not a numeral: the circumference of r=15.9155 on a 36x36
+// viewBox is exactly 100 units, so a percentage can drive stroke-dasharray
+// directly with no separate scaling math.
+function ringChart(pct, label, sub, extraClass = "") {
+  const clamped = Math.max(0, Math.min(100, pct));
+  return `
+    <div class="pc-ring-card ${extraClass}">
+      <svg class="pc-ring" viewBox="0 0 36 36">
+        <circle class="pc-ring-track" cx="18" cy="18" r="15.9155" />
+        <circle class="pc-ring-fill" cx="18" cy="18" r="15.9155"
+          stroke-dasharray="${clamped} ${100 - clamped}" stroke-dashoffset="25" />
+        <text x="18" y="20.5" class="pc-ring-pct">${Math.round(clamped)}%</text>
+      </svg>
+      <div class="pc-ring-labels">
+        <div class="pc-ring-label">${esc(label)}</div>
+        <div class="pc-ring-sub">${esc(sub)}</div>
+      </div>
+    </div>
+  `;
+}
+
+function truncate(text, n) {
+  return text.length > n ? text.slice(0, n - 1).trimEnd() + "…" : text;
+}
+
+// Which drill-down level is currently selected, as a path of number
+// strings with the phase key first, e.g. ["imp", "2", "2.1"] -- module
+// state (not per-session) is fine since renderSessionTab resets it
+// whenever a different session/sub-tab is selected (see sectionCache's own
+// reset alongside it), the same lifecycle sessionSubTab itself already has.
+let checklistPath = [];
+
+function renderLeafCard(node, currentPhase, currentNumber, currentTaskStartedAt, historyByKey) {
+  const isCurrent = !node.done && currentPhase === node.phase && currentNumber && node.number === currentNumber;
+  let timing = "";
+  if (isCurrent && currentTaskStartedAt) {
+    timing = `<span class="pc-time pc-time-running">● ${fmtDuration(Date.now() / 1000 - currentTaskStartedAt)}</span>`;
+  } else {
+    const h = historyByKey[`${node.phase || ""}:${node.number}`];
+    if (h && h.started_at && h.ended_at) {
+      timing = `<span class="pc-time" title="${fmtClock(h.started_at)} → ${fmtClock(h.ended_at)}">${fmtDuration(h.ended_at - h.started_at)}</span>`;
+    }
+  }
+  return `
+    <div class="pc-card ${node.done ? "pc-done" : ""} ${isCurrent ? "pc-current" : ""}">
+      <span class="pc-status">${node.done ? "✓" : isCurrent ? "↻" : "○"}</span>
+      <span class="pc-num">${esc(node.number)}</span>
+      <span class="pc-desc">${esc(node.desc)}</span>
+      <span class="pc-time-slot">${timing}</span>
+    </div>`;
+}
+
 function renderPlanChecklist(planMarkdown, currentTask, currentTaskStartedAt, taskHistory, currentPhase) {
-  const items = parsePlanChecklist(planMarkdown);
-  if (!items.length) {
+  const tree = buildPlanTree(planMarkdown);
+  const phaseKeys = Object.keys(tree);
+  if (!phaseKeys.length) {
     return `<p class="empty-note">No plan.md checklist reported yet.</p>`;
   }
+  if (!phaseKeys.includes(checklistPath[0])) checklistPath = [phaseKeys[0]];
+
   const currentNumber = currentTask ? (currentTask.match(/^\S+/) || [""])[0] : "";
   // Most recent finished entry per (phase, leading number) -- see
-  // parsePlanChecklist's own docstring for why phase has to be part of the
-  // key, not just the number.
+  // buildPlanTree's own docstring for why phase has to be part of the key,
+  // not just the number.
   const historyByKey = {};
   for (const h of taskHistory || []) {
     const num = (h.task.match(/^\S+/) || [h.task])[0];
     historyByKey[`${h.phase || ""}:${num}`] = h;
   }
-  const done = items.filter((i) => i.done).length;
-  const rows = items
-    .map((i) => {
-      const isCurrent = !i.done && currentPhase === i.phase && currentNumber && i.number === currentNumber;
-      let timing = "";
-      if (isCurrent && currentTaskStartedAt) {
-        timing = `<span class="pc-time pc-time-running">${fmtDuration(Date.now() / 1000 - currentTaskStartedAt)}</span>`;
-      } else {
-        const h = historyByKey[`${i.phase || ""}:${i.number}`];
-        if (h && h.started_at && h.ended_at) {
-          timing = `<span class="pc-time" title="${fmtClock(h.started_at)} → ${fmtClock(h.ended_at)}">${fmtDuration(h.ended_at - h.started_at)}</span>`;
-        }
-      }
-      return `
-      <div class="pc-row ${i.done ? "pc-done" : ""} ${isCurrent ? "pc-current" : ""}" style="padding-left:${14 + i.depth * 18}px">
-        <span class="pc-box">${i.done ? "✓" : isCurrent ? "↻" : ""}</span>
-        <span class="pc-num">${esc(i.number)}</span>
-        <span class="pc-desc">${esc(i.desc)}</span>
-        ${timing}
-      </div>`;
+
+  // Dashboard strip: one ring per phase section plus an overall one,
+  // glanceable before drilling into a single leaf. A parent has no
+  // checkbox of its own, so every count here is summed over leaf
+  // descendants (subtreeCounts), never read off the parent directly.
+  const phaseCounts = {};
+  let overallDone = 0;
+  let overallTotal = 0;
+  for (const p of phaseKeys) {
+    let d = 0;
+    let t = 0;
+    for (const root of Object.values(tree[p])) {
+      const [nd, nt] = subtreeCounts(root);
+      d += nd;
+      t += nt;
+    }
+    phaseCounts[p] = [d, t];
+    overallDone += d;
+    overallTotal += t;
+  }
+  const rings =
+    ringChart((overallDone / overallTotal) * 100, "Overall", `${overallDone}/${overallTotal}`, "pc-ring-overall") +
+    phaseKeys
+      .map((p) => ringChart((phaseCounts[p][0] / phaseCounts[p][1]) * 100, PHASE_LABELS[p] || p, `${phaseCounts[p][0]}/${phaseCounts[p][1]}`))
+      .join("");
+
+  // Phase tabs -- the outermost drill-down level ("## Implementation" vs
+  // "## Testing" are separate trees, so this is where that split becomes
+  // visible/navigable instead of silently mixed into one list).
+  const phaseTabs = phaseKeys
+    .map((p) => {
+      const [d, t] = phaseCounts[p];
+      return `<button class="pc-tab ${checklistPath[0] === p ? "active" : ""}" data-pc-depth="0" data-pc-value="${esc(p)}">${esc(PHASE_LABELS[p] || p)} <span class="pc-tab-badge">${d}/${t}</span></button>`;
     })
     .join("");
+
+  // Walk the rest of the path through the tree: one tab row per level for
+  // whichever siblings are themselves branches (have children), leaf cards
+  // rendered inline for whichever siblings at that SAME level are already
+  // atomic -- a level can genuinely be a mix of both.
+  let levelMap = tree[checklistPath[0]];
+  let tabRows = "";
+  let leafCards = "";
+  let depth = 0;
+  const breadcrumb = [`<button class="pc-crumb" data-pc-crumb="0">${esc(PHASE_LABELS[checklistPath[0]] || checklistPath[0])}</button>`];
+
+  while (levelMap) {
+    const nodes = sortByNumber(Object.values(levelMap));
+    const branches = nodes.filter((n) => Object.keys(n.children).length > 0);
+    const leaves = nodes.filter((n) => Object.keys(n.children).length === 0);
+
+    if (leaves.length) {
+      leafCards += leaves.map((n) => renderLeafCard(n, currentPhase, currentNumber, currentTaskStartedAt, historyByKey)).join("");
+    }
+    if (!branches.length) break;
+
+    const selected = branches.find((n) => n.number === checklistPath[depth + 1]) || branches[0];
+    checklistPath[depth + 1] = selected.number;
+
+    tabRows += `<div class="pc-tab-row">${branches
+      .map((n) => {
+        const [d, t] = subtreeCounts(n);
+        return `<button class="pc-tab ${n.number === selected.number ? "active" : ""}" data-pc-depth="${depth + 1}" data-pc-value="${esc(n.number)}">${esc(n.number)} ${esc(truncate(n.desc, 28))} <span class="pc-tab-badge">${d}/${t}</span></button>`;
+      })
+      .join("")}</div>`;
+    breadcrumb.push(`<button class="pc-crumb" data-pc-crumb="${depth + 1}">${esc(selected.number)} ${esc(truncate(selected.desc, 20))}</button>`);
+
+    levelMap = selected.children;
+    depth += 1;
+  }
+  checklistPath.length = depth + 1; // drop any stale deeper segments from a shorter path
+
   return `
     <div class="panel">
-      <div class="panel-head"><span>Plan checklist</span><span class="n">${done}/${items.length} done</span></div>
-      <div class="panel-body pc-list">${rows}</div>
+      <div class="panel-head"><span>Plan checklist</span><span class="n">${overallDone}/${overallTotal} done</span></div>
+      <div class="panel-body pc-rings">${rings}</div>
+      <div class="pc-tab-row pc-tab-row-phase">${phaseTabs}</div>
+      <div class="pc-breadcrumb">${breadcrumb.join('<span class="pc-crumb-sep">/</span>')}</div>
+      ${tabRows}
+      <div class="pc-cards-wrap">${leafCards || '<p class="empty-note">Nothing directly under this section yet.</p>'}</div>
     </div>
   `;
 }

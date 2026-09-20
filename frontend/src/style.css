@@ -203,19 +203,57 @@ button { font-family: inherit; cursor: pointer; }
 .subtab-btn:hover { color: var(--ink-dim); }
 .subtab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 
-/* ---------- plan.md checklist ---------- */
-.pc-list { max-height: 520px; overflow-y: auto; padding: 6px 0; }
-.pc-row { display: flex; align-items: baseline; gap: 8px; padding: 4px 14px; font-size: 11.5px; }
-.pc-box { width: 14px; flex-shrink: 0; text-align: center; color: var(--ink-faint); }
+/* ---------- plan.md checklist: a ring-chart dashboard + card rows ---------- */
+.pc-rings { display: flex; gap: 22px; flex-wrap: wrap; }
+.pc-ring-card { display: flex; align-items: center; gap: 10px; }
+.pc-ring { width: 52px; height: 52px; flex-shrink: 0; transform: rotate(-90deg); }
+.pc-ring-track { fill: none; stroke: var(--line-soft); stroke-width: 3; }
+.pc-ring-fill { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; transition: stroke-dasharray 0.4s ease; }
+.pc-ring-overall .pc-ring-fill { stroke: var(--blue); }
+.pc-ring-pct {
+  transform: rotate(90deg); transform-origin: center; font-size: 8.5px; font-weight: 700;
+  fill: var(--ink); text-anchor: middle; font-family: var(--font-ui);
+}
+.pc-ring-labels { display: flex; flex-direction: column; gap: 2px; }
+.pc-ring-label { font-size: 11px; font-weight: 700; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+.pc-ring-sub { font-size: 10.5px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+
+.pc-cards-wrap { max-height: 480px; overflow-y: auto; padding: 4px 14px 14px; display: flex; flex-direction: column; gap: 4px; }
+.pc-card {
+  display: flex; align-items: baseline; gap: 10px; padding: 7px 10px;
+  background: var(--bg-raised); border: 1px solid var(--line-soft); border-left: 3px solid var(--line-soft); border-radius: 3px;
+  font-size: 11.5px;
+}
+.pc-card:hover { border-color: var(--line); }
+.pc-status { color: var(--ink-faint); flex-shrink: 0; width: 14px; text-align: center; }
 .pc-num { color: var(--ink-faint); font-variant-numeric: tabular-nums; flex-shrink: 0; }
 .pc-desc { color: var(--ink-dim); overflow-wrap: anywhere; flex: 1; }
-.pc-time { color: var(--ink-faint); font-variant-numeric: tabular-nums; font-size: 10.5px; flex-shrink: 0; white-space: nowrap; }
-.pc-time-running { color: var(--accent); }
-.pc-row.pc-done .pc-box { color: var(--accent); }
-.pc-row.pc-done .pc-num, .pc-row.pc-done .pc-desc { color: var(--ink-faint); text-decoration: line-through; text-decoration-color: var(--line); }
-.pc-row.pc-current { background: rgba(255, 95, 95, 0.06); }
-.pc-row.pc-current .pc-box { color: var(--red); }
-.pc-row.pc-current .pc-desc { color: var(--ink); font-weight: 700; }
+.pc-time-slot { flex-shrink: 0; min-width: 56px; text-align: right; }
+.pc-time { color: var(--ink-faint); font-variant-numeric: tabular-nums; font-size: 10.5px; white-space: nowrap; }
+.pc-time-running { color: var(--accent); font-weight: 700; }
+.pc-card.pc-done { border-left-color: var(--accent-dim); opacity: 0.75; }
+.pc-card.pc-done .pc-status { color: var(--accent); }
+.pc-card.pc-done .pc-num, .pc-card.pc-done .pc-desc { color: var(--ink-faint); text-decoration: line-through; text-decoration-color: var(--line); }
+.pc-card.pc-current { border-left-color: var(--red); background: rgba(255, 95, 95, 0.06); }
+.pc-card.pc-current .pc-status { color: var(--red); }
+
+.pc-tab-row { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 14px; border-top: 1px solid var(--line-soft); }
+.pc-tab-row-phase { border-top: 1px solid var(--line); }
+.pc-tab {
+  display: flex; align-items: center; gap: 6px; font-family: var(--font-ui); font-size: 11px;
+  padding: 6px 10px; border: 1px solid var(--line); background: var(--bg-raised); color: var(--ink-dim);
+  border-radius: 3px; white-space: nowrap;
+}
+.pc-tab:hover { border-color: var(--accent); color: var(--accent); }
+.pc-tab.active { border-color: var(--accent); color: var(--ink); background: color-mix(in oklab, var(--accent) 14%, var(--bg-raised)); }
+.pc-tab-badge { color: var(--ink-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+.pc-tab.active .pc-tab-badge { color: var(--accent); }
+
+.pc-breadcrumb { display: flex; align-items: center; gap: 6px; padding: 8px 14px; font-size: 10.5px; flex-wrap: wrap; }
+.pc-crumb { font-family: var(--font-ui); color: var(--ink-faint); background: none; border: none; padding: 0; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; }
+.pc-crumb:hover { color: var(--accent); }
+.pc-crumb-sep { color: var(--ink-faint); }
+.pc-card.pc-current .pc-desc { color: var(--ink); font-weight: 700; }
 
 /* ---------- tasks-vs-tokens heatmap ---------- */
 .heat-group { margin-bottom: 14px; }

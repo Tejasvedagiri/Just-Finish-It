@@ -144,6 +144,15 @@ class TestGetSystemMessagePlannerStages:
         msg = get_system_message("planner", planner_stage="function_breakdown")
         assert "collect_news" in msg  # the worked example naming a real signature
 
+    def test_function_breakdown_uses_context_cache_instead_of_rereading_files(self):
+        """Observed in practice: this pass was re-reading full source files for
+        every leaf instead of checking/recording what it already learned --
+        it must be told to context_lookup first and context_save what it finds."""
+        msg = get_system_message("planner", planner_stage="function_breakdown")
+        assert "context_lookup" in msg
+        assert "context_save" in msg
+        assert "instead of re-reading" in msg or "instead of re-reading it from scratch" in msg
+
     def test_journeyman_forbids_single_child_parents(self):
         """Observed in practice: a parent split into exactly ONE child is
         pointless nesting, not a real decomposition — Journeyman must

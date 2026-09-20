@@ -28,12 +28,18 @@ web = ["streamlit>=1.38"]
 # separate Node project (frontend/, `npm run master`), not Python -- see
 # "Fleet dashboard" in README.
 master = ["websockets>=13"]
+# Only needed for LLM_BACKEND=anthropic (see src/JFI/llm/anthropic_stream.py
+# and backend_select.py) -- everything else (the default OpenAI-compatible
+# path, which already covers Ollama/llama.cpp/vLLM/LM Studio) needs no
+# extra dependency at all.
+anthropic = ["anthropic>=0.40"]
 
 [project.scripts]
 jfi = "JFI.runner:main"
 JFI = "JFI.runner:main"
 jfi-web = "JFI.web.launcher:main"
 build = "build_binary:main"
+create-env = "JFI.create_env:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/JFI", "src/build_binary"]

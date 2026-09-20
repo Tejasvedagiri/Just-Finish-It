@@ -17,7 +17,8 @@ from dotenv import find_dotenv, load_dotenv
 from openai import APIConnectionError, APIStatusError
 
 # LLM and Console Management
-from JFI.llm.openai_compatable_stream import OpenAICompatableStream
+from JFI.llm.backend_select import make_llm_stream
+from JFI.llm.base_llm_stream import BaseLLMStream
 from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
 from JFI.manager.web_bridge import WebBridge
@@ -487,7 +488,7 @@ def _read_plan_markdown(ssm: SessionManager) -> str:
         return ""
 
 
-def _run_product_owner_loop(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
+def _run_product_owner_loop(console: AbstractManager, llms: Dict[str, BaseLLMStream],
                              ssm: SessionManager, initial_goal: str) -> bool:
     """
     The planner<->product_owner cycle: a SEPARATE, tighter loop from the
@@ -992,7 +993,7 @@ PLANNER_STAGES = [
 PLANNER_SINGLE_PASS_STAGE_TAG = "Task"
 
 
-def _drive_turn_loop(console: AbstractManager, llm: OpenAICompatableStream, ssm: SessionManager,
+def _drive_turn_loop(console: AbstractManager, llm: BaseLLMStream, ssm: SessionManager,
                      phase: str, completion_keyword: str, failures: Dict[tuple, int]) -> bool:
     """
     Runs turns for one phase (or, for the tiered planner, one STAGE within
@@ -1221,7 +1222,7 @@ def _drive_turn_loop(console: AbstractManager, llm: OpenAICompatableStream, ssm:
     return False
 
 
-def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream], ssm: SessionManager,
+def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: SessionManager,
               phase: str) -> bool:
     """
     Drives one phase to completion. Returns False if the run should stop early
@@ -1284,7 +1285,7 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
     return True
 
 
-def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStream]) -> None:
+def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> None:
     """
     Runs exactly one session end-to-end: gather its name/goal, then drive
     planner -> imp -> testing -> reviewer -> cleanup, looping on failed
@@ -1439,7 +1440,7 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
         ssm.release_session_lock()
 
 
-def run_pipeline(console: AbstractManager, llms: Dict[str, OpenAICompatableStream]) -> None:
+def run_pipeline(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> None:
     console.set_status(phases=PHASES, state="waiting")
     console.display_rule("Just Finish It — Generic Autonomous Mode 🤖")
     console.display_system(
@@ -1512,11 +1513,14 @@ def main():
 
     console = PromptToolkitConsoleManager()
     # One stream per phase (see PHASE_ENV_PREFIX) — each falls back to the
-    # shared MODEL/OPENAI_URL/OPENAI_API_KEY/TEMPERATURE when that phase has
-    # no .env override, so this is one shared connection in the common case
-    # and up to four independent ones when a user has configured per-phase
-    # models/endpoints.
-    llms = {phase: OpenAICompatableStream(prefix) for phase, prefix in PHASE_ENV_PREFIX.items()}
+    # shared MODEL/OPENAI_URL/OPENAI_API_KEY/TEMPERATURE/LLM_BACKEND when
+    # that phase has no .env override, so this is one shared connection in
+    # the common case and up to six independent ones (even across
+    # different BACKENDS — e.g. REVIEWER_LLM_BACKEND=anthropic while every
+    # other phase stays on a local OpenAI-compatible server) when a user
+    # has configured per-phase overrides. See llm/backend_select.py for
+    # which backend LLM_BACKEND picks.
+    llms = {phase: make_llm_stream(prefix) for phase, prefix in PHASE_ENV_PREFIX.items()}
 
     try:
         # The console owns the terminal and runs the pipeline on a worker

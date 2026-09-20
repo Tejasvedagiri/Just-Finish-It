@@ -44,19 +44,32 @@ const MIME = {
 
 function staticResponse(reqPath) {
   if (!fs.existsSync(FRONTEND_DIST)) {
-    return { status: 200, contentType: "text/plain", body: Buffer.from(
+    return { status: 200, contentType: "text/plain", cacheControl: "no-store", body: Buffer.from(
       "jfi-master is running, but the frontend hasn't been built yet.\n" +
       "cd frontend && npm install && npm run build"
     ) };
   }
   const rel = path.normalize(reqPath).replace(/^(\.\.[/\\])+/, "").replace(/^\/+/, "") || "index.html";
   let candidate = path.resolve(FRONTEND_DIST, rel);
+  let isFallback = false;
   if (!candidate.startsWith(path.resolve(FRONTEND_DIST)) || !fs.existsSync(candidate) || fs.statSync(candidate).isDirectory()) {
     candidate = path.join(FRONTEND_DIST, "index.html"); // SPA fallback
+    isFallback = true;
   }
   const body = fs.readFileSync(candidate);
   const contentType = MIME[path.extname(candidate)] || "application/octet-stream";
-  return { status: 200, contentType, body };
+  // index.html itself (served directly or as the SPA fallback) has NO
+  // content hash in its own filename, so it must always be revalidated --
+  // every previous rebuild otherwise stayed invisible until a hard reload,
+  // since a plain `res.writeHead` with no Cache-Control at all lets the
+  // browser apply its own heuristic caching (observed in practice: a
+  // rebuilt dashboard silently kept serving an old bundle for tens of
+  // minutes). Vite's OWN asset files under /assets/ are safe to cache
+  // aggressively -- their filename already changes whenever their content
+  // does, so a cached copy of one hash is never stale, just eventually unused.
+  const isIndexHtml = isFallback || path.basename(candidate) === "index.html";
+  const cacheControl = isIndexHtml ? "no-cache" : "public, max-age=31536000, immutable";
+  return { status: 200, contentType, cacheControl, body };
 }
 
 const registry = new SessionRegistry();
@@ -148,8 +161,12 @@ function handleView(ws) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const { status, contentType, body } = staticResponse(url.pathname);
-  res.writeHead(status, { "Content-Type": contentType, "Content-Length": body.length });
+  const { status, contentType, cacheControl, body } = staticResponse(url.pathname);
+  res.writeHead(status, {
+    "Content-Type": contentType,
+    "Content-Length": body.length,
+    "Cache-Control": cacheControl || "no-cache",
+  });
   res.end(body);
 });
 

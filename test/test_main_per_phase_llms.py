@@ -1,13 +1,15 @@
 """End-to-end coverage for runner.main()'s per-phase LLM construction:
 
-    llms = {phase: OpenAICompatableStream(prefix) for phase, prefix in PHASE_ENV_PREFIX.items()}
+    llms = {phase: make_llm_stream(prefix) for phase, prefix in PHASE_ENV_PREFIX.items()}
 
 phase_env() itself (the {PREFIX}_{KEY}-with-fallback resolution) is unit-
 tested elsewhere, but nothing previously exercised main() actually wiring
-PHASE_ENV_PREFIX through to one real OpenAICompatableStream per phase --
-this pins that a phase with its own .env override gets its own model/
-endpoint, and a phase without one falls back to the shared default,
-through the real construction path.
+PHASE_ENV_PREFIX through to one real stream per phase (the default,
+LLM_BACKEND unset, OpenAICompatableStream path -- see
+llm/backend_select.py for the other backends) -- this pins that a phase
+with its own .env override gets its own model/endpoint, and a phase
+without one falls back to the shared default, through the real
+construction path.
 """
 
 
