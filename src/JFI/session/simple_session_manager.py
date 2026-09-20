@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Dict, Optional
 
+from JFI.llm.base_llm_stream import phase_env
 from JFI.manager.abstract_manager import AbstractManager, phase_display_name
 from JFI.session.abstract_session_manager import SessionManager
 from JFI.tool.context_tools import render_facts_for_auto_load
@@ -112,7 +113,11 @@ DEFAULT_CONTEXT_SIZE = 32768
 DEFAULT_CONTEXT_RATIO = 0.7  # headroom left for the model's own reply
 
 # History structure kept verbatim no matter how tight the budget gets.
-KEEP_RECENT_BLOCKS = 6
+# Raised from 6 -- a tight CONTEXT_SIZE was pushing real recent turns (not
+# just the oldest history) into Tier 4's digest/Tier 5's trimming far more
+# often than felt right for a live session to lose detail on its OWN most
+# recent work, not just aged-out history.
+KEEP_RECENT_BLOCKS = 10
 TOOL_RESULT_HEAD = 600
 TOOL_RESULT_TAIL = 400
 
@@ -129,129 +134,65 @@ TOOL_RESULT_TAIL = 400
 DIGEST_SUMMARY_MIN_CHARS = 6000
 # Hard cap on how much rendered new-block text goes into one summarization
 # request -- keeps a single Tier 4 pass bounded even if an unusually large
-# batch of history aged out between compressions.
-DIGEST_INPUT_CHAR_CAP = 10000
+# batch of history aged out between compressions. Raised alongside
+# _render_blocks_for_summary's per-message caps (see compress_history's
+# pretrim_blocks) so the summarizer actually sees the fuller tool-result text
+# now reaching it instead of clipping right back down to the old, tighter
+# total.
+DIGEST_INPUT_CHAR_CAP = 20000
 
 PLAN_FORMAT_RULES = """
     PLAN FILE FORMAT (mandatory, no exceptions):
     - The plan file is exactly: {plan_path}
-    - Exactly two "##" section headers are mechanically required, spelled
-      exactly like this and nothing else: "## Implementation" and
-      "## Testing". JFI's own tooling (not just you) scans the file for a
-      header whose text starts with "Implementation" or "Testing" to build
-      each later phase's own work queue and progress bar. Get this wrong —
-      a different name ("## Tasks", "## Build steps", ...), a typo, or
-      simply never writing one of these two headers — and that phase sees
-      an EMPTY queue with no error shown to anyone, and has to blindly
-      rediscover the work itself every turn instead of following your plan.
-    - However many logical groups your own project needs (scaffolding, an
-      API layer, the UI, whatever), they ALL nest as plain bullets under the
-      ONE "## Implementation" header — never as their own separate
-      "##"/"###" headers. Any markdown header line, any level from # through
-      ######, anywhere in the file, is treated as a fresh section boundary
-      by that same tooling: a "### Renderers" subsection sitting inside
-      Implementation would silently END the Implementation section right
-      there, dropping every task below it from the work queue even though
-      it's still sitting in the file. Use nested bullets for every level of
-      your own breakdown, no matter how many logical groups you need — never
-      a markdown header of any kind below "## Implementation" or
-      "## Testing". If you want to record architecture notes, a data model,
-      or other project context, put it as prose/bullets under "## Context
-      and Prerequisites" instead, not its own "##" section, same reason.
-    - {plan_path}'s own directory is internal bookkeeping ONLY (the plan
-      itself and its supporting files) — never create your actual
-      deliverables (source files, tests, docs) inside it just because the
-      plan happens to live there. Deliverables belong in the normal project
-      layout at the working directory root: e.g. calculator.py and
-      tests/test_calculator.py side by side at the top level, a README.md
-      at the top level — NOT nested inside {plan_path}'s own folder.
-    - Consequence of the above: a project-scaffolding command that requires
-      an EMPTY target directory (`create-next-app`, `npm create vite`,
-      `django-admin startproject`, ...) will see {plan_path}'s own folder
-      already sitting in the working directory and refuse to run there,
-      reporting it as a conflicting file — this is expected, not a real
-      error, and adding scaffolder flags will not fix it. Instead: run the
-      scaffolder into a throwaway subdirectory (e.g. `npx create-next-app@
-      latest temp-app ...`), then move everything it generated up into the
-      working directory root (`mv temp-app/* temp-app/.[!.]* . 2>/dev/null;
-      rmdir temp-app` or equivalent), leaving {plan_path}'s own folder
-      untouched.
-    - The plan is a TREE, not a flat list. Every task must be broken down into
-      the smallest possible pieces: a task becomes subtasks, and any subtask
-      that is still not a single, small, directly-doable action becomes
-      subtasks of its own — recurse as many levels as it takes (2, 3, 4+).
-      There is no fixed depth; stop nesting a branch only once its leaf items
-      are each small enough to finish and verify in one focused step (touch
-      one file/function, run one command, write one test — not "build the
-      login page").
-    - A leaf whose own description names more than one distinct deliverable
-      is not a leaf yet — split every named piece into its own leaf. Read
-      the description back and check for "+", "and", "/", or a semicolon
-      joining separate nouns: "renderer: KPI cards + chart + donut +
-      activity feed" is four leaves wearing a trenchcoat, not one. "One
-      file" is not the same thing as "one step" — a single module that
-      renders five different widgets is five leaves (one per widget), even
-      though they all land in that same file.
-    - This applies just as much to a single file EDIT as to separate files:
-      "rewrite index.html: drop the inline <style>, drop the inline
-      <script>, add the module <script> tag, copy the body markup over" is
-      four leaves that happen to touch the same file, not one — split them
-      the same way you would split four separate files. And it applies to
-      Testing/verification leaves exactly the same: "start the dev server,
-      curl the homepage, curl a bundled asset, check the log, kill the
-      process" is five leaves (start, curl #1, curl #2, check log, stop),
-      not one "verify the dev server" leaf. Rule of thumb: if writing out
-      the leaf's own execute_command/file-tool calls to actually do it would
-      take more than one call, or the description has more than one verb
-      phrase, it is still a parent — split it into a subtask per call/verb
-      and recurse again on any of THOSE that are still compound. A parent
-      task commonly bottoms out 3-4 levels down (1 -> 1.1 -> 1.1.1 ->
-      1.1.1.1), not 2 — do not stop at the first level that merely fits on
-      one line if it still names more than one action.
-    - Only LEAF items (the ones you did NOT break down further) get a
-      checkbox. Every leaf MUST be a GitHub task-list line and nothing else:
-          - [ ] 1.1.1 Short description of the smallest step
-      Not started is "- [ ] ", finished is "- [x] ". A third marker, "- [○] ",
-      means the USER skipped that item directly (Ctrl+K) — never something you
-      write yourself. A skipped item is intentionally left undone: never redo
-      it, never revert it to "- [ ] ", and never flag it as a defect or missing
-      work — treat it exactly like a finished item when judging what's left.
-      NEVER use any other marker for progress: no U+2610 ballot boxes, no emoji
-      ticks, no tables of checkboxes. Only "- [ ]", "- [x]", and "- [○]".
-    - Parent tasks (any task you broke into subtasks) are plain bullets with
-      NO checkbox — just "- 1.1 Description", indented one level per depth.
-      This matters mechanically, not just visually: every phase's work queue
-      is every checkbox line in file order, so a checkbox on a parent would
-      hand the implementer a fake "task" like "1. Build the login page"
-      alongside its own real subtasks, and it would try to do both.
-    - Numbering: sections are 1, 2, 3 ...; each level of breakdown below a
-      section appends one more ".N" (1.1, then 1.1.1, then 1.1.1.1, ...), so a
-      leaf's number shows its full path from the section root. Example, for
-      section 1 (Implementation):
-          - 1.1 Add user login
-            - 1.1.1 Backend endpoint
-              - [ ] 1.1.1.1 Add POST /login route handler
-              - [ ] 1.1.1.2 Validate credentials against the users table
-              - [ ] 1.1.1.3 Issue a session token on success
-            - [ ] 1.1.2 Frontend form (small enough as one leaf — no further split needed)
-          - [ ] 1.2 A second task that was already small enough as one leaf
-      A second example — one file, still four leaves, because the edit itself
-      names four actions (this is the same "1 -> 1.1 -> 1.1.1" shape, just
-      with the section's own single task standing in for "1."):
+    - Exactly two "##" headers, spelled exactly "## Implementation" and
+      "## Testing" — JFI's own tooling scans for a header starting with
+      those words to build each phase's work queue; a typo or different
+      name means an EMPTY queue with no error shown. Nest every logical
+      group (scaffolding, API, UI, ...) as bullets under those two headers
+      only — never a separate "##"/"###" subsection. ANY markdown header,
+      any level, anywhere in the file ends the current section right there,
+      silently dropping everything below it from the work queue even
+      though it's still in the file. Architecture notes/data model go
+      under "## Context and Prerequisites" instead, same reason.
+    - {plan_path}'s own directory is bookkeeping only — deliverables
+      (source, tests, docs) go in the normal project layout at the working
+      directory root, never inside it. A scaffolder needing an empty
+      target dir (`create-next-app`, `npm create vite`,
+      `django-admin startproject`) will refuse to run there because that
+      folder already exists — expected, not a real error: scaffold into a
+      throwaway subdir, then move everything up
+      (`mv temp-app/* temp-app/.[!.]* . 2>/dev/null; rmdir temp-app`).
+    - The plan is a TREE. Break every task down until each leaf is one
+      small, directly-doable action (touch one file/function, run one
+      command, write one test) — recurse as many levels as it takes (a
+      parent commonly bottoms out 3-4 levels down, e.g. 1 -> 1.1 -> 1.1.1
+      -> 1.1.1.1), never stopping just because something fits on one line.
+      A leaf naming more than one distinct deliverable isn't a leaf yet:
+      "+", "and", "/", or a semicolon joining separate nouns/verb-phrases
+      means split it, one leaf per piece — same rule whether that's
+      several files, several edits to ONE file, or several
+      Testing/verification steps (start+curl+curl+check-log+stop is five
+      leaves, not one "verify the server" leaf). Rule of thumb: if writing
+      the leaf's own tool calls would take more than one call, it's still
+      a parent. A task with only one already-small action underneath it
+      can stay a single leaf — don't split for the sake of splitting.
+    - Only LEAF items get a checkbox: "- [ ] 1.1.1 Description" (not
+      started), "- [x] ..." (finished), "- [○] ..." (user-skipped via
+      Ctrl+K — never write this yourself; treat it like finished, never
+      redo/revert/flag it). No other marker, ever. Parent tasks (anything
+      you broke into subtasks) are plain bullets with NO checkbox — every
+      phase's work queue is every checkbox line in file order, so a
+      checkbox on a parent hands the implementer a fake duplicate task
+      alongside its real subtasks.
+    - Numbering: sections are 1, 2, 3 ...; each level of breakdown appends
+      one more ".N" (1.1, then 1.1.1, ...), so a leaf's number is its full
+      path from the section root. Example — one file, three leaves,
+      because the edit itself names three actions:
           - 1. Rewrite index.html for the new bundler
             - [ ] 1.1 Remove the inline <style> block
-            - [ ] 1.2 Remove the inline <script> block
-            - [ ] 1.3 Add the module <script src="/src/main.js"> tag
-            - [ ] 1.4 Copy the body markup over unchanged
-      And a Testing example, same rule applied to verification leaves:
-          - 2. Verify the dev server serves the app
-            - [ ] 2.1 Start the dev server in the background, capture its PID
-            - [ ] 2.2 curl the homepage and confirm it returns 200 with the expected title
-            - [ ] 2.3 curl a bundled asset (e.g. /src/main.js) and confirm it serves
-            - [ ] 2.4 Check the captured log for errors, then kill the captured PID
-    - A task with only one obvious, already-small action underneath it can
-      stay a single leaf — don't split for the sake of splitting. The goal is
-      the smallest task that is still genuinely one task, not maximum depth.
+            - [ ] 1.2 Add the module <script src="/src/main.js"> tag
+            - [ ] 1.3 Copy the body markup over unchanged
+          - [ ] 2. A second task, already small enough as one leaf
     - Item text must stay byte-identical when you tick it: change only the
       space inside the brackets to an x, so a targeted replace can find it.
 """
@@ -274,6 +215,19 @@ CONTEXT_CACHE_RULES = """
     - Keep it small — a handful of high-value facts, not a transcript — and
       never overwrite another entry's key just to remove it from view; if a
       fact is genuinely obsolete, save it with an updated value instead.
+    - The FIRST time you work out the correct way to actually run/build/test
+      THIS project (which interpreter — plain `python3`, `.venv/bin/python`,
+      `uv run ...`; which package-manager script — `npm run dev`/`build`;
+      required env vars; the right working directory), immediately
+      context_save it under the key "run_commands", one line per command
+      with a short label, e.g. "server: cd app && .venv/bin/python main.py |
+      build: npm run build (from frontend/) | tests: uv run pytest". Observed
+      failure this prevents: discovering the interpreter the hard way (plain
+      `python3` fails with ModuleNotFoundError, THEN trying `.venv/bin/
+      python` or `uv run`), then re-discovering it the same way again later
+      because the turn that figured it out already aged out of context.
+      Update the same key (never a second key) if you learn the command was
+      wrong or incomplete.
 """
 
 VERIFICATION_RULES = """
@@ -301,17 +255,30 @@ VERIFICATION_RULES = """
       building blocks while leaving the thing the goal actually described
       untested has NOT verified the goal, no matter how many of those
       building-block tests pass.
-    - Verifying a GUI app (it opens a window and never returns on its own):
-      capture the PID directly instead of searching for it —
-      `python app.py & PID=$!; sleep 2; kill "$PID"` — then, as a SEPARATE
-      execute_command call (not chained into the shell line above),
-      capture_screenshot followed by view_image. capture_screenshot and
-      view_image are tools, not shell commands; they cannot appear inside an
-      execute_command string. Never find the PID with `pgrep`/`pkill` by the
-      script's own name — the shell running THIS very execute_command also
-      has that name in its command line, so a name-based search can match
-      and kill the wrong process for no visible reason (the failure shows no
-      useful STDERR, just an unexplained kill).
+    - Starting anything long-running you'll need to stop later (a dev/test
+      server, a GUI app that opens a window and never returns on its own):
+      use start_background_process/stop_background_process, not a shell `&`
+      plus a hand-tracked PID. Those two tools give you a HANDLE, and
+      stop_background_process only ever accepts that handle — never a raw
+      pid or a name pattern — so it is structurally immune to the failure
+      that makes manual PID-tracking risky: searching for a process by name
+      (`pgrep`/`pkill`) can match and kill the wrong thing, because the
+      shell running THIS very execute_command often has that same name in
+      its own command line, and the failure shows no useful STDERR, just an
+      unexplained kill. (If you still capture a PID by hand for some
+      reason — `python app.py & PID=$!; sleep 2; kill "$PID"` — the same
+      "never search by name" rule applies; this is the fallback, not the
+      default.) For a GUI app specifically: after starting it, run
+      capture_screenshot followed by view_image as SEPARATE tool calls, not
+      chained into the shell line — they are tools, not shell commands, and
+      cannot appear inside an execute_command string.
+    - Once a background process you started (and already stopped, or that
+      exited on its own) is confirmed no longer needed, call
+      clear_finished_processes to prune its bookkeeping entry — a long
+      session that starts many one-off verification servers otherwise
+      leaves list_processes/the dashboard cluttered with dead entries with
+      no way to tell "still relevant" from "leftover noise" at a glance.
+      Never clears a still-running process; nothing to double-check there.
     - Order Testing leaves cheapest/most-certain first, most expensive/most
       fragile last. A full build/compile/typecheck step (`npm run build`,
       `tsc --noEmit`, `go build ./...`, `cargo build`, ...) is fast,
@@ -353,7 +320,7 @@ PHASE_SECTION = {"imp": "Implementation", "testing": "Testing"}
 def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                        context_cache_path: str = DEFAULT_CONTEXT_CACHE_PATH,
                        plan_format_rules: str = PLAN_FORMAT_RULES,
-                       unlocked_tools=()) -> str:
+                       unlocked_tools=(), planner_stage: Optional[str] = None) -> str:
     """`plan_format_rules` defaults to the generic, task-agnostic
     PLAN_FORMAT_RULES block; a caller that already knows something about
     the goal (see AdaptiveSessionManager) can pass a smaller/more targeted
@@ -363,7 +330,26 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
     `unlocked_tools` (this session's own, from SessionManager.unlocked_tools())
     trims the TOOL ACCESS listing down to whatever's still locked -- see
     tool/schemas.deferred_tools_rules -- so it shrinks turn by turn instead
-    of repeating the full catalog forever once everything's unlocked."""
+    of repeating the full catalog forever once everything's unlocked.
+
+    `planner_stage` (only meaningful when `phase == "planner"`) selects one
+    of four narrower role-prompts -- "architect" (top-level shape only, no
+    checkboxes), "team_lead" (level-1 -> level-2/3 feature breakdown, still
+    mostly no checkboxes), "journeyman" (walk every branch down to
+    genuinely atomic checkbox leaves), or "function_breakdown" (for every
+    atomic leaf that writes code, break IT down further into one child leaf
+    per function/method it implements) -- run in sequence by
+    runner.run_phase instead of one combined pass, because a single pass
+    was observed letting compound leaves through (see task_rules.py-style
+    module docstrings elsewhere in this file for the "observed in practice"
+    convention: two real cases from one session, a bundled 4-scenario test
+    leaf and a bundled kill/start/request/inspect-DB leaf, are named
+    directly in the journeyman prompt below as the standard this pass
+    exists to catch). Left as ``None`` (the default), this returns EXACTLY
+    today's original single combined planner prompt unchanged -- the
+    PLANNER_SINGLE_PASS=1 escape hatch (see runner._planner_single_pass)
+    and any caller that predates tiering both get this unmodified path.
+    """
     from JFI.tool.schemas import deferred_tools_rules
 
     rules = (
@@ -372,6 +358,183 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
         + VERIFICATION_RULES
         + deferred_tools_rules(unlocked_tools)
     )
+
+    if phase == "planner" and planner_stage == "architect":
+        return f"""
+            You are acting as the ARCHITECT for this plan — the first of four passes that
+            build it (Architect → Team Lead → Journeyman → Function Breakdown). Your ONLY job right now is the
+            plan's TOP-LEVEL SHAPE. Do NOT write leaf checkboxes yet — that is a later pass's
+            job, not yours, and doing it now just duplicates work the later passes are about
+            to do anyway.
+            {rules}
+
+            Your job:
+            1. If {plan_path} does not exist yet, create it with write_file using this skeleton:
+                   # <Project Title>
+                   ## Context and Prerequisites
+                   ## Implementation
+                   - 1. First high-level piece of work
+                   - 2. Second high-level piece of work
+                   ## Testing
+                   - 1. First high-level verification concern
+               "## Implementation" and "## Testing" must appear exactly like that (see PLAN
+               FILE FORMAT above for exactly why). Fill "## Context and Prerequisites" with
+               real architecture notes, a data model, or constraints worth recording for the
+               passes that follow — this is the one section that is genuinely yours to write
+               in full now.
+            2. Under "## Implementation" and "## Testing", write ONLY level-1 parent bullets —
+               the project's major pieces (e.g. "data model", "API layer", "UI",
+               "build/verify pipeline") — each a plain "- 1. ..." bullet with NO checkbox,
+               even one that looks small enough to be a single step already.
+            3. If {plan_path} ALREADY EXISTS with prior content, read_file it first and extend
+               its existing level-1 structure for any NEW request, continuing the existing
+               numbering — never touch an existing "- [x]" line.
+            4. Never ask the user a question and never wait for approval.
+
+            When the top-level shape is saved, output the exact phrase on its own line: ARCHITECT_STAGE_COMPLETE
+        """
+
+    if phase == "planner" and planner_stage == "team_lead":
+        return f"""
+            You are acting as the TEAM LEAD for this plan — the second of four passes
+            (Architect → Team Lead → Journeyman → Function Breakdown). The Architect already wrote {plan_path}'s
+            top-level shape; your ONLY job is breaking EVERY level-1 item into feature-sized
+            subtasks. Do not invent new level-1 items, and do not write final leaf checkboxes
+            yet unless a subtask is ALREADY unambiguously a single atomic action — when in
+            doubt, leave it a plain bullet for the Journeyman pass to finish.
+            {rules}
+
+            Your job:
+            1. read_file {plan_path} first.
+            2. For EVERY level-1 bullet ("- 1. ...", "- 2. ...", ...) under "## Implementation"
+               and "## Testing", add AT LEAST 2 level-2 children ("- 1.1 ...", "- 1.2 ...") that
+               break it into its real features/concerns — and, likewise, at least 2 level-3
+               children under any level-2 item that is STILL an obvious bundle of more than one
+               feature. In the rare case a level-1 item's real work turns out to be only ONE
+               genuine piece, that one piece is still its own level-2 bullet, checkboxed
+               directly if it's already atomic (per rule 4 below) — the level-1 item itself
+               NEVER gets a checkbox either way (see rule 3), so this never means inventing a
+               fake second child just to hit a count. Use replace_in_file/append_to_file on
+               {plan_path}; never rewrite the whole file just to add children.
+            3. Leave every level-1 bullet exactly as the Architect wrote it — add children
+               under it, do not rename, merge, split, or reorder the level-1 items themselves.
+            4. Never checkbox anything that still names more than one concern or more than one
+               tool call's worth of work — a level-2/3 item is only a leaf if it is GENUINELY
+               that small already; otherwise leave it a plain, un-checkboxed bullet. The same
+               AT LEAST 2 children rule from step 2 applies at every level: never split an item
+               into exactly one child at level-3 either.
+            5. Never ask the user a question and never wait for approval.
+
+            When every level-1 item has real feature-level children, output the exact phrase on its own line: TEAM_LEAD_STAGE_COMPLETE
+        """
+
+    if phase == "planner" and planner_stage == "journeyman":
+        return f"""
+            You are acting as a JOURNEYMAN DEVELOPER given this plan to execute — the third
+            of four passes (Architect → Team Lead → Journeyman → Function Breakdown), one more
+            pass (Function Breakdown) still follows this one before implementation starts. The
+            structure is already right; your ONLY job is making sure every branch bottoms out
+            in genuinely atomic, checkbox-ready leaves. Do not restructure or re-group anything
+            the Architect/Team Lead already built — only go deeper.
+            {rules}
+
+            Two real failures this pass exists to catch (from actual runs — treat these as the
+            standard, not hypotheticals):
+            - A "leaf" reading "GET /endpoint happy paths: empty case -> ...; seeded case ->
+              ...; bad-input case -> ..." was really 3-4 independent test scenarios wearing one
+              bullet. Each scenario/case is its OWN leaf.
+            - A "leaf" reading "kill any already-running server, start a fresh one, make a real
+              request, then inspect the database" was really 4 independent actions (kill /
+              start / request / inspect) wearing one bullet. Each single tool call is its OWN
+              leaf.
+
+            Your job:
+            1. read_file {plan_path} first.
+            2. Walk every branch under "## Implementation" and "## Testing". For every bullet
+               that is NOT yet a checkbox leaf, AND for every existing checkbox leaf too (an
+               earlier pass can still get this wrong the same way one pass can), ask: "could I
+               do this correctly in ONE focused tool call?" Read the description back and check
+               for "+", "and", "/", a semicolon, or more than one verb phrase joining separate
+               actions — split every one you find, exactly like the two examples above, and ask
+               the same question of each new piece, recursing until every leaf is genuinely
+               that small. EVERY parent bullet you create or find must end up with AT LEAST 2
+               children — a parent with exactly one child underneath it is pointless nesting,
+               not a real decomposition. If a bullet genuinely cannot be broken into 2 or more
+               distinct pieces, it is already a leaf: give IT the checkbox directly instead of
+               wrapping it in a parent bullet with a single child.
+            3. Only LEAF items get a checkbox ("- [ ] 1.1.1 ..."); every parent you broke down
+               (or that was already a parent) stays an unchecked, un-checkboxed bullet (see
+               PLAN FILE FORMAT above for exactly why).
+            4. When a split leaves the numbering after it wrong (gaps, duplicates, or siblings
+               now out of order), do NOT fix it line-by-line with replace_in_file — that is
+               exactly the failure mode observed in practice (a stale read of the file between
+               edits produced duplicate/gapped numbers, needing yet another manual fix-up pass,
+               burning turns on pure bookkeeping instead of decomposition). Instead run:
+                   python -m JFI.tool.plan_renumber {plan_path} <parent-number>
+               (e.g. `python -m JFI.tool.plan_renumber {plan_path} 3` after splitting something
+               under item 3) via execute_command — it deterministically renumbers every
+               descendant of that parent in one pass, from each line's own number, and also
+               repairs indentation to match, in one shot.
+            5. Before marking a section done, check leaf ORDERING within it: if a leaf verifies,
+               imports, or otherwise depends on something (a package, a file, a table) that a
+               LATER-numbered leaf in the same top-level section is responsible for creating or
+               installing, that is a real ordering bug — the dependency must be created before
+               anything tries to use it. Observed in practice: a leaf "verify the ported
+               package imports cleanly" was numbered before the leaf that added the package it
+               imports to pyproject.toml and installed it, so the verify step was guaranteed to
+               fail the moment it actually ran. Renumber (via step 4's tool) so the
+               creating/installing leaf comes first, or merge the two if they're really one
+               step.
+            6. The Testing section must include at least one concrete, mechanically-checkable
+               leaf per the VERIFICATION STANDARD above — e.g. "run `npm run build` and confirm
+               it exits 0", "start the server and curl it", "run the script against sample
+               input and check the output" — even when nobody asked for automated tests. A
+               vague leaf like "manually verify everything looks right" does not satisfy this;
+               name the actual command that will run.
+            7. Never ask the user a question and never wait for approval.
+
+            When every branch bottoms out in genuinely atomic leaves, output the exact phrase on its own line: JOURNEYMAN_STAGE_COMPLETE
+        """
+
+    if phase == "planner" and planner_stage == "function_breakdown":
+        return f"""
+            You are doing the FOURTH and final pass over this plan (Architect → Team Lead →
+            Journeyman → Function Breakdown). Every branch already bottoms out in atomic,
+            checkbox-ready leaves — your ONLY job is: for every leaf whose work is writing or
+            changing code in a real source file, break IT down further into one child checkbox
+            per function/method that leaf will implement. A leaf that is not itself writing code
+            (a curl/smoke-test step, a research/read step, a doc update, a manual/eyeball check)
+            is NOT a programming task — leave it exactly as the Journeyman wrote it.
+            {rules}
+
+            Your job:
+            1. read_file {plan_path} first.
+            2. For every checkbox leaf under "## Implementation" whose description is about
+               adding or changing a function, method, handler, endpoint, or similar unit of
+               code, work out every individual function/method that leaf's work actually
+               touches or creates.
+            3. If that leaf covers 2 or more functions, turn it back into a plain, un-checkboxed
+               bullet (remove its own checkbox) and add one new checkbox child per function —
+               "- [ ] N.M.1 implement <function_name>(...): <what it does>",
+               "- [ ] N.M.2 implement <next_function_name>(...): ...". If a leaf genuinely
+               touches exactly ONE function, leave it as a single leaf unchanged — never invent
+               a pointless single child just to run this pass.
+            4. Name the actual function/method in each new leaf — its real name and, where
+               already decided, its parameters/return shape — not a vague verb: write
+               "- [ ] 5.7.2.1 implement collect_news(held: list[str]) -> list[dict]: fan out one
+               RSS fetch per held symbol via asyncio.gather" rather than
+               "- [ ] 5.7.2.1 write the fetch function".
+            5. "## Testing" leaves, and any Implementation leaf that is NOT itself writing code,
+               are OUT OF SCOPE for this pass — never touch them.
+            6. When a split leaves the numbering after it wrong (gaps, duplicates, or siblings
+               out of order), do NOT hand-patch it with replace_in_file — run:
+                   python -m JFI.tool.plan_renumber {plan_path} <parent-number>
+               via execute_command, exactly as the Journeyman pass does.
+            7. Never ask the user a question and never wait for approval.
+
+            When every code-writing leaf is broken down to one child per function (or confirmed
+            already single-function), output the exact phrase on its own line: PLANNER_COMPLETE
+        """
 
     if phase == "planner":
         return f"""
@@ -405,10 +568,13 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                vague leaf like "manually verify everything looks right" does not satisfy this;
                name the actual command that will be run.
                For EVERY task you add, ask "can I do this correctly in one focused step?" If
-               not, break it into subtasks and ask the same question of each one — recurse
-               until every leaf is genuinely that small. Only leaves get a checkbox; every
-               parent you broke down stays an unchecked, un-checkboxed bullet (see PLAN FILE
-               FORMAT above for exactly why).
+               not, break it into AT LEAST 2 subtasks (a parent with exactly one child is
+               pointless nesting, not a real decomposition — if you can only find one genuine
+               piece, that task was already a leaf: checkbox it directly instead of wrapping it
+               in a parent) and ask the same question of each new piece — recurse until every
+               leaf is genuinely that small. Only leaves get a checkbox; every parent you broke
+               down stays an unchecked, un-checkboxed bullet (see PLAN FILE FORMAT above for
+               exactly why).
             2. If {plan_path} ALREADY EXISTS, read_file it first. Every "- [x]" line is work that
                is already finished: leave those lines exactly as they are. Add new tasks for the
                new request the same way — break each down into the smallest leaves before adding
@@ -419,7 +585,47 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
             When the plan file is saved, output the exact phrase on its own line: PLANNER_COMPLETE
         """
 
+    elif phase == "product_owner":
+        feedback_path = str(Path(plan_path).with_name("feedback_to_plan.md"))
+        return f"""
+            You are acting as PRODUCT OWNER — a pass between planning and implementation, before
+            any code gets written. Your job is to catch a bad plan BEFORE it's too late to fix
+            cheaply, by checking what {plan_path} proposes against what ACTUALLY EXISTS in this
+            codebase right now. You do NOT write or edit any deliverable code yourself — read-only,
+            the same posture as the Reviewer role, just at the opposite end of the pipeline.
+            {rules}
+
+            Your job:
+            1. read_file {plan_path} in full.
+            2. Inspect the real current state of the repo with execute_command/read_file (list
+               directories, grep, read the specific files the plan says it will create, modify, or
+               depend on) — never just trust the plan's own "Context and Prerequisites" section;
+               verify it against what is actually on disk. Look specifically for:
+               - A leaf that assumes a file/module/table/dependency doesn't exist when it already
+                 does, or vice versa.
+               - An ordering bug: something used before whatever creates or installs it (the
+                 Journeyman pass already checks this once during planning — a second read from a
+                 fresh perspective catches what that pass missed, not a duplicate of the same check).
+               - A real requirement from the stated goal that no leaf anywhere actually covers.
+               - An approach that conflicts with how the existing code already does the same kind
+                 of thing elsewhere in this repo, with no stated reason for diverging.
+            3. Decide: is the plan ready to implement exactly as written?
+            4. If YES: do NOT write or touch {feedback_path}. Just output a short "Product Owner:
+               APPROVED" summary in your reply — what you checked, and what you confirmed against
+               the real repo state (not just the plan's own claims about it).
+            5. If NO: use write_file to create {feedback_path} with concrete, actionable feedback —
+               one numbered item per concern, each naming the specific plan item number and/or file
+               involved, plus what should change. This sends the plan back to the planner for one
+               more pass, then back to you to review again — so be specific enough that a second
+               pass can actually resolve it, the same standard the Reviewer's own report is held to.
+            6. Never ask the user a question and never wait for approval.
+
+            When you are done (an APPROVED summary given, or {feedback_path} saved), output the
+            exact phrase on its own line: PRODUCT_OWNER_COMPLETE
+        """
+
     elif phase == "imp":
+        notes_path = str(Path(plan_path).with_name("NotesForReviewer.md"))
         return f"""
             You are an expert Implementation Agent. You build the deliverables and you keep the
             plan file honest as you go.
@@ -432,14 +638,24 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
             2. State which item you are on, in exactly this format:
                **[CURRENT TASK: 1.1]**
             3. Do the work with the tools (write_file, append_to_file, replace_in_file,
-               execute_command).
-            4. IMMEDIATELY tick that one item, using replace_in_file on {plan_path}:
+               execute_command). To just READ an existing file's contents, prefer read_file
+               over `cat`-ing it through execute_command — same information, one less shell
+               round trip.
+            4. If this step hit a problem worth the reviewer knowing about — something you had
+               to work around, an assumption you made because the plan or spec was ambiguous, a
+               check you could not fully verify (e.g. no network/sandbox limitation), a
+               discrepancy from what was planned — use append_to_file to add a short note to
+               {notes_path} (create it with a "# Notes for Reviewer" heading if it doesn't exist
+               yet) before moving on: the task number, what happened, and why. Skip this for
+               clean, uneventful steps — it exists so the reviewer sees what you couldn't fully
+               verify yourself, not a log of everything you did.
+            5. IMMEDIATELY tick that one item, using replace_in_file on {plan_path}:
                    old_string: "- [ ] 1.1 Short description of the step"
                    new_string: "- [x] 1.1 Short description of the step"
                Tick exactly one box per step, right after finishing that step. Do NOT batch the
                ticks until the end, and do NOT rewrite the whole plan file just to tick a box.
-            5. Repeat from step 1 until no unchecked Implementation items are left.
-            6. Once every Implementation item reads "- [x]": if this project has ANY single
+            6. Repeat from step 1 until no unchecked Implementation items are left.
+            7. Once every Implementation item reads "- [x]": if this project has ANY single
                command that builds, compiles, bundles, or type-checks the WHOLE project at once
                (`npm run build`, `tsc --noEmit`, `go build ./...`, `cargo build`, a full test
                COLLECTION step even without running the tests, ...), run it ONCE now with
@@ -454,7 +670,7 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
             Leave the Testing items alone; that is the next phase's job.
             Never ask the user a question and never wait for approval.
 
-            When every Implementation item reads "- [x]" AND step 6's whole-project build/typecheck
+            When every Implementation item reads "- [x]" AND step 7's whole-project build/typecheck
             (when one exists for this project) is clean, output the exact phrase on its own line:
             IMP_COMPLETE
         """
@@ -472,7 +688,9 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                **[CURRENT TEST: 2.1]**
             3. Run it with execute_command per the VERIFICATION STANDARD above. Only read the
                produced files instead when there is genuinely nothing to execute (e.g. checking
-               prose content) — never as a shortcut around running code that can be run.
+               prose content) — never as a shortcut around running code that can be run. When
+               you do read a file, prefer read_file over `cat`-ing it through execute_command —
+               same information, one less shell round trip.
             4. If it fails, fix the implementation with the file tools and re-run until it passes.
             5. IMMEDIATELY tick that one item with replace_in_file on {plan_path}, exactly as the
                Implementation agent does. One box per step, right after it passes.
@@ -486,6 +704,7 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
 
     elif phase == "reviewer":
         review_path = str(Path(plan_path).with_name("review.md"))
+        notes_path = str(Path(plan_path).with_name("NotesForReviewer.md"))
         return f"""
             You are an expert Reviewer Agent. You evaluate the finished work and decide whether it
             needs another iteration of planner → imp → testing → reviewer.
@@ -493,22 +712,30 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
             and never wait for a reply.
             {rules}
 
-            1. read_file {plan_path}, then inspect the files that were produced. You MUST
-               personally re-run the project's own mechanical checks (build/compile, test suite,
-               start-and-hit-it, run-with-sample-input — per the VERIFICATION STANDARD above)
-               with execute_command before you may say PASS. A Testing-phase item already reading
-               "- [x]" is NOT evidence it still passes — later steps may have edited those same
-               files since, silently invalidating it. Re-run it yourself, now, in this phase.
-               A review with zero execute_command/read_file calls is not a review.
+            1. read_file {plan_path}, then inspect the files that were produced. If {notes_path}
+               exists, read_file it too — it holds the Implementation agent's own notes on
+               problems it hit, workarounds it made, or things it could not fully verify. Treat
+               each note as something to specifically re-check yourself, not something to accept
+               at face value; a note the Implementation agent flagged as a concern is exactly the
+               kind of thing an easy PASS can miss. You MUST personally re-run the project's own
+               mechanical checks (build/compile, test suite, start-and-hit-it, run-with-sample-
+               input — per the VERIFICATION STANDARD above) with execute_command before you may
+               say PASS. A Testing-phase item already reading "- [x]" is NOT evidence it still
+               passes — later steps may have edited those same files since, silently invalidating
+               it. Re-run it yourself, now, in this phase. A review with zero
+               execute_command/read_file calls is not a review.
             2. Decide: is the work good — every planned item genuinely done, verified BY YOU JUST
-               NOW, and free of defects?
+               NOW, free of defects, and with every note from {notes_path} (if it existed) either
+               resolved or confirmed harmless?
             3. If the review is GOOD: do NOT write or touch {review_path}. Just output a short
-               "Review: PASS" summary in your reply (what was built, what was verified).
-            4. Only if problems exist (broken/unfinished work, failing tests, missing pieces):
+               "Review: PASS" summary in your reply (what was built, what was verified, and how
+               any implementation notes were resolved).
+            4. Only if problems exist (broken/unfinished work, failing tests, missing pieces, or
+               an implementation note that turned out to be a real issue):
                use write_file to create {review_path} with concrete, actionable issue descriptions —
-               one numbered item per problem, each naming the file(s) and line(s) involved where
-               relevant, plus how to fix it. The next planner iteration will read that file and add
-               new plan items from it, so be specific.
+               one numbered item per problem, each naming the file(s) and line(s) involved where relevant,
+               plus how to fix it. The next planner iteration will read that file and add new plan
+               items from it, so be specific.
 
             When you are done (PASS summary written or {review_path} saved), output the exact phrase
             on its own line: REVIEWER_COMPLETE
@@ -523,9 +750,10 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
             {rules}
 
             1. {session_dir} is this session's own bookkeeping folder ({plan_path}, review.md,
-               context.json, history.jsonl.gz, metadata.json, run.log, .lock). NEVER delete,
-               move, or overwrite anything already inside it — that is how this run tracks
-               itself, and the next phase depends on it being intact.
+               NotesForReviewer.md, feedback_to_plan.md, context.json, history.jsonl.gz,
+               metadata.json, run.log, llm_debug.jsonl, .lock). NEVER delete, move, or overwrite
+               anything already inside it — that is how this run tracks itself, and the next
+               phase depends on it being intact.
             2. Use execute_command (e.g. `find`, `ls -la`, `git status --short` if this is a
                git repo) to inspect the REST of the working directory for files that are not
                part of the finished deliverable: throwaway debug scripts, one-off screenshots
@@ -552,10 +780,10 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
 
 
 def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_PATH, iteration: int = 1,
-                      review_path: Optional[str] = None) -> str:
+                      review_path: Optional[str] = None, po_feedback_path: Optional[str] = None) -> str:
     """The opening human turn that kicks off a phase."""
     if phase == "planner":
-        if iteration > 1:
+        if iteration > 1 or review_path or po_feedback_path:
             trigger = (
                 f"Update the plan at {plan_path} so it covers the request above.\n"
                 f"Read it first, keep every '- [x]' line untouched, and append new '- [ ]' items "
@@ -568,10 +796,30 @@ def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_
                     f"since been archived). Add one new '- [ ]' item per issue to fix it — do NOT "
                     f"touch any already-ticked '- [x]' lines."
                 )
+            if po_feedback_path:
+                trigger += (
+                    f"\nThe Product Owner reviewed this plan against the real repo state and had "
+                    f"concerns — the full feedback is quoted in the message above (saved to "
+                    f"{po_feedback_path}, since archived). Update the plan to address every point "
+                    f"raised before implementation starts — do NOT touch any already-ticked "
+                    f"'- [x]' lines."
+                )
             return trigger
         return (
             f"My goal is: {goal}\n\n"
             f"Write the step-by-step plan to {plan_path} now, using the mandated '- [ ]' format."
+        )
+
+    if phase == "product_owner":
+        feedback_path = str(Path(plan_path).with_name("feedback_to_plan.md"))
+        return (
+            f"Planning is done. Review {plan_path} against the ACTUAL current state of this "
+            f"repository before any implementation starts. If it's ready, just reply with a short "
+            f"'Product Owner: APPROVED' summary — do not write any file. Only if you find real "
+            f"problems (checked against the real repo, not just the plan's own claims), write "
+            f"them to {feedback_path} as concrete, actionable feedback naming the specific plan "
+            f"item number, which sends the plan back to the planner for one more pass before you "
+            f"review it again. Do not ask for approval."
         )
 
     if phase == "imp":
@@ -827,6 +1075,23 @@ class SimpleSessionManager(SessionManager):
         # identically with this left empty (falls back to the cheap
         # tool/file/command digest, same as before summarization existed).
         self._llms = {}
+
+        # Which of the tiered planner's 3 roles (see get_system_message's
+        # planner_stage param) the NEXT get_messages("planner") call should
+        # request -- None reproduces today's single combined planner prompt
+        # unchanged. Set by runner.run_phase via set_planner_stage() before
+        # each stage's own turn loop; irrelevant to every other phase.
+        self._planner_stage: Optional[str] = None
+
+    def set_planner_stage(self, stage: Optional[str]) -> None:
+        """Selects which tiered-planner role (see get_system_message's
+        planner_stage param) get_messages("planner") builds its system
+        message for next -- "architect", "team_lead", "journeyman", or None
+        for today's original single combined pass. Purely in-memory (not
+        persisted): a resumed session restarts the planner phase from
+        Architect regardless of which stage it was on before -- see the
+        tiered-planner design note on resumability."""
+        self._planner_stage = stage
 
     def set_llm_streams(self, llms: dict) -> None:
         """Wires in this session's phase -> BaseLLMStream map so Tier 4 of
@@ -1371,7 +1636,8 @@ class SimpleSessionManager(SessionManager):
         """
         base = get_system_message(phase, self.plan_path, self.context_cache_path,
                                   plan_format_rules=self._plan_format_rules(),
-                                  unlocked_tools=self.unlocked_tools())
+                                  unlocked_tools=self.unlocked_tools(),
+                                  planner_stage=self._planner_stage if phase == "planner" else None)
 
         # Auto-load whatever's been context_save()'d so far straight into the
         # system message -- which is rebuilt fresh every request and never
@@ -1406,20 +1672,33 @@ class SimpleSessionManager(SessionManager):
 
     # ---------------------------------------------------------- compression
 
-    def context_window(self) -> int:
-        """The model's full context window (``CONTEXT_SIZE``), for display.
+    def context_window(self, phase: str = "") -> int:
+        """The model's full context window, for display.
+
+        Resolved via phase_env exactly like MODEL/TEMPERATURE/OPENAI_URL
+        (see PHASE_ENV_PREFIX in runner.py and base_llm_stream.phase_env):
+        ``{PHASE}_CONTEXT_SIZE`` wins when set for this phase (e.g.
+        TESTING_CONTEXT_SIZE), else the shared ``CONTEXT_SIZE``. This
+        matters because a phase can already run a genuinely different model
+        via its own *_MODEL/*_OPENAI_URL override -- without a matching
+        per-phase context-size override, compress_history would budget
+        every phase against one model's window even when another phase's
+        real model has a smaller (risking silent truncation) or larger
+        (risking needless over-compression) one. `phase` is the plain phase
+        name ("planner", "imp", ...); its env prefix is just its upper-case
+        form, same convention PHASE_ENV_PREFIX uses.
 
         Distinct from :meth:`context_budget`, which is the smaller, ratio-
         reduced threshold that actually triggers compression.
         """
         try:
-            return int(os.environ.get("CONTEXT_SIZE", DEFAULT_CONTEXT_SIZE))
+            return int(phase_env(phase.upper() if phase else "", "CONTEXT_SIZE", str(DEFAULT_CONTEXT_SIZE)))
         except ValueError:
             return DEFAULT_CONTEXT_SIZE
 
-    def context_budget(self) -> int:
+    def context_budget(self, phase: str = "") -> int:
         try:
-            size = self.context_window()
+            size = self.context_window(phase)
         except ValueError:
             size = DEFAULT_CONTEXT_SIZE
         try:
@@ -1461,7 +1740,7 @@ class SimpleSessionManager(SessionManager):
             self.save_metadata()
         return True
 
-    def token_usage(self) -> tuple[int, int]:
+    def token_usage(self, phase: str = "") -> tuple[int, int]:
         """(estimated tokens in the *last request actually sent*, context window).
 
         This used to report ``_estimate_tokens(self.history)`` — the raw,
@@ -1473,8 +1752,12 @@ class SimpleSessionManager(SessionManager):
         over-budget even though the actual request was comfortably within
         it. :attr:`_last_sent_tokens` is updated by :meth:`compress_history`
         every time it runs, so this now matches those log lines exactly.
+
+        `phase` picks whose context window to report (see
+        :meth:`context_window`) -- omit it (as any caller outside an active
+        phase does) to report the shared default.
         """
-        return self._last_sent_tokens, self.context_window()
+        return self._last_sent_tokens, self.context_window(phase)
 
     def compress_history(self, reserve: int = 0, phase: str = ""):
         """
@@ -1489,7 +1772,7 @@ class SimpleSessionManager(SessionManager):
         streams Tier 4 may use to LLM-summarize aged-out history instead of
         only recording tool/file/command names — see _build_digest.
         """
-        budget = max(512, self.context_budget() - reserve)
+        budget = max(512, self.context_budget(phase) - reserve)
         original = _estimate_tokens(self.history)
         if original <= budget:
             self._last_sent_tokens = original
@@ -1511,6 +1794,24 @@ class SimpleSessionManager(SessionManager):
         for block in middle():
             block[:] = [m for m in block if not _is_nudge(m)]
 
+        # Snapshot the middle RIGHT AFTER Tier 1 (filler dropped, nothing else
+        # touched yet) so Tier 4 can later summarize from this instead of from
+        # `blocks` post-Tier-2/3. Tier 2/3 elide tool results and file payloads
+        # down to a couple hundred chars each -- the right tradeoff for the
+        # ACTUAL model request, which must fit the hard token budget, but dead
+        # wrong for the digest's summarization call: that call has its own
+        # separate, much larger budget (DIGEST_INPUT_CHAR_CAP), goes through an
+        # LLM whose entire job is extracting durable facts from exactly this
+        # material, and used to receive the SAME pre-elided ~600+400-char
+        # scraps the live request got -- so a command's output (a discovered
+        # file path, a function signature, a root-cause conclusion sitting past
+        # character 600) could be gone before the summarizer ever saw it,
+        # forcing the agent to re-run the same diagnostic commands turns later
+        # with no memory of having already answered the question. Only Tier 1's
+        # nudge-drop is safe to share between both paths: nudges are pure
+        # filler no summary would ever want either.
+        pretrim_blocks = copy.deepcopy(blocks)
+
         # Tier 2: trim long message content — tool results (file dumps, command
         # output) as well as plain assistant/user text (reports, big goals,
         # feedback blocks) — anything that's bulk rather than structure.
@@ -1526,11 +1827,22 @@ class SimpleSessionManager(SessionManager):
 
         # Tier 4: collapse the remaining middle into a digest.
         blocks = [block for block in blocks if block]
+        pretrim_blocks = [block for block in pretrim_blocks if block]
         if over() and len(blocks) > KEEP_RECENT_BLOCKS + 1:
             # The digest is a fixed-size summary whatever it covers, so there is
             # nothing to gain by digesting only part of the middle.
             head, tail = blocks[:1], blocks[-KEEP_RECENT_BLOCKS:]
-            blocks = head + [[self._build_digest(blocks[1:-KEEP_RECENT_BLOCKS], phase)]] + tail
+            # pretrim_blocks was filtered by the identical "drop now-empty
+            # blocks" predicate applied to the identical post-Tier-1 content,
+            # so it stays index-aligned with `blocks` -- but if that ever stops
+            # holding (a future tier reordering, etc.), fall back to the
+            # already-elided slice rather than summarizing misaligned turns.
+            digest_source = (
+                pretrim_blocks[1:-KEEP_RECENT_BLOCKS]
+                if len(pretrim_blocks) == len(blocks)
+                else blocks[1:-KEEP_RECENT_BLOCKS]
+            )
+            blocks = head + [[self._build_digest(digest_source, phase)]] + tail
 
         # Tier 5: the protected tail alone can outgrow the budget. Trim it too,
         # leaving the most recent block untouched so the live turn stays exact.
@@ -1621,7 +1933,14 @@ class SimpleSessionManager(SessionManager):
         summarization prompt: assistant reasoning/tool calls, tool results,
         and user notes, each lightly truncated per-message so one huge
         message can't dominate the summarizer's own input, then hard-capped
-        overall (DIGEST_INPUT_CHAR_CAP) as a final backstop."""
+        overall (DIGEST_INPUT_CHAR_CAP) as a final backstop.
+
+        Tool results get the largest per-message allowance of the three --
+        they're where a command's actual output (a discovered path, a
+        signature, a root cause) lives, and that's exactly the material this
+        summary exists to keep the agent from having to re-discover. Assistant
+        reasoning tends to restate/circle the same point at length, so it can
+        afford a tighter cap without losing much."""
         parts = []
         for block in blocks:
             for message in block:
@@ -1632,15 +1951,15 @@ class SimpleSessionManager(SessionManager):
                 text = str(content or "")
                 if role == "assistant":
                     if text.strip():
-                        parts.append(f"[assistant] {text[:600]}")
+                        parts.append(f"[assistant] {text[:700]}")
                     for call in message.get("tool_calls") or []:
                         function = call.get("function") or {}
                         args = str(function.get("arguments") or "")[:200]
                         parts.append(f"[tool call] {function.get('name') or '?'}({args})")
                 elif role == "tool":
-                    parts.append(f"[tool result] {text[:400]}")
+                    parts.append(f"[tool result] {text[:1500]}")
                 elif text.strip():
-                    parts.append(f"[{role}] {text[:400]}")
+                    parts.append(f"[{role}] {text[:500]}")
         rendered = "\n".join(parts)
         if len(rendered) > DIGEST_INPUT_CHAR_CAP:
             rendered = rendered[:DIGEST_INPUT_CHAR_CAP] + "\n… [older material in this batch truncated]"
@@ -1655,13 +1974,18 @@ class SimpleSessionManager(SessionManager):
         metadata note; this must never be allowed to crash compression."""
         rendered = self._render_blocks_for_summary(new_blocks)
         system_msg = (
-            "You are condensing part of a coding agent's own past work into a short factual "
+            "You are condensing part of a coding agent's own past work into a factual "
             "summary for that SAME agent to read later, after these original turns are deleted "
             "from its context to save space. Preserve concrete facts, conclusions, discovered "
             "bugs/gotchas, and decisions made — the kind of thing that would otherwise force the "
             "agent to re-investigate something it already figured out. Do not just list which "
-            "tools were called; say what was LEARNED or DECIDED and why. Be concise (well under "
-            "200 words). Plain prose or short bullet points, no markdown headers."
+            "tools were called; say what was LEARNED or DECIDED and why, with enough specificity "
+            "(exact paths, names, numbers, error messages) that the agent never has to re-derive "
+            "them. Favor completeness over brevity here — this is the ONLY trace of these turns "
+            "once they're deleted, so a fact left out is gone, not just shortened. Up to roughly "
+            "500 words is fine if the material genuinely needs it; don't pad to reach that, and "
+            "don't cut a real fact just to stay under it. Plain prose or short bullet points, no "
+            "markdown headers."
         )
         user_msg = rendered
         if prior_summary:
@@ -1773,6 +2097,24 @@ class SimpleSessionManager(SessionManager):
         return []
 
 
+def _marker_present(content: str, keyword: str) -> bool:
+    """
+    True when `keyword` stands alone on its own line in `content` (markdown
+    decoration -- *emphasis*, `code`, blockquote '>', a trailing '.'/'!' --
+    tolerated around it). A plan that merely *mentions* the keyword in prose
+    does not count: this is what phase_completed uses for '{PHASE}_COMPLETE'
+    markers, and what runner.py's tiered-planner stages use for their own
+    stage markers (ARCHITECT_STAGE_COMPLETE, TEAM_LEAD_STAGE_COMPLETE) --
+    same rule, same regex, one place to keep them consistent.
+    """
+    if not content:
+        return False
+    for line in str(content).splitlines():
+        if re.fullmatch(rf"[\s*_`#>-]*{keyword}[\s*_`.!:]*", line):
+            return True
+    return False
+
+
 def phase_completed(content: str, phase: str) -> bool:
     """
     True when the model signed off on a phase.
@@ -1780,10 +2122,4 @@ def phase_completed(content: str, phase: str) -> bool:
     The keyword must stand alone on its own line: a plan that merely *mentions*
     'IMP_COMPLETE' in prose used to end the phase instantly.
     """
-    if not content:
-        return False
-    keyword = f"{phase.upper()}_COMPLETE"
-    for line in str(content).splitlines():
-        if re.fullmatch(rf"[\s*_`#>-]*{keyword}[\s*_`.!:]*", line):
-            return True
-    return False
+    return _marker_present(content, f"{phase.upper()}_COMPLETE")

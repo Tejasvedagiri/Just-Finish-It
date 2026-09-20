@@ -364,6 +364,99 @@ DEFERRED_TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_background_process",
+            "description": (
+                "Starts a command as a detached background process (a dev/test server you need "
+                "running while you do other work) and returns a HANDLE for use with "
+                "list_processes/stop_background_process -- never a raw OS pid. Use this instead of "
+                "execute_command with a trailing `&`: a process started this way is tracked, so "
+                "stopping it later can never accidentally match and kill an unrelated process (the "
+                "risk with `pkill`/`kill` by guessed pid or name pattern)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to run in the background, e.g. 'uvicorn main:app --port 8000'."
+                    },
+                    "log_file": {
+                        "type": "string",
+                        "description": (
+                            "Optional path to capture the process's stdout+stderr -- read it back with "
+                            "read_file or `tail` once the process has produced output. Omit to discard output."
+                        )
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_processes",
+            "description": (
+                "Lists every process THIS SESSION started with start_background_process (never the "
+                "whole OS process table) -- handle, pid, running/exited state, and exit code once "
+                "exited. Use this instead of `ps aux`/`ps -ef` to find a background process this "
+                "session itself started."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "stop_background_process",
+            "description": (
+                "Stops a process by the HANDLE start_background_process/list_processes gave you -- "
+                "never a raw pid or a name pattern, so this can never match and kill something this "
+                "session didn't itself start. Sends SIGTERM to the whole process group first, then "
+                "SIGKILL if it hasn't exited within `timeout` seconds. This is the safe replacement "
+                "for `pkill`/`kill` by guessed pid or pattern."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "handle": {
+                        "type": "string",
+                        "description": "The handle returned by start_background_process, e.g. 'bg1'."
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Seconds to wait for a clean exit before force-killing (default 5)."
+                    }
+                },
+                "required": ["handle"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "clear_finished_processes",
+            "description": (
+                "Prunes every EXITED background process's bookkeeping entry (never a still-"
+                "running one) from list_processes/the dashboard's background-processes panel. "
+                "Sends no signal -- the OS process is already gone. Use this to tidy up after a "
+                "long session accumulates several one-off verification servers you already "
+                "confirmed are done with, so the list only shows what's still relevant."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
 ]
 
 # These three were already defined after the deferred/media tools in this
@@ -479,6 +572,10 @@ _DEFERRED_TOOL_SUMMARIES = {
     "fetch_webpage_images": "plain-HTTP-GET a page and download the images it references (no JS execution)",
     "browse_webpage": "load a URL in a real headless browser with JS execution, optionally click/wait/eval_js, and read the rendered page",
     "extract_video_frames": "pull visually-distinct frames out of a video file as PNGs (needs ffmpeg)",
+    "start_background_process": "start a dev/test server (or any long-running command) in the background, tracked by a handle -- not a raw pid",
+    "list_processes": "list background processes THIS session started (not the whole OS) -- use instead of `ps`",
+    "stop_background_process": "stop a background process by its handle -- use instead of `pkill`/`kill` by guessed pid or pattern",
+    "clear_finished_processes": "prune exited processes' bookkeeping entries so list_processes/the dashboard only shows what's still relevant",
 }
 
 DEFERRED_TOOL_NAMES = frozenset(_DEFERRED_TOOL_SUMMARIES)

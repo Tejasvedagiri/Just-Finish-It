@@ -4,8 +4,6 @@ documented in web_bridge.py's module docstring), and staying safe against
 stale/late writes.
 """
 
-import json
-
 from JFI.manager.web_bridge import WebBridge, atomic_write_json
 
 

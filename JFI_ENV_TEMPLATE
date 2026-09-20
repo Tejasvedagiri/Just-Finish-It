@@ -73,33 +73,52 @@ MODEL=qwen3:8b
 # --- Optional: a different model/endpoint per phase --------------------------
 #
 # Each of OPENAI_URL / OPENAI_API_KEY / MODEL / TEMPERATURE / FREQUENCY_PENALTY
-# can be overridden per phase by prefixing it PLANNER_, IMP_, TESTING_, or
-# REVIEWER_. Any phase
+# / CONTEXT_SIZE can be overridden per phase by prefixing it PLANNER_, IMP_,
+# TESTING_, or REVIEWER_. Any phase
 # left unset falls back to the shared settings above, so uncomment only the
 # phases (and only the settings within them) you actually want to route
 # elsewhere — e.g. a cheap/fast model for testing, a stronger one for review.
+# CONTEXT_SIZE in particular is worth setting per phase whenever a phase's
+# model differs from the shared default's real context window — otherwise
+# compression budgets that phase against the WRONG window (risking silent
+# truncation on a smaller one, or needless over-compression on a larger one).
 
 # PLANNER_MODEL=qwen3:8b
 # PLANNER_OPENAI_URL=http://127.0.0.1:11434/v1
 # PLANNER_OPENAI_API_KEY=ollama
 # PLANNER_TEMPERATURE=0.7
+# PLANNER_CONTEXT_SIZE=32768
 
 # IMP_MODEL=qwen3:8b
 # IMP_OPENAI_URL=http://127.0.0.1:11434/v1
 # IMP_OPENAI_API_KEY=ollama
 # IMP_TEMPERATURE=0.7
+# IMP_CONTEXT_SIZE=32768
 
 # TESTING_MODEL=qwen3:8b
 # TESTING_OPENAI_URL=http://127.0.0.1:11434/v1
 # TESTING_OPENAI_API_KEY=ollama
 # TESTING_TEMPERATURE=0.7
+# TESTING_CONTEXT_SIZE=32768
 
 # REVIEWER_MODEL=gpt-4.1
 # REVIEWER_OPENAI_URL=https://api.openai.com/v1
 # REVIEWER_OPENAI_API_KEY=sk-your-real-key
 # REVIEWER_TEMPERATURE=0.3
+# REVIEWER_CONTEXT_SIZE=128000
 
 # --- Debugging -----------------------------------------------------------
+
+# The planner phase runs as 3 internal passes by default -- Architect (top-
+# level shape only) -> Team Lead (feature breakdown) -> Journeyman (walks
+# every branch down to genuinely atomic, checkbox-ready leaves) -- instead
+# of one combined pass, because a single pass was observed letting compound
+# leaves through (a "leaf" that was really several independent test cases,
+# or several independent shell actions, bundled into one). Set this to opt
+# back into the original one-pass planner (cheaper: 1 LLM call instead of 3
+# for the whole phase) if you'd rather trade that decomposition quality for
+# lower planner cost. Accepts 1/true/yes/on.
+# PLANNER_SINGLE_PASS=1
 
 # Every execute_command call runs immediately, with no approval prompt at
 # all -- as if "Yes, for the rest of this session" had been answered every
@@ -115,6 +134,15 @@ MODEL=qwen3:8b
 # for prompt-engineering and context-compression debugging, not everyday
 # runs. Accepts 1/true/yes/on.
 # SHOW_STREAM_PROMPTS=1
+
+# Appends every LLM request/response pair this run makes to
+# JFI/<session>/llm_debug.jsonl -- one JSON object per line, full request
+# (messages + tools) and full response (content + tool_calls), no
+# truncation. Unlike SHOW_STREAM_PROMPTS (console/TUI-only, meant for
+# watching a run live), this persists to disk so a run can be inspected
+# afterward. Off by default since it writes on every single turn. Accepts
+# 1/true/yes/on.
+# LOG_LLM_CALL_DEBUG=1
 
 # --- Optional: web dashboard (jfi-web) ---------------------------------------
 
@@ -136,6 +164,22 @@ MODEL=qwen3:8b
 # Streamlit's own default of 8501). Ignored if you pass --server.port
 # yourself on the jfi-web command line.
 # JFI_WEB_PORT=7777
+
+# --- Optional: fleet dashboard (jfi-master) -----------------------------
+
+# Reports this session's live status to a "master" fleet dashboard
+# (`jfi-master`, pip install "just-finish-it[master]") over a WebSocket --
+# e.g. ws://203.0.113.5:8765/report. Unlike JFI_WEB_BRIDGE (file-based,
+# local-dashboard-only), the master can run on a completely different
+# machine from this session: the two only ever talk over this one socket,
+# never a shared filesystem. Independent of JFI_WEB_BRIDGE -- both can be
+# on at once. Off by default. See src/JFI/web/master_server.py.
+#
+# SECURITY: jfi-master ships with no authentication -- anyone who can reach
+# its port can see every reporting session's live status. Only point this
+# at a master on a network you already trust (a VPN, a firewalled LAN),
+# same trust model execute_command already has.
+# MASTER_WS_URL=ws://203.0.113.5:8765/report
 
 # --- Advanced ------------------------------------------------------------
 

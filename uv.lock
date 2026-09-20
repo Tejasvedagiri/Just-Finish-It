@@ -563,6 +563,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+master = [
+    { name = "websockets" },
+]
 web = [
     { name = "streamlit" },
 ]
@@ -584,6 +587,7 @@ requires-dist = [
     { name = "prompt-toolkit", specifier = ">=3.0.53" },
     { name = "python-dotenv", specifier = ">=1.2.3" },
     { name = "streamlit", marker = "extra == 'web'", specifier = ">=1.38" },
+    { name = "websockets", marker = "extra == 'master'", specifier = ">=13" },
 ]
 
 [package.metadata.requires-dev]

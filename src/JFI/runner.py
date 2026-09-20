@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import time
+from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version as _package_version
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -20,12 +21,13 @@ from JFI.llm.openai_compatable_stream import OpenAICompatableStream
 from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
 from JFI.manager.web_bridge import WebBridge
+from JFI.manager.socket_reporter import SocketReporter, master_ws_url as _read_master_ws_url
 
 # Session Management
 from JFI.session.abstract_session_manager import SessionManager
 from JFI.session.adaptive_session_manager import AdaptiveSessionManager
 from JFI.session.simple_session_manager import (
-    DEFAULT_CONTEXT_CACHE_PATH, SessionInUseError, SimpleSessionManager, get_phase_trigger, phase_completed,
+    DEFAULT_CONTEXT_CACHE_PATH, SessionInUseError, SimpleSessionManager, get_phase_trigger, _marker_present,
 )
 
 # Tools and Schemas
@@ -39,6 +41,10 @@ from JFI.tool.llm_tools import make_ask_llm
 from JFI.tool.web_tools import fetch_webpage_images
 from JFI.tool.browser_tools import browse_webpage
 from JFI.tool.video_tools import extract_video_frames
+from JFI.tool.process_tools import (
+    start_background_process, list_processes, stop_background_process,
+    clear_finished_processes, make_process_tools,
+)
 
 # Looked up by name at request time — see _tools_for_session.
 _DEFERRED_TOOLS_BY_NAME = {t["function"]["name"]: t for t in DEFERRED_TOOLS}
@@ -72,6 +78,10 @@ TOOL_MAP = {
     "fetch_webpage_images": fetch_webpage_images,
     "browse_webpage": browse_webpage,
     "extract_video_frames": extract_video_frames,
+    "start_background_process": start_background_process,
+    "list_processes": list_processes,
+    "stop_background_process": stop_background_process,
+    "clear_finished_processes": clear_finished_processes,
     # view_image returns (status_text, data_url) instead of a plain string —
     # every other tool's TOOL_MAP entry returns str; see the isinstance(tuple)
     # check in execute_tool_call, which is the one place that distinction
@@ -92,7 +102,7 @@ TOOL_MAP = {
     "load_tool": lambda name="": "Error: load_tool is not available yet — no session is active.",
 }
 
-PHASES = ["planner", "imp", "testing", "reviewer", "cleanup"]
+PHASES = ["planner", "product_owner", "imp", "testing", "reviewer", "cleanup"]
 
 # .env prefix each phase's model/endpoint override is read from (see
 # JFI.llm.base_llm_stream.phase_env) — e.g. PLANNER_MODEL, PLANNER_OPENAI_URL,
@@ -100,8 +110,8 @@ PHASES = ["planner", "imp", "testing", "reviewer", "cleanup"]
 # the shared MODEL/OPENAI_URL/OPENAI_API_KEY/TEMPERATURE, so a single model
 # for every phase (today's default) needs no per-phase vars at all.
 PHASE_ENV_PREFIX = {
-    "planner": "PLANNER", "imp": "IMP", "testing": "TESTING", "reviewer": "REVIEWER",
-    "cleanup": "CLEANUP",
+    "planner": "PLANNER", "product_owner": "PRODUCT_OWNER", "imp": "IMP", "testing": "TESTING",
+    "reviewer": "REVIEWER", "cleanup": "CLEANUP",
 }
 
 EXIT_WORDS = {"exit", "done", "quit", "no", "nothing"}
@@ -447,7 +457,134 @@ def handle_skip_all_request(console: AbstractManager, ssm: SessionManager, phase
     )
 
 
+def _clear_reviewer_notes(ssm: SessionManager) -> None:
+    """Removes JFI/<session>/NotesForReviewer.md once the reviewer phase has
+    finished reading it (see get_system_message's imp/reviewer branches --
+    imp appends a note there whenever a step hit a problem worth flagging;
+    reviewer reads it before deciding PASS/FAIL). Cleared here at the
+    harness level, unconditionally and regardless of PASS/FAIL, rather than
+    relying on the model to tidy it up itself: the notes are only relevant
+    to the ONE review pass that just consumed them, and a stale note left
+    behind would otherwise resurface in a later, unrelated review pass. Any
+    issue a note pointed to either already made it into review.md (which
+    schedules its own follow-up iteration) or was confirmed harmless -- the
+    note itself has done its job either way."""
+    try:
+        (ssm.session_path / "NotesForReviewer.md").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _read_plan_markdown(ssm: SessionManager) -> str:
+    """Raw current text of plan.md, for AbstractManager.set_status's
+    plan_markdown param -- a fleet-dashboard viewer has no filesystem access
+    to read plan.md itself, so the full checklist rides along in the status
+    snapshot. Empty string before the planner has written the file yet (no
+    session ever starts implementation without one, so this is transient)."""
+    try:
+        return Path(ssm.plan_path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _run_product_owner_loop(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
+                             ssm: SessionManager, initial_goal: str) -> bool:
+    """
+    The planner<->product_owner cycle: a SEPARATE, tighter loop from the
+    reviewer's own planner->imp->testing->reviewer restart, living entirely
+    between the planner's first pass and implementation ever starting (see
+    PHASES -- "product_owner" sits right after "planner"). Nothing has been
+    implemented yet at this point, so a round trip here costs one planner
+    turn and one product_owner turn, not a whole pipeline re-run.
+
+    Called once the outer phase loop in _run_session reaches "product_owner"
+    -- by then "planner" has already had its own first run via that same
+    loop's generic path, so this function's own first iteration is
+    product_owner's first run, not a second planner run.
+
+    Returns True to let the outer loop continue on to "imp"; False means
+    the whole run should stop (mirrors every other "if not run_phase(...):
+    return" call site in _run_session).
+    """
+    feedback_path = str(ssm.session_path / "feedback_to_plan.md")
+    rounds = 0
+
+    while True:
+        trigger = get_phase_trigger("product_owner", initial_goal, ssm.plan_path)
+        last_user_msg = next((m.get("content", "") for m in reversed(ssm.history) if m.get("role") == "user"), "")
+        if trigger not in last_user_msg:
+            ssm.add_message("user", trigger)
+        if not run_phase(console, llms, ssm, "product_owner"):
+            return False
+
+        feedback = product_owner_feedback_outcome(feedback_path)
+        # Cleared immediately and unconditionally, whether or not there was
+        # feedback to act on -- this file's presence is a one-shot signal
+        # for THIS round only; a stale copy must never resurface in a later,
+        # unrelated round. Never deferred to cleanup or any later pass.
+        try:
+            Path(feedback_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        if feedback is None:
+            console.display_rule("✅ PRODUCT OWNER APPROVED — proceeding to implementation")
+            return True
+
+        rounds += 1
+        console.display_rule(f"🔁 PRODUCT OWNER REQUESTED CHANGES #{rounds}/{MAX_PRODUCT_OWNER_ITERATIONS}")
+        if rounds >= MAX_PRODUCT_OWNER_ITERATIONS:
+            console.display_rule(
+                f"⛔ PRODUCT OWNER LOOP CAP REACHED ({MAX_PRODUCT_OWNER_ITERATIONS} rounds) — "
+                f"ending the run so a plan that can't satisfy review is visible here instead of "
+                f"looping forever. Fix the plan by hand, or queue a request to keep going."
+            )
+            return False
+
+        ssm.add_message("user", feedback)
+        planner_trigger = get_phase_trigger("planner", initial_goal, ssm.plan_path, po_feedback_path=feedback_path)
+        ssm.add_message("user", planner_trigger)
+        if not run_phase(console, llms, ssm, "planner"):
+            return False
+        # Loop back to the top: product_owner reviews the updated plan again.
+
+
 MAX_REVIEW_ITERATIONS = 3
+
+# How many planner<->product_owner rounds this LOCAL loop (see
+# _run_product_owner_loop) allows before giving up and stopping the run --
+# a bad plan that never satisfies Product Owner needs a human, not more
+# rounds. Deliberately its own cap, separate from MAX_REVIEW_ITERATIONS:
+# this loop runs entirely before implementation even starts, so a low cap
+# here costs far less than one on the reviewer's loop (which is guarding a
+# much more expensive planner->imp->testing->reviewer full pass).
+MAX_PRODUCT_OWNER_ITERATIONS = 3
+
+
+def product_owner_feedback_outcome(feedback_path: str) -> Optional[str]:
+    """
+    Mirrors review_outcome() for the planner<->product_owner loop: a
+    generated feedback_to_plan.md means Product Owner found a real problem
+    with the plan and wants the planner to fix it before implementation
+    starts. No file means the plan was approved as-is — return None.
+
+    The returned feedback embeds the report's full content, so the planner
+    sees every point even after the file is cleared away.
+    """
+    if not Path(feedback_path).exists():
+        return None
+    try:
+        report = Path(feedback_path).read_text(encoding="utf-8")
+    except OSError:
+        report = "(the feedback file could not be read — re-inspect the plan and the repo)"
+    return (
+        f"PRODUCT OWNER FEEDBACK: the plan was reviewed against the real repo state before "
+        f"implementation and found wanting. Its feedback:\n\n"
+        f"{report}\n\n"
+        f"Update the plan with new '- [ ]' items (continuing the existing numbering), or adjust "
+        f"existing un-ticked items, to address every point raised above — nothing is ticked yet "
+        f"at this stage, so there is no '- [x]' line to preserve a distinction against."
+    )
 
 
 def review_outcome(review_path: str) -> Optional[str]:
@@ -576,6 +713,18 @@ def _web_bridge_enabled() -> bool:
     return _env_flag("JFI_WEB_BRIDGE")
 
 
+def _master_ws_url() -> Optional[str]:
+    """MASTER_WS_URL: mirror this session's live status to a remote fleet
+    dashboard (src/JFI/web/master_server.py, `jfi-master`) over a
+    WebSocket -- see manager.socket_reporter.SocketReporter. Independent of
+    JFI_WEB_BRIDGE/JFI_WEB_DASHBOARD (that pair is file-based and local-
+    dashboard-only); this is for a master that may be running on a
+    different machine entirely. Unset (the default) means this session
+    reports nowhere but its own terminal/run.log, exactly as before this
+    existed."""
+    return _read_master_ws_url()
+
+
 def _web_dashboard_disabled() -> bool:
     """JFI_WEB_DASHBOARD=0 (or false/no/off): with JFI_WEB_BRIDGE=1, ./jfi
     normally auto-launches the `jfi-web` dashboard itself as a child
@@ -682,6 +831,19 @@ def _review_loop_approval_required() -> bool:
     return _env_flag("REVIEW_LOOP_APPROVAL")
 
 
+def _planner_single_pass() -> bool:
+    """PLANNER_SINGLE_PASS=1: escape hatch back to the original one-pass
+    planner (today's combined instructions, one PLANNER_COMPLETE marker)
+    instead of the default 4-stage Architect -> Team Lead -> Journeyman ->
+    Function Breakdown sequence (see run_phase's planner branch and
+    get_system_message's planner_stage param). Off by default: tiering
+    roughly quadruples the planner phase's own LLM-call count in exchange
+    for catching compound leaves (and un-decomposed code leaves) a single
+    pass was observed letting through -- worth it by default, but some runs
+    may prefer the cheaper single pass."""
+    return _env_flag("PLANNER_SINGLE_PASS")
+
+
 def _task_stuck_time_limit() -> float:
     """TASK_STUCK_TIME_LIMIT_SECONDS override (default
     DEFAULT_TASK_STUCK_TIME_LIMIT_SECONDS) — see _check_task_stuck. Read
@@ -746,6 +908,41 @@ def dump_prompt(console: AbstractManager, phase: str, messages: List[Dict[str, A
     console.display_rule("END PROMPT")
 
 
+def _log_llm_call_debug() -> bool:
+    """LOG_LLM_CALL_DEBUG=1 (or true/yes/on) in .env: append every LLM
+    request/response pair to JFI/<session>/llm_debug.jsonl -- one JSON
+    object per line, full request (messages + tools) and full response
+    (content + tool_calls), no truncation. Unlike SHOW_STREAM_PROMPTS
+    (console/TUI-only, meant for watching a run live), this persists to
+    disk so a run can be inspected afterward without having had the flag's
+    console output scrolling past at the time. Read fresh each call, same
+    reasoning as _show_stream_prompts."""
+    return _env_flag("LOG_LLM_CALL_DEBUG")
+
+
+def log_llm_call(ssm: SessionManager, phase: str, messages: List[Dict[str, Any]],
+                  tools: Optional[List[Dict[str, Any]]], parsed_response: Dict[str, Any]) -> None:
+    """
+    Appends one JSON-line record of this turn's exact request and response
+    to JFI/<session>/llm_debug.jsonl. Gated by LOG_LLM_CALL_DEBUG -- see
+    _log_llm_call_debug. The log is a debugging aid, not part of the
+    pipeline's contract, so any I/O error here is swallowed rather than
+    interrupting the run (same tradeoff pt_console_manager's own _log
+    makes for run.log).
+    """
+    record = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "phase": phase,
+        "request": {"messages": messages, "tools": tools},
+        "response": parsed_response,
+    }
+    try:
+        with open(ssm.session_path / "llm_debug.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError:
+        pass
+
+
 def _stuck_task_directive(task_title: str, elapsed_seconds: float, tokens_spent: int) -> str:
     """Forced message for when the same plan leaf has stayed "current" too
     long (see _task_stuck_time_limit/_task_stuck_token_limit in run_phase) —
@@ -770,37 +967,64 @@ def _stuck_task_directive(task_title: str, elapsed_seconds: float, tokens_spent:
     )
 
 
-def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream], ssm: SessionManager,
-              phase: str) -> bool:
+#: The tiered planner's 4 internal stages, in order -- (stage name passed to
+#: ssm.set_planner_stage/get_system_message's planner_stage, this stage's
+#: own completion marker, the display label for its transition rule, a short
+#: tag for the header/dashboard's "stage" status field -- see
+#: AbstractManager.set_status's `stage` param). The LAST stage deliberately
+#: reuses today's original PLANNER_COMPLETE marker (see get_system_message's
+#: planner_stage docstring) so nothing downstream of "is planner done"
+#: (phase_completed/get_remaining_phases/resumability) needs to know
+#: intermediate stages exist at all. "function_breakdown" (after
+#: journeyman) takes every already-atomic leaf that writes code and breaks
+#: IT down further into one child leaf per function/method it implements --
+#: a non-code leaf (verification, research, docs) is left untouched.
+PLANNER_STAGES = [
+    ("architect", "ARCHITECT_STAGE_COMPLETE", "ARCHITECT", "Arc"),
+    ("team_lead", "TEAM_LEAD_STAGE_COMPLETE", "TEAM LEAD", "Lead"),
+    ("journeyman", "JOURNEYMAN_STAGE_COMPLETE", "JOURNEYMAN", "Journy"),
+    ("function_breakdown", "PLANNER_COMPLETE", "FUNCTION BREAKDOWN", "Func"),
+]
+
+#: Stage tag shown when PLANNER_SINGLE_PASS=1 opts out of tiering (see
+#: _planner_single_pass) -- the counterpart to PLANNER_STAGES' own tags for
+#: the one case where "planner" runs as a single, undifferentiated pass.
+PLANNER_SINGLE_PASS_STAGE_TAG = "Task"
+
+
+def _drive_turn_loop(console: AbstractManager, llm: OpenAICompatableStream, ssm: SessionManager,
+                     phase: str, completion_keyword: str, failures: Dict[tuple, int]) -> bool:
     """
-    Drives one phase to completion. Returns False if the run should stop early
-    (user interrupt or LLM failure), True when the phase finished cleanly.
+    Runs turns for one phase (or, for the tiered planner, one STAGE within
+    "planner" -- see PLANNER_STAGES/run_phase) until `completion_keyword`
+    appears as a stand-alone marker in the assistant's own content, or the
+    run should stop. Returns True on completion, False if the run should
+    stop early (user interrupt or unrecoverable LLM failure) -- same
+    contract this loop had inline in run_phase before it was extracted to
+    let a tiered planner call it 3x with 3 different markers instead of
+    once with the phase's fixed f"{phase.upper()}_COMPLETE".
 
-    `llms` maps each phase to its own stream (see PHASE_ENV_PREFIX) — every
-    key resolves to the same shared model/endpoint unless .env sets a
-    per-phase override, so this indexing is a no-op in the common case.
+    Callers own everything that happens BEFORE the first turn (status/rule
+    display) and AFTER a True return (marking the phase/stage done) --
+    this only drives the turn-by-turn loop itself.
     """
-    llm = llms[phase]
-    # ask_llm delegates to whatever model this phase itself is using — a
-    # phase with its own .env override (PLANNER_MODEL, etc.) gets an ask_llm
-    # backed by that same model, not always the shared default.
-    TOOL_MAP["ask_llm"] = make_ask_llm(llm, console)
-    console.set_status(phase=phase, state="thinking", plan=ssm.plan_progress(),
-                       phase_plan=ssm.phase_progress(phase), tokens=ssm.token_usage(),
-                       task=ssm.current_task_title(phase) or "")
-    console.display_rule(f"PHASE: {phase_display_name(phase).upper()}")
-
-    failures: Dict[tuple, int] = {}
-
     # Tracks how long/how many re-sent tokens the SAME leaf (current_task)
     # has stayed current, so a leaf that turns out to hide far more work
     # than one focused step gets forced to split itself up instead of
     # grinding indefinitely — see _stuck_task_directive. Local to this one
-    # phase run (like `failures` above): a manual restart earns a fresh
-    # window, same tradeoff already made for the failure-retry counter.
+    # loop run (like `failures` above): a manual restart, or a new tiered-
+    # planner stage, earns a fresh window, same tradeoff already made for
+    # the failure-retry counter.
     stuck_task_title = ""
     stuck_since = time.monotonic()
     stuck_tokens = 0
+    # Wall-clock (time.time(), not the monotonic stuck_since above) start of
+    # the CURRENT leaf -- rides set_status's task_started_at every turn so a
+    # live viewer can show "running Xm" for the in-progress leaf, and is
+    # handed to record_task_tokens as the just-finished leaf's start once
+    # the NEXT leaf becomes current (see AbstractManager.record_task_tokens'
+    # started_at/ended_at params).
+    task_started_at = time.time()
 
     while not console.should_stop():
         # Ctrl+P: hold here, between turns, so an in-flight tool call or LLM
@@ -814,13 +1038,22 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
         handle_skip_all_request(console, ssm, phase)
         current_task = ssm.current_task_title(phase) or ""
         console.set_status(plan=ssm.plan_progress(), phase_plan=ssm.phase_progress(phase),
-                           task=current_task)
+                           task=current_task, plan_markdown=_read_plan_markdown(ssm),
+                           task_started_at=task_started_at)
 
         if current_task != stuck_task_title:
             # Progress since last turn (ticked a box, or a fresh phase) —
-            # this is a new leaf's own window now.
+            # this is a new leaf's own window now. Record what the leaf
+            # that just finished cost before resetting the counter (free
+            # data: stuck_tokens was already being accumulated for the
+            # stuck-task-split trigger below) — see
+            # AbstractManager.record_task_tokens.
+            now = time.time()
+            console.record_task_tokens(stuck_task_title, stuck_tokens,
+                                       started_at=task_started_at, ended_at=now, phase=phase)
             stuck_task_title = current_task
             stuck_since = time.monotonic()
+            task_started_at = now
             stuck_tokens = 0
         elif current_task:
             elapsed = time.monotonic() - stuck_since
@@ -842,17 +1075,20 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
         # set_status calls below): a run of plain-content turns (a model
         # thinking out loud, an auto-nudge reply, ...) would otherwise leave
         # ctx showing a stale figure from several turns back.
-        console.set_status(tokens=ssm.token_usage())
-        stuck_tokens += ssm.token_usage()[0]
+        console.set_status(tokens=ssm.token_usage(phase))
+        stuck_tokens += ssm.token_usage(phase)[0]
         if _show_stream_prompts():
             dump_prompt(console, phase, messages)
+        turn_tools = _tools_for_session(ssm)
         attempt = 0
         while True:
             try:
-                response = llm.send_message(messages, tools=_tools_for_session(ssm))
+                response = llm.send_message(messages, tools=turn_tools)
                 parsed_response = console.print_agent_response(
                     response, prompt_tokens_estimate=ssm.estimate_request_tokens(messages)
                 )
+                if _log_llm_call_debug():
+                    log_llm_call(ssm, phase, messages, turn_tools, parsed_response)
                 break
             except Exception as e:
                 attempt += 1
@@ -946,20 +1182,13 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
                     })
 
             console.set_status(state="thinking", plan=ssm.plan_progress(),
-                               phase_plan=ssm.phase_progress(phase), tokens=ssm.token_usage(),
+                               phase_plan=ssm.phase_progress(phase), tokens=ssm.token_usage(phase),
                                task=ssm.current_task_title(phase) or "")
 
         # --- CHECK FOR COMPLETION ---
         # Checked even alongside tool calls: ticking the last box and signing
         # off usually arrive in the same message.
-        if phase_completed(content, phase):
-            console.display_system(f"✅ Phase '{phase}' completed successfully.")
-            console.mark_phase_done(phase)
-
-            if phase == "planner":
-                ssm.ensure_plan_file()
-            console.set_status(plan=ssm.plan_progress(), phase_plan=ssm.phase_progress(phase),
-                               tokens=ssm.token_usage(), task=ssm.current_task_title(phase) or "")
+        if _marker_present(content, completion_keyword):
             return True
 
         if tool_calls:
@@ -986,10 +1215,73 @@ def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream],
             ssm.add_message(
                 "user",
                 f"Please continue your work. Remember, when you are entirely finished with this "
-                f"phase, you MUST output the exact phrase: '{phase.upper()}_COMPLETE'."
+                f"step, you MUST output the exact phrase: '{completion_keyword}'."
             )
 
     return False
+
+
+def run_phase(console: AbstractManager, llms: Dict[str, OpenAICompatableStream], ssm: SessionManager,
+              phase: str) -> bool:
+    """
+    Drives one phase to completion. Returns False if the run should stop early
+    (user interrupt or LLM failure), True when the phase finished cleanly.
+
+    `llms` maps each phase to its own stream (see PHASE_ENV_PREFIX) — every
+    key resolves to the same shared model/endpoint unless .env sets a
+    per-phase override, so this indexing is a no-op in the common case.
+
+    "planner" runs as 3 internal stages by default -- Architect (top-level
+    shape) -> Team Lead (feature breakdown) -> Journeyman (genuinely atomic
+    leaves) -- instead of one combined pass, because a single pass was
+    observed letting compound leaves through (see PLANNER_STAGES and
+    get_system_message's planner_stage docstring). PLANNER_SINGLE_PASS=1
+    (see _planner_single_pass) opts back into the original one-pass
+    behavior. Every other phase is unaffected either way.
+    """
+    llm = llms[phase]
+    # ask_llm delegates to whatever model this phase itself is using — a
+    # phase with its own .env override (PLANNER_MODEL, etc.) gets an ask_llm
+    # backed by that same model, not always the shared default.
+    TOOL_MAP["ask_llm"] = make_ask_llm(llm, console)
+    console.set_status(phase=phase, state="thinking", plan=ssm.plan_progress(),
+                       phase_plan=ssm.phase_progress(phase), tokens=ssm.token_usage(phase),
+                       task=ssm.current_task_title(phase) or "", stage="")
+    console.display_rule(f"PHASE: {phase_display_name(phase).upper()}")
+
+    failures: Dict[tuple, int] = {}
+    tiered_planner = (
+        phase == "planner" and hasattr(ssm, "set_planner_stage") and not _planner_single_pass()
+    )
+
+    if tiered_planner:
+        for i, (stage, keyword, label, tag) in enumerate(PLANNER_STAGES):
+            ssm.set_planner_stage(stage)
+            console.set_status(stage=tag)
+            if i > 0:
+                # The very first stage's own instructions already frame it
+                # as "the first of three passes" -- only later transitions
+                # need their own announcement, live and in run.log alike
+                # (see PromptToolkitConsoleManager._log's RULE tag).
+                console.display_rule(f"PLANNER STAGE: {label}")
+            if not _drive_turn_loop(console, llm, ssm, phase, keyword, failures):
+                return False
+    else:
+        if phase == "planner" and hasattr(ssm, "set_planner_stage"):
+            ssm.set_planner_stage(None)  # PLANNER_SINGLE_PASS=1: today's original combined prompt
+            console.set_status(stage=PLANNER_SINGLE_PASS_STAGE_TAG)
+        completion_keyword = f"{phase.upper()}_COMPLETE"
+        if not _drive_turn_loop(console, llm, ssm, phase, completion_keyword, failures):
+            return False
+
+    console.display_system(f"✅ Phase '{phase}' completed successfully.")
+    console.mark_phase_done(phase)
+    if phase == "planner":
+        ssm.ensure_plan_file()
+    console.set_status(plan=ssm.plan_progress(), phase_plan=ssm.phase_progress(phase),
+                       tokens=ssm.token_usage(phase), task=ssm.current_task_title(phase) or "",
+                       stage="")
+    return True
 
 
 def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStream]) -> None:
@@ -1024,17 +1316,23 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
         ssm.set_llm_streams(llms)
 
     web_bridge: Optional[WebBridge] = None
+    socket_reporter: Optional[SocketReporter] = None
     try:
         # 2. Gate execute_command behind the human's approval, backed by this
         # session's own context.json (approved "Save" prefixes live there,
         # alongside whatever facts the LLM itself has stashed there).
         TOOL_MAP["execute_command"] = make_gated_execute_command(console, ssm.context_cache_path)
         TOOL_MAP.update(make_context_tools(ssm.context_cache_path))
+        TOOL_MAP.update(make_process_tools(ssm.context_cache_path))
         TOOL_MAP["load_tool"] = make_load_tool(ssm)
         console.start_session_log(ssm.session_path / "run.log")
         if _web_bridge_enabled():
             web_bridge = WebBridge(console, ssm.session_path)
             web_bridge.start()
+        master_url = _master_ws_url()
+        if master_url:
+            socket_reporter = SocketReporter(console, master_url, session_id=ssm.session_id)
+            socket_reporter.start()
         # Requests queued but never drained before the process closed (killed,
         # crashed, or just quit) live in metadata.json — hand them back now, and
         # persist the queue from here on so this doesn't happen again.
@@ -1051,7 +1349,8 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
         # 3. Resumed sessions pick up at the first phase that never completed
         iteration = 1
         console.start_iteration(iteration, PHASES)
-        console.set_status(plan=ssm.plan_progress(), tokens=ssm.token_usage())
+        console.set_status(plan=ssm.plan_progress(), tokens=ssm.token_usage(),
+                           plan_markdown=_read_plan_markdown(ssm))
         active_phases = ssm.get_remaining_phases(PHASES)
         skipped = [p for p in PHASES if p not in active_phases]
         for phase in skipped:
@@ -1067,6 +1366,15 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
                 console.display_system("All phases have already been completed for this session.")
 
             for phase in active_phases:
+                if phase == "product_owner":
+                    # A separate, tighter loop than the rest of this
+                    # for-loop drives -- see _run_product_owner_loop's own
+                    # docstring for why it owns its own trigger/run_phase
+                    # calls instead of the generic ones below.
+                    if not _run_product_owner_loop(console, llms, ssm, initial_goal):
+                        return
+                    continue
+
                 trigger_message = get_phase_trigger(phase, initial_goal, ssm.plan_path, iteration,
                                                     review_path=review_feedback)
 
@@ -1077,6 +1385,9 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
 
                 if not run_phase(console, llms, ssm, phase):
                     return
+
+                if phase == "reviewer":
+                    _clear_reviewer_notes(ssm)
 
             # 5. Review has landed: a generated review.md (failed review) or queued
             # requests loop us round again, no prompt.
@@ -1123,6 +1434,8 @@ def _run_session(console: AbstractManager, llms: Dict[str, OpenAICompatableStrea
         # without waiting for this one to actually exit.
         if web_bridge is not None:
             web_bridge.stop()
+        if socket_reporter is not None:
+            socket_reporter.stop()
         ssm.release_session_lock()
 
 

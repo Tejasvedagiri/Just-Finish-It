@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JFI Fleet — Pipeline Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0e0c; --bg-raised:#0f1512; --bg-col:#0d1310; --bg-card:#101713;
+    --line:#1e2a23; --line-soft:#16201b;
+    --ink:#d7f5df; --ink-dim:#7fa88c; --ink-faint:#4d6959;
+    --accent:#35e37a; --accent-dim:#1f7a49;
+    --amber:#f5b942; --red:#ff5f5f; --red-dim:#7a2f2f; --blue:#4fc3f7;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:'JetBrains Mono', ui-monospace, monospace;
+    font-size:12.5px;
+    padding:24px clamp(12px,2.5vw,36px) 50px;
+  }
+
+  .topbar{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:10px;border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:8px;}
+  .topbar h1{margin:0;font-size:16px;font-weight:800;letter-spacing:0.02em;}
+  .topbar .sub{font-size:11px;color:var(--ink-faint);}
+  .legend{font-size:10.5px;color:var(--ink-faint);}
+  .legend b{color:var(--red);}
+
+  .awaiting-strip{
+    display:flex;align-items:center;gap:10px;
+    background:rgba(255,95,95,0.08);border:1px solid var(--red-dim);
+    color:#ffb3b3;padding:9px 14px;font-size:11.5px;margin:16px 0 22px;
+  }
+  .awaiting-strip .flag{color:var(--red);font-weight:700;}
+  .awaiting-strip .sep{color:var(--ink-faint);}
+
+  .board{
+    display:grid;
+    grid-template-columns:repeat(5, minmax(210px,1fr));
+    gap:14px;
+    align-items:start;
+  }
+  .col{
+    background:var(--bg-col);
+    border:1px solid var(--line);
+    min-height:340px;
+    display:flex;
+    flex-direction:column;
+  }
+  .col-head{
+    padding:12px 14px;
+    border-bottom:1px solid var(--line);
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+  }
+  .col-head .name{font-size:11px;text-transform:uppercase;letter-spacing:0.08em;font-weight:700;color:var(--ink-dim);}
+  .col-head .count{
+    font-size:11px;font-weight:700;
+    background:var(--bg-raised);border:1px solid var(--line);
+    padding:1px 8px;color:var(--ink);
+  }
+  .col.hot .col-head .name{color:var(--amber);}
+  .col.hot .col-head .count{color:var(--amber);border-color:var(--amber);}
+
+  .col-body{padding:10px;display:flex;flex-direction:column;gap:10px;flex:1;}
+
+  .pc{
+    background:var(--bg-card);
+    border:1px solid var(--line-soft);
+    border-left:3px solid var(--accent-dim);
+    padding:10px 11px;
+  }
+  .pc.wait{border-left-color:var(--red);background:rgba(255,95,95,0.05);}
+  .pc .pc-name{font-weight:700;font-size:12px;color:var(--ink);}
+  .pc .pc-path{font-size:9.5px;color:var(--ink-faint);margin:1px 0 7px;}
+  .pc .pc-task{font-size:10.5px;color:var(--ink-dim);line-height:1.4;margin-bottom:8px;}
+  .pc .pc-task .tag{color:var(--amber);font-weight:700;margin-right:4px;}
+  .pc.wait .pc-task .tag{color:var(--red);}
+  .pc-track{height:4px;background:var(--line-soft);margin-bottom:6px;}
+  .pc-fill{height:100%;background:var(--accent);}
+  .pc-fill.red{background:var(--red);}
+  .pc-foot{display:flex;justify-content:space-between;font-size:9.5px;color:var(--ink-faint);}
+  .pc-foot .st{color:var(--blue);}
+  .pc.wait .pc-foot .st{color:var(--red);font-weight:700;}
+
+  .empty-col{
+    flex:1;display:flex;align-items:center;justify-content:center;
+    color:var(--ink-faint);font-size:10.5px;font-style:italic;padding:20px;
+    text-align:center;
+  }
+
+  .stats-strip{
+    display:flex;gap:1px;background:var(--line);border:1px solid var(--line);margin:24px 0 4px;
+  }
+  .stat{flex:1;background:var(--bg-raised);padding:10px 14px;text-align:center;}
+  .stat .l{font-size:9px;text-transform:uppercase;letter-spacing:0.07em;color:var(--ink-faint);}
+  .stat .v{font-size:17px;font-weight:700;}
+  .stat .v.amber{color:var(--amber);}
+
+  footer{margin-top:20px;font-size:10.5px;color:var(--ink-faint);text-align:center;}
+</style>
+</head>
+<body>
+
+  <div class="topbar">
+    <div>
+      <h1>fleet pipeline board</h1>
+      <div class="sub">sessions grouped by current phase — spot bottlenecks at a glance</div>
+    </div>
+    <div class="legend">column glows <b>amber</b> when it holds a session stuck &gt; 30m on one leaf</div>
+  </div>
+
+  <div class="awaiting-strip">
+    <span class="flag">⛔ 1 needs you</span><span class="sep">·</span>
+    stockui-frontend — review failed, fix iteration 2 of 3
+  </div>
+
+  <div class="board">
+
+    <div class="col hot">
+      <div class="col-head"><span class="name">Planner</span><span class="count">1</span></div>
+      <div class="col-body">
+        <div class="pc">
+          <div class="pc-name">readme-rewrite</div>
+          <div class="pc-path">Just-Finish-It</div>
+          <div class="pc-task"><span class="tag">JRNY</span>Splitting §3.3 into per-function unit-test leaves</div>
+          <div class="pc-foot"><span class="st">thinking</span><span>9m on this stage</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="col-head"><span class="name">Implement</span><span class="count">1</span></div>
+      <div class="col-body">
+        <div class="pc">
+          <div class="pc-name">merge-and-api</div>
+          <div class="pc-path">StockAPIServer</div>
+          <div class="pc-task"><span class="tag">3.2</span>Ensure stock_info created on engine startup</div>
+          <div class="pc-track"><div class="pc-fill" style="width:54%"></div></div>
+          <div class="pc-foot"><span class="st">streaming</span><span>22/41</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="col-head"><span class="name">Testing</span><span class="count">1</span></div>
+      <div class="col-body">
+        <div class="pc">
+          <div class="pc-name">csv-export-fix</div>
+          <div class="pc-path">ledger-cli</div>
+          <div class="pc-task"><span class="tag">2.4</span>Run full pytest suite, capture pass/fail</div>
+          <div class="pc-track"><div class="pc-fill" style="width:80%"></div></div>
+          <div class="pc-foot"><span class="st">running tools</span><span>4/5</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col hot">
+      <div class="col-head"><span class="name">Reviewer</span><span class="count">2</span></div>
+      <div class="col-body">
+        <div class="pc wait">
+          <div class="pc-name">stockui-frontend</div>
+          <div class="pc-path">StockUI</div>
+          <div class="pc-task"><span class="tag">FAIL 2/3</span>growth.json numbers returned as strings</div>
+          <div class="pc-track"><div class="pc-fill red" style="width:88%"></div></div>
+          <div class="pc-foot"><span class="st">awaiting</span><span>47m on this stage</span></div>
+        </div>
+        <div class="pc">
+          <div class="pc-name">nightly-benchmark</div>
+          <div class="pc-path">evals</div>
+          <div class="pc-task">Waiting on queued input — review passed clean</div>
+          <div class="pc-track"><div class="pc-fill" style="width:100%"></div></div>
+          <div class="pc-foot"><span class="st">idle</span><span>12/12</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="col-head"><span class="name">Cleanup</span><span class="count">1</span></div>
+      <div class="col-body">
+        <div class="pc">
+          <div class="pc-name">auth-token-refresh</div>
+          <div class="pc-path">gateway-service</div>
+          <div class="pc-task">✓ 34/34 ticked, review passed clean</div>
+          <div class="pc-track"><div class="pc-fill" style="width:100%"></div></div>
+          <div class="pc-foot"><span class="st">idle</span><span>finished 12m ago</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="stats-strip">
+    <div class="stat"><div class="l">Avg time / phase</div><div class="v">28m</div></div>
+    <div class="stat"><div class="l">Longest-held</div><div class="v amber">review · 47m</div></div>
+    <div class="stat"><div class="l">Review loops today</div><div class="v">2</div></div>
+    <div class="stat"><div class="l">Fleet tokens/min</div><div class="v amber">41.2k</div></div>
+  </div>
+
+  <footer>jfi fleet pipeline board — same 6 sessions as the grid/table views, grouped by phase instead — mockup, static data</footer>
+
+</body>
+</html>

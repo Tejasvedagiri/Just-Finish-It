@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # renaming those would break resuming, not just relabel the UI.
 PHASE_DISPLAY_NAMES: Dict[str, str] = {
     "planner": "Plan",
+    "product_owner": "Product Owner",
     "imp": "Implement",
     "testing": "Test",
     "reviewer": "Review",
@@ -202,7 +203,26 @@ class AbstractManager(ABC):
     def set_status(self, session: Optional[str] = None, phase: Optional[str] = None,
                    state: Optional[str] = None, phases: Optional[List[str]] = None,
                    plan: Optional[tuple] = None, phase_plan: Optional[tuple] = None,
-                   tokens: Optional[tuple] = None, task: Optional[str] = None) -> None:
+                   tokens: Optional[tuple] = None, task: Optional[str] = None,
+                   stage: Optional[str] = None, plan_markdown: Optional[str] = None,
+                   task_started_at: Optional[float] = None) -> None:
+        """`stage` is a short sub-phase tag shown alongside the phase itself
+        (e.g. "Arc"/"Lead"/"Journy"/"Func"/"Task" for the tiered planner's
+        own internal stages -- see runner.PLANNER_STAGES) -- distinct from
+        `task` (a per-leaf checkbox title) so runner.py's frequent
+        `task=ssm.current_task_title(phase)` updates during a turn never
+        clobber it; callers clear it with `stage=""` on phase change.
+
+        `plan_markdown` is the raw current text of plan.md, refreshed each
+        turn alongside `plan`/`phase_plan` -- meant for get_status_snapshot
+        (a fleet-dashboard checklist view), since a remote viewer has no
+        filesystem access to read plan.md itself.
+
+        `task_started_at` is the wall-clock (time.time()) moment `task`
+        became current -- refreshed alongside `task` every turn so a live
+        viewer can show "running Xm" for the in-progress leaf; the same
+        timestamp is handed to record_task_tokens as `started_at` once that
+        leaf finishes and a new one becomes current."""
         pass
 
     def mark_phase_done(self, phase: str) -> None:
@@ -224,6 +244,40 @@ class AbstractManager(ABC):
         """Called at the top of every pipeline pass so the UI can reset progress."""
         pass
 
+    def record_task_tokens(self, task: str, tokens: int,
+                           started_at: Optional[float] = None, ended_at: Optional[float] = None,
+                           phase: Optional[str] = None) -> None:
+        """
+        Records how many tokens a just-finished plan leaf (`task`, the
+        title that was `current_task` in runner._drive_turn_loop) consumed
+        while it was current — `tokens` is the same accumulator that loop
+        already keeps for the stuck-task-split trigger
+        (_task_stuck_token_limit), so this is free real data, not a new
+        estimate. `started_at`/`ended_at` are wall-clock (time.time())
+        timestamps bracketing how long the leaf stayed current — `started_at`
+        is the same value set_status's own `task_started_at` carried while
+        this leaf was the current one.
+
+        `phase` is which phase this leaf belonged to (only "imp" and
+        "testing" ever produce a real, non-empty `task` here — see
+        PHASE_SECTION in simple_session_manager.py; other phases have no
+        checkbox-driven task queue at all). This matters because
+        "## Implementation" and "## Testing" are numbered as SEPARATE trees
+        in plan.md, so e.g. leaf "3.2" can legitimately exist in both
+        sections at once — a UI grouping/labeling entries by number alone
+        without `phase` would conflate two unrelated leaves that happen to
+        share a number.
+
+        Meant for a UI that wants a per-task cost/duration breakdown (e.g.
+        a tasks-vs-tokens heatmap grouped by phase, or a plan checklist
+        showing how long each leaf took); no-op default for managers with
+        no such display. Never called for a leaf that finished before this
+        tracking window ever accumulated anything (tokens == 0) or for the
+        empty task title seen before the very first real leaf becomes
+        current.
+        """
+        pass
+
     def get_status_snapshot(self) -> Dict[str, Any]:
         """
         A plain-data snapshot of everything set_status/mark_phase_done/
@@ -243,6 +297,17 @@ class AbstractManager(ABC):
         prompt a terminal user would otherwise answer; whichever answers
         first wins. No-op default for managers with no such external
         channel.
+        """
+        pass
+
+    def submit_external_pause(self, paused: bool) -> None:
+        """
+        Sets/clears the same pause state Ctrl+P toggles locally -- lets an
+        external controller (e.g. the fleet dashboard) pause/resume a
+        session without touching its terminal. Takes an explicit target
+        state rather than toggling, so a local keypress and a remote
+        button can't race into an unintended state. No-op default for
+        managers with no pause concept.
         """
         pass
 

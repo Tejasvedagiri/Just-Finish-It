@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JFI Fleet — Ops Table</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0e0c; --bg-raised:#0f1512; --bg-row-alt:#0d1310;
+    --line:#1e2a23; --line-soft:#16201b;
+    --ink:#d7f5df; --ink-dim:#7fa88c; --ink-faint:#4d6959;
+    --accent:#35e37a; --accent-dim:#1f7a49;
+    --amber:#f5b942; --amber-dim:#8a6a24;
+    --red:#ff5f5f; --red-dim:#7a2f2f;
+    --blue:#4fc3f7;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:'JetBrains Mono', ui-monospace, monospace;
+    font-size:12.5px;
+    padding:24px clamp(12px,2.5vw,36px) 50px;
+  }
+
+  .toolbar{display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:12px;margin-bottom:16px;border-bottom:1px solid var(--line);padding-bottom:14px;}
+  .toolbar h1{margin:0;font-size:16px;font-weight:800;letter-spacing:0.02em;}
+  .toolbar .sub{font-size:11px;color:var(--ink-faint);margin-top:4px;}
+  .filters{display:flex;gap:6px;}
+  .chip{font-size:10.5px;padding:4px 10px;border:1px solid var(--line);color:var(--ink-dim);}
+  .chip.on{background:var(--accent);color:#04140a;border-color:var(--accent);font-weight:700;}
+
+  .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:1px;background:var(--line);border:1px solid var(--line);margin-bottom:18px;}
+  .kpi{background:var(--bg-raised);padding:10px 14px;}
+  .kpi .l{font-size:9.5px;text-transform:uppercase;letter-spacing:0.08em;color:var(--ink-faint);}
+  .kpi .v{font-size:19px;font-weight:700;}
+  .kpi .v.red{color:var(--red);} .kpi .v.accent{color:var(--accent);} .kpi .v.amber{color:var(--amber);}
+
+  .table-wrap{border:1px solid var(--line);overflow-x:auto;}
+  table{width:100%;border-collapse:collapse;min-width:1080px;}
+  thead th{
+    text-align:left;font-size:9.5px;text-transform:uppercase;letter-spacing:0.06em;
+    color:var(--ink-faint);font-weight:600;padding:9px 12px;
+    border-bottom:1px solid var(--line);background:var(--bg-raised);white-space:nowrap;
+  }
+  thead th.num{text-align:right;}
+  tbody tr{border-bottom:1px solid var(--line-soft);}
+  tbody tr:nth-child(even){background:var(--bg-row-alt);}
+  tbody tr.alert{background:rgba(255,95,95,0.06);}
+  tbody tr.done{opacity:0.6;}
+  tbody tr:hover{background:rgba(53,227,122,0.05);}
+  td{padding:9px 12px;vertical-align:middle;}
+  td.num{text-align:right;font-variant-numeric:tabular-nums;color:var(--ink-dim);}
+
+  .sess-name{font-weight:700;color:var(--ink);}
+  .sess-path{font-size:10px;color:var(--ink-faint);margin-top:1px;}
+
+  .phase-chip{display:inline-flex;align-items:center;gap:5px;font-size:10px;font-weight:600;text-transform:uppercase;padding:2px 7px;border:1px solid currentColor;white-space:nowrap;}
+  .phase-chip.plan{color:var(--amber);} .phase-chip.imp{color:var(--accent);}
+  .phase-chip.test{color:var(--blue);} .phase-chip.review{color:var(--red);} .phase-chip.clean{color:var(--ink-dim);}
+  .phase-chip .dot{width:5px;height:5px;border-radius:50%;background:currentColor;}
+
+  .state-txt{font-size:10.5px;color:var(--ink-dim);}
+  .state-txt.wait{color:var(--red);font-weight:700;}
+
+  .mini-track{width:66px;height:5px;background:var(--line-soft);display:inline-block;position:relative;vertical-align:middle;margin-right:6px;}
+  .mini-fill{height:100%;background:var(--accent);}
+  .mini-fill.red{background:var(--red);}
+
+  .task-cell{max-width:300px;font-size:11px;color:var(--ink-dim);}
+  .task-cell .tag{color:var(--amber);font-weight:700;margin-right:5px;}
+  .task-cell span.trunc{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+
+  .model-txt{font-size:10.5px;color:var(--blue);}
+  .cost-txt{font-size:10.5px;color:var(--amber);}
+  .retry-txt{color:var(--red);}
+
+  .act-btn{font-size:9.5px;text-transform:uppercase;letter-spacing:0.04em;font-weight:700;padding:4px 8px;border:1px solid var(--line);background:transparent;color:var(--ink-dim);}
+  .act-btn.danger{border-color:var(--red);color:var(--red);}
+
+  footer{margin-top:18px;font-size:10.5px;color:var(--ink-faint);text-align:center;}
+</style>
+</head>
+<body>
+
+  <div class="toolbar">
+    <div>
+      <h1>fleet ops table</h1>
+      <div class="sub">6 sessions across 5 repos // sorted by last update</div>
+    </div>
+    <div class="filters">
+      <span class="chip on">all</span><span class="chip">running</span><span class="chip">awaiting</span><span class="chip">done</span>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="l">Sessions</div><div class="v">6</div></div>
+    <div class="kpi"><div class="l">Streaming</div><div class="v accent">3</div></div>
+    <div class="kpi"><div class="l">Awaiting</div><div class="v red">1</div></div>
+    <div class="kpi"><div class="l">Complete</div><div class="v">1</div></div>
+    <div class="kpi"><div class="l">Tok/min</div><div class="v amber">41.2k</div></div>
+    <div class="kpi"><div class="l">Spend today</div><div class="v amber">$2.05</div></div>
+  </div>
+
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Session</th><th>Phase</th><th>State</th><th>Current item</th>
+        <th class="num">Plan</th><th class="num">Model</th><th class="num">Elapsed</th>
+        <th class="num">Files</th><th class="num">Cost</th><th class="num">Updated</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+
+      <tr class="alert">
+        <td><div class="sess-name">stockui-frontend</div><div class="sess-path">~/PycharmProjects/StockUI</div></td>
+        <td><span class="phase-chip review"><span class="dot"></span>review</span></td>
+        <td><span class="state-txt wait">awaiting</span></td>
+        <td class="task-cell"><span class="tag">FAIL 2/3</span><span class="trunc">growth.json numbers returned as strings</span></td>
+        <td class="num"><span class="mini-track"><div class="mini-fill red" style="width:88%"></div></span>51/58</td>
+        <td class="num model-txt">qwen3-32b</td>
+        <td class="num">47m</td>
+        <td class="num">6</td>
+        <td class="num cost-txt">$0.31</td>
+        <td class="num">4s</td>
+        <td><button class="act-btn danger">Review</button></td>
+      </tr>
+
+      <tr>
+        <td><div class="sess-name">merge-and-api</div><div class="sess-path">~/PycharmProjects/StockAPIServer</div></td>
+        <td><span class="phase-chip imp"><span class="dot"></span>implement</span></td>
+        <td><span class="state-txt">streaming</span></td>
+        <td class="task-cell"><span class="tag">3.2</span><span class="trunc">Ensure stock_info created on engine startup</span></td>
+        <td class="num"><span class="mini-track"><div class="mini-fill" style="width:28%"></div></span>22/79</td>
+        <td class="num model-txt">qwen3-32b</td>
+        <td class="num">1h 12m</td>
+        <td class="num">9</td>
+        <td class="num cost-txt">$0.58</td>
+        <td class="num">now</td>
+        <td><button class="act-btn">Open</button></td>
+      </tr>
+
+      <tr>
+        <td><div class="sess-name">readme-rewrite</div><div class="sess-path">~/Desktop/git/Just-Finish-It</div></td>
+        <td><span class="phase-chip plan"><span class="dot"></span>planner</span></td>
+        <td><span class="state-txt">thinking</span></td>
+        <td class="task-cell"><span class="tag">JRNY</span><span class="trunc">Splitting §3.3 into per-function leaves</span></td>
+        <td class="num">—</td>
+        <td class="num model-txt">gpt-oss-120b</td>
+        <td class="num">9m</td>
+        <td class="num">1</td>
+        <td class="num cost-txt">$0.04</td>
+        <td class="num">1s</td>
+        <td><button class="act-btn">Open</button></td>
+      </tr>
+
+      <tr>
+        <td><div class="sess-name">csv-export-fix</div><div class="sess-path">~/work/ledger-cli</div></td>
+        <td><span class="phase-chip test"><span class="dot"></span>testing</span></td>
+        <td><span class="state-txt">running tools</span></td>
+        <td class="task-cell"><span class="tag">2.4</span><span class="trunc">Run full pytest suite, capture pass/fail</span></td>
+        <td class="num"><span class="mini-track"><div class="mini-fill" style="width:76%"></div></span>19/25</td>
+        <td class="num model-txt">qwen3-32b</td>
+        <td class="num">22m</td>
+        <td class="num">4</td>
+        <td class="num cost-txt">$0.12</td>
+        <td class="num">6s</td>
+        <td><button class="act-btn">Open</button></td>
+      </tr>
+
+      <tr class="done">
+        <td><div class="sess-name">auth-token-refresh</div><div class="sess-path">~/work/gateway-service</div></td>
+        <td><span class="phase-chip clean"><span class="dot"></span>cleanup</span></td>
+        <td><span class="state-txt">idle · empty</span></td>
+        <td class="task-cell"><span class="trunc">✓ 34/34 ticked, review passed clean</span></td>
+        <td class="num"><span class="mini-track"><div class="mini-fill" style="width:100%"></div></span>34/34</td>
+        <td class="num model-txt">qwen3-32b</td>
+        <td class="num">1h 48m</td>
+        <td class="num">14</td>
+        <td class="num cost-txt">$0.91</td>
+        <td class="num">12m</td>
+        <td><button class="act-btn">Archive</button></td>
+      </tr>
+
+      <tr class="done">
+        <td><div class="sess-name">nightly-benchmark</div><div class="sess-path">~/Desktop/git/Just-Finish-It/evals</div></td>
+        <td><span class="phase-chip review"><span class="dot"></span>review</span></td>
+        <td><span class="state-txt">idle · empty</span></td>
+        <td class="task-cell"><span class="trunc">Waiting on queued input, review clean</span></td>
+        <td class="num"><span class="mini-track"><div class="mini-fill" style="width:100%"></div></span>12/12</td>
+        <td class="num model-txt">gpt-oss-120b</td>
+        <td class="num">26m</td>
+        <td class="num">3</td>
+        <td class="num cost-txt">$0.09</td>
+        <td class="num">40m</td>
+        <td><button class="act-btn">Archive</button></td>
+      </tr>
+
+    </tbody>
+  </table>
+  </div>
+
+  <footer>jfi fleet ops table — one row per session, scannable at 15+ sessions — mockup, static data</footer>
+
+</body>
+</html>

@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JFI Fleet — Blend</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0a0e0c; --bg-raised:#0f1512; --bg-card:#101713;
+    --line:#1e2a23; --line-soft:#16201b;
+    --ink:#d7f5df; --ink-dim:#7fa88c; --ink-faint:#4d6959;
+    --accent:#35e37a; --accent-dim:#1f7a49;
+    --amber:#f5b942; --red:#ff5f5f; --red-dim:#7a2f2f; --blue:#4fc3f7; --purple:#c792ea;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background: var(--bg);
+    color: var(--ink);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 26px clamp(16px, 3vw, 40px) 60px;
+    background-image:
+      linear-gradient(rgba(53,227,122,0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(53,227,122,0.02) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+
+  .topbar{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:12px;border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:20px;}
+  .brand{display:flex;align-items:baseline;gap:10px;}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent);display:inline-block;transform:translateY(-1px);}
+  .brand h1{margin:0;font-size:17px;font-weight:800;letter-spacing:0.02em;}
+  .brand .sub{color:var(--ink-faint);font-size:12px;letter-spacing:0.06em;text-transform:uppercase;}
+  .clock{color:var(--ink-dim);font-size:12px;}
+
+  /* fleet-wide chart strip */
+  .fleet-charts{
+    display:grid;
+    grid-template-columns: 1.3fr 1fr;
+    gap:1px;
+    background:var(--line);
+    border:1px solid var(--line);
+    margin-bottom:26px;
+  }
+  .fchart{background:var(--bg-raised);padding:14px 18px;}
+  .fchart .fc-title{font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:var(--ink-faint);margin-bottom:10px;}
+
+  .phase-dist{display:flex;height:22px;border:1px solid var(--line-soft);overflow:hidden;margin-bottom:8px;}
+  .pd-seg{display:flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:700;color:#04140a;}
+  .pd-seg.plan{background:var(--amber);}
+  .pd-seg.imp{background:var(--accent);}
+  .pd-seg.test{background:var(--blue);}
+  .pd-seg.review{background:var(--red);}
+  .pd-seg.clean{background:var(--ink-faint);}
+  .pd-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:10px;color:var(--ink-faint);}
+  .pd-legend .sw{width:8px;height:8px;display:inline-block;margin-right:4px;vertical-align:middle;}
+
+  .spend-chart{display:flex;align-items:flex-end;gap:3px;height:52px;}
+  .sc-bar{flex:1;background:var(--line-soft);position:relative;min-width:3px;}
+  .sc-bar .f{position:absolute;bottom:0;left:0;right:0;background:var(--blue);}
+  .sc-bar.hi .f{background:var(--amber);}
+  .spend-foot{display:flex;justify-content:space-between;font-size:9.5px;color:var(--ink-faint);margin-top:6px;}
+
+  .stat-row{display:grid;grid-template-columns:repeat(auto-fit, minmax(140px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);margin-bottom:28px;}
+  .stat{background:var(--bg-raised);padding:12px 16px;}
+  .stat .label{color:var(--ink-faint);font-size:10px;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:5px;}
+  .stat .value{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;}
+  .stat .value.accent{color:var(--accent);} .stat .value.amber{color:var(--amber);} .stat .value.red{color:var(--red);}
+
+  .section-label{color:var(--ink-faint);font-size:11px;letter-spacing:0.1em;text-transform:uppercase;margin:0 0 12px;display:flex;align-items:center;gap:10px;}
+  .section-label::after{content:"";flex:1;height:1px;background:var(--line);}
+
+  .grid{display:grid;grid-template-columns:repeat(auto-fill, minmax(340px, 1fr));gap:14px;margin-bottom:30px;}
+
+  .card{background:var(--bg-card);border:1px solid var(--line);padding:16px 18px 16px;position:relative;}
+  .card.alert{border-color:var(--red-dim);}
+  .card.done{border-color:var(--accent-dim);}
+
+  .card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px;}
+  .session-name{font-weight:700;font-size:14.5px;}
+  .repo-path{color:var(--ink-faint);font-size:11px;margin-top:2px;}
+
+  .badge{font-size:10px;letter-spacing:0.06em;text-transform:uppercase;padding:3px 8px;border:1px solid currentColor;white-space:nowrap;font-weight:600;}
+  .badge.streaming{color:var(--accent);} .badge.thinking{color:var(--blue);}
+  .badge.tools{color:var(--amber);} .badge.idle{color:var(--ink-faint);}
+  .badge.awaiting{color:var(--red);background:rgba(255,95,95,0.08);}
+
+  .stepper{display:flex;gap:4px;margin:12px 0 4px;}
+  .step{flex:1;height:5px;background:var(--line-soft);}
+  .step.done{background:var(--accent-dim);}
+  .step.current{background:var(--accent);box-shadow:0 0 8px var(--accent);}
+  .stepper.wait .step.current{background:var(--red);box-shadow:0 0 8px var(--red);}
+  .step-labels{display:flex;justify-content:space-between;font-size:9px;color:var(--ink-faint);letter-spacing:0.04em;text-transform:uppercase;margin-bottom:12px;}
+  .step-labels span.on{color:var(--accent);}
+  .step-labels.wait span.on{color:var(--red);}
+
+  .task-line{color:var(--ink-dim);font-size:11.5px;border-left:2px solid var(--line);padding-left:10px;margin:10px 0 10px;min-height:2.2em;}
+  .task-line .tag{color:var(--amber);font-weight:600;}
+  .card.alert .task-line .tag{color:var(--red);}
+
+  .meta-row{display:flex;flex-wrap:wrap;gap:3px 12px;font-size:10px;color:var(--ink-faint);margin-bottom:12px;}
+  .meta-row b{color:var(--ink-dim);font-weight:600;}
+  .meta-row .cost{color:var(--amber);}
+
+  /* mini token chart — the "blend" addition */
+  .mini-chart-row{display:flex;align-items:center;gap:10px;margin-bottom:12px;}
+  .mini-chart{display:flex;align-items:flex-end;gap:2px;height:28px;flex:1;}
+  .mc-bar{flex:1;background:var(--line-soft);position:relative;min-width:2px;}
+  .mc-bar .f{position:absolute;bottom:0;left:0;right:0;background:var(--blue);}
+  .mc-bar.hi .f{background:var(--amber);}
+  .mini-chart-label{font-size:9.5px;color:var(--ink-faint);text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap;}
+
+  .bars{display:flex;flex-direction:column;gap:7px;margin-bottom:12px;}
+  .bar-row{display:flex;align-items:center;gap:10px;}
+  .bar-row .bl{width:56px;color:var(--ink-faint);font-size:10px;text-transform:uppercase;letter-spacing:0.04em;}
+  .bar-track{flex:1;height:6px;background:var(--line-soft);}
+  .bar-fill{height:100%;background:var(--accent);}
+  .bar-row .bv{width:50px;text-align:right;font-size:10.5px;color:var(--ink-dim);font-variant-numeric:tabular-nums;}
+
+  .card-foot{display:flex;justify-content:space-between;align-items:center;padding-top:11px;border-top:1px solid var(--line-soft);font-size:10.5px;color:var(--ink-faint);}
+
+  .alert-banner{display:flex;align-items:center;gap:8px;background:rgba(255,95,95,0.08);border:1px solid var(--red-dim);color:#ffb3b3;padding:8px 10px;font-size:11px;margin-bottom:12px;}
+  .alert-banner .flag{color:var(--red);font-weight:700;}
+
+  footer{color:var(--ink-faint);font-size:11px;text-align:center;padding-top:20px;border-top:1px solid var(--line);}
+</style>
+</head>
+<body>
+
+  <div class="topbar">
+    <div class="brand"><span class="dot"></span><h1>jfi fleet</h1><span class="sub">// overview + pipeline + charts</span></div>
+    <div class="clock">6 active &nbsp;·&nbsp; 1 awaiting &nbsp;·&nbsp; last poll 2s ago</div>
+  </div>
+
+  <div class="fleet-charts">
+    <div class="fchart">
+      <div class="fc-title">Sessions by phase</div>
+      <div class="phase-dist">
+        <div class="pd-seg plan" style="width:16.6%">1</div>
+        <div class="pd-seg imp" style="width:16.6%">1</div>
+        <div class="pd-seg test" style="width:16.6%">1</div>
+        <div class="pd-seg review" style="width:33.3%">2</div>
+        <div class="pd-seg clean" style="width:16.6%">1</div>
+      </div>
+      <div class="pd-legend">
+        <span><span class="sw" style="background:var(--amber)"></span>planner</span>
+        <span><span class="sw" style="background:var(--accent)"></span>implement</span>
+        <span><span class="sw" style="background:var(--blue)"></span>testing</span>
+        <span><span class="sw" style="background:var(--red)"></span>reviewer</span>
+        <span><span class="sw" style="background:var(--ink-faint)"></span>cleanup</span>
+      </div>
+    </div>
+    <div class="fchart">
+      <div class="fc-title">Fleet spend — last 60 min</div>
+      <div class="spend-chart">
+        <div class="sc-bar" style="height:30%"><div class="f" style="height:100%"></div></div>
+        <div class="sc-bar" style="height:42%"><div class="f" style="height:100%"></div></div>
+        <div class="sc-bar" style="height:38%"><div class="f" style="height:100%"></div></div>
+        <div class="sc-bar hi" style="height:88%"><div class="f" style="height:100%"></div></div>
+        <div class="sc-bar" style="height:55%"><div class="f" style="height:100%"></div></div>
+        <div class="sc-bar" style="height:47%"><div class="f" style="height:100%"></div></div>
+        <div class="sc-bar hi" style="height:79%"><div class="f" style="height:100%"></div></div>
+        <div class="sc-bar" style="height:60%"><div class="f" style="height:100%"></div></div>
+        <div class="sc-bar" style="height:35%"><div class="f" style="height:100%"></div></div>
+        <div class="sc-bar" style="height:50%"><div class="f" style="height:100%"></div></div>
+      </div>
+      <div class="spend-foot"><span>-60m</span><span>now · $2.05 total</span></div>
+    </div>
+  </div>
+
+  <div class="stat-row">
+    <div class="stat"><div class="label">Sessions</div><div class="value">6</div></div>
+    <div class="stat"><div class="label">Streaming</div><div class="value accent">3</div></div>
+    <div class="stat"><div class="label">Awaiting</div><div class="value red">1</div></div>
+    <div class="stat"><div class="label">Complete</div><div class="value">1</div></div>
+    <div class="stat"><div class="label">Tokens/min</div><div class="value amber">41.2k</div></div>
+  </div>
+
+  <p class="section-label">needs attention</p>
+  <div class="grid">
+
+    <div class="card alert">
+      <div class="alert-banner"><span class="flag">⛔</span> Review failed — fix iteration 2 of 3</div>
+      <div class="card-head">
+        <div><div class="session-name">stockui-frontend</div><div class="repo-path">~/PycharmProjects/StockUI</div></div>
+        <span class="badge awaiting">awaiting</span>
+      </div>
+      <div class="stepper wait">
+        <div class="step done"></div><div class="step done"></div><div class="step done"></div><div class="step current"></div><div class="step"></div>
+      </div>
+      <div class="step-labels wait"><span>plan</span><span>imp</span><span>test</span><span class="on">review</span><span>clean</span></div>
+      <div class="task-line"><span class="tag">[REVIEW]</span> growth.json numeric fields returned as strings, not numbers — see review.md #2</div>
+      <div class="meta-row"><span><b>model</b> qwen3-32b</span><span><b>elapsed</b> 47m</span><span class="cost">~$0.31</span></div>
+      <div class="mini-chart-row">
+        <span class="mini-chart-label">tok/turn</span>
+        <div class="mini-chart">
+          <div class="mc-bar" style="height:40%"><div class="f"></div></div>
+          <div class="mc-bar" style="height:55%"><div class="f"></div></div>
+          <div class="mc-bar hi" style="height:95%"><div class="f"></div></div>
+          <div class="mc-bar" style="height:30%"><div class="f"></div></div>
+          <div class="mc-bar hi" style="height:88%"><div class="f"></div></div>
+          <div class="mc-bar" style="height:60%"><div class="f"></div></div>
+        </div>
+      </div>
+      <div class="bars"><div class="bar-row"><span class="bl">plan</span><div class="bar-track"><div class="bar-fill" style="width:88%;background:var(--red)"></div></div><span class="bv">51/58</span></div></div>
+      <div class="card-foot"><span>loop #2</span><span>updated 4s ago</span></div>
+    </div>
+
+  </div>
+
+  <p class="section-label">planner — 1</p>
+  <div class="grid">
+    <div class="card">
+      <div class="card-head">
+        <div><div class="session-name">readme-rewrite</div><div class="repo-path">~/Desktop/git/Just-Finish-It</div></div>
+        <span class="badge thinking">thinking</span>
+      </div>
+      <div class="stepper"><div class="step current"></div><div class="step"></div><div class="step"></div><div class="step"></div><div class="step"></div></div>
+      <div class="step-labels"><span class="on">plan</span><span>imp</span><span>test</span><span>review</span><span>clean</span></div>
+      <div class="task-line"><span class="tag">[JOURNEYMAN]</span> Splitting §3.3 into per-function unit-test leaves</div>
+      <div class="meta-row"><span><b>model</b> gpt-oss-120b</span><span><b>elapsed</b> 9m</span><span class="cost">~$0.04</span></div>
+      <div class="mini-chart-row">
+        <span class="mini-chart-label">tok/turn</span>
+        <div class="mini-chart">
+          <div class="mc-bar" style="height:25%"><div class="f"></div></div>
+          <div class="mc-bar" style="height:35%"><div class="f"></div></div>
+          <div class="mc-bar" style="height:28%"><div class="f"></div></div>
+          <div class="mc-bar" style="height:44%"><div class="f"></div></div>
+        </div>
+      </div>
+      <div class="card-foot"><span>loop #1</span><span>updated 1s ago</span></div>
+    </div>
+  </div>
+
+  <p class="section-label">implement — 1</p>
+  <div class="grid">
+    <div class="card">
+      <div class="card-head">
+        <div><div class="session-name">merge-and-api</div><div class="repo-path">~/PycharmProjects/StockAPIServer</div></div>
+        <span class="badge streaming">streaming</span>
+      </div>
+      <div class="stepper"><div class="step done"></div><div class="step current"></div><div class="step"></div><div class="step"></div><div class="step"></div></div>
+      <div class="step-labels"><span>plan</span><span class="on">imp</span><span>test</span><span>review</span><span>clean</span></div>
+      <div class="task-line"><span class="tag">[3.2]</span> Ensure stock_info is created on engine startup alongside `transactions`</div>
+      <div class="meta-row"><span><b>model</b> qwen3-32b</span><span><b>elapsed</b> 1h 12m</span><span class="cost">~$0.58</span></div>
+      <div class="mini-chart-row">
+        <span class="mini-chart-label">tok/turn</span>
+        <div class="mini-chart">
+          <div class="mc-bar" style="height:30%"><div class="f"></div></div>
+          <div class="mc-bar" style="height:48%"><div class="f"></div></div>
+          <div class="mc-bar hi" style="height:82%"><div class="f"></div></div>
+          <div class="mc-bar" style="height:36%"><div class="f"></div></div>
+          <div class="mc-bar" style="height:52%"><div class="f"></div></div>
+        </div>
+      </div>
+      <div class="bars">
+        <div class="bar-row"><span class="bl">phase</span><div class="bar-track"><div class="bar-fill" style="width:54%"></div></div><span class="bv">22/41</span></div>
+        <div class="bar-row"><span class="bl">total</span><div class="bar-track"><div class="bar-fill" style="width:28%"></div></div><span class="bv">22/79</span></div>
+      </div>
+      <div class="card-foot"><span>loop #1</span><span>updated just now</span></div>
+    </div>
+  </div>
+
+  <p class="section-label">testing — 1</p>
+  <div class="grid">
+    <div class="card">
+      <div class="card-head">
+        <div><div class="session-name">csv-export-fix</div><div class="repo-path">~/work/ledger-cli</div></div>
+        <span class="badge tools">running tools</span>
+      </div>
+      <div class="stepper"><div class="step done"></div><div class="step done"></div><div class="step current"></div><div class="step"></div><div class="step"></div></div>
+      <div class="step-labels"><span>plan</span><span>imp</span><span class="on">test</span><span>review</span><span>clean</span></div>
+      <div class="task-line"><span class="tag">[2.4]</span> Run full pytest suite and capture the final pass/fail count</div>
+      <div class="meta-row"><span><b>model</b> qwen3-32b</span><span><b>elapsed</b> 22m</span><span class="cost">~$0.12</span></div>
+      <div class="mini-chart-row">
+        <span class="mini-chart-label">tok/turn</span>
+        <div class="mini-chart">
+          <div class="mc-bar" style="height:20%"><div class="f"></div></div>
+          <div class="mc-bar" style="height:33%"><div class="f"></div></div>
+          <div class="mc-bar" style="height:26%"><div class="f"></div></div>
+        </div>
+      </div>
+      <div class="bars">
+        <div class="bar-row"><span class="bl">phase</span><div class="bar-track"><div class="bar-fill" style="width:80%"></div></div><span class="bv">4/5</span></div>
+      </div>
+      <div class="card-foot"><span>loop #1</span><span>updated 6s ago</span></div>
+    </div>
+  </div>
+
+  <p class="section-label">cleanup / idle — 2</p>
+  <div class="grid">
+
+    <div class="card done">
+      <div class="card-head">
+        <div><div class="session-name">auth-token-refresh</div><div class="repo-path">~/work/gateway-service</div></div>
+        <span class="badge idle">idle · queue empty</span>
+      </div>
+      <div class="stepper"><div class="step done"></div><div class="step done"></div><div class="step done"></div><div class="step done"></div><div class="step done"></div></div>
+      <div class="step-labels"><span class="on">plan</span><span class="on">imp</span><span class="on">test</span><span class="on">review</span><span class="on">clean</span></div>
+      <div class="task-line"><span class="tag">[DONE]</span> ✅ Pipeline complete — 34/34 items ticked, review passed clean</div>
+      <div class="meta-row"><span><b>model</b> qwen3-32b</span><span><b>elapsed</b> 1h 48m</span><span class="cost">~$0.91</span></div>
+      <div class="bars"><div class="bar-row"><span class="bl">total</span><div class="bar-track"><div class="bar-fill" style="width:100%"></div></div><span class="bv">34/34</span></div></div>
+      <div class="card-foot"><span>loop #1</span><span>finished 12m ago</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div><div class="session-name">nightly-benchmark</div><div class="repo-path">~/Desktop/git/Just-Finish-It/evals</div></div>
+        <span class="badge idle">idle · queue empty</span>
+      </div>
+      <div class="stepper"><div class="step done"></div><div class="step done"></div><div class="step done"></div><div class="step current"></div><div class="step"></div></div>
+      <div class="step-labels"><span>plan</span><span>imp</span><span>test</span><span class="on">review</span><span>clean</span></div>
+      <div class="task-line"><span class="tag">[IDLE]</span> Waiting on queued input — review passed, nothing further requested</div>
+      <div class="meta-row"><span><b>model</b> gpt-oss-120b</span><span><b>elapsed</b> 26m</span><span class="cost">~$0.09</span></div>
+      <div class="bars"><div class="bar-row"><span class="bl">total</span><div class="bar-track"><div class="bar-fill" style="width:100%"></div></div><span class="bv">12/12</span></div></div>
+      <div class="card-foot"><span>loop #1</span><span>updated 40m ago</span></div>
+    </div>
+
+  </div>
+
+  <footer>jfi fleet console — cards grouped by phase (kanban logic) with per-session token charts — mockup, static data</footer>
+
+</body>
+</html>

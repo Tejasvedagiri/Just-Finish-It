@@ -137,9 +137,14 @@ class SessionManager(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def token_usage(self) -> tuple:
+    def token_usage(self, phase: str = "") -> tuple:
         """(estimated tokens used, context window) for the current phase's
-        next request -- feeds the header's ctx meter."""
+        next request -- feeds the header's ctx meter. `phase` lets an
+        implementation report a per-phase context window (a phase can run
+        its own model with its own real window -- see SimpleSessionManager's
+        PHASE_ENV_PREFIX-style ``{PHASE}_CONTEXT_SIZE`` override); omitting
+        it falls back to whatever default the implementation uses outside
+        an active phase."""
         raise NotImplementedError
 
     # -------------------------------------------------------------- misc

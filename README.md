@@ -19,9 +19,9 @@ Every JFI session runs the same five phases in order:
 | Phase     | What it does                                                                                          |
 |-----------|--------------------------------------------------------------------------------------------------------|
 | **planner**   | Writes a step-by-step plan to `JFI/readme/plan.md` as a tree, recursing each task into the smallest doable pieces — only the leaves get a `- [ ] N.M.…` checkbox. |
-| **imp**       | Implements the code, ticking each box with `replace_in_file` *immediately* after finishing that one item — never batched. |
+| **imp**       | Implements the code, ticking each box with `replace_in_file` *immediately* after finishing that one item — never batched. Whenever a step hits a problem worth flagging (a workaround, an ambiguous-spec assumption, something it couldn't fully verify), it appends a note to `NotesForReviewer.md`. |
 | **testing**   | Runs the test suite and fixes failures.                                                                |
-| **reviewer**  | Signs off (`REVIEWER_COMPLETE`) or writes a `review.md` report, which automatically schedules another full iteration. Up to 3 failed-review loops per session before JFI stops so a bad cycle is visible instead of looping forever. |
+| **reviewer**  | Reads `NotesForReviewer.md` (if any) alongside the plan before re-verifying the work, then signs off (`REVIEWER_COMPLETE`) or writes a `review.md` report, which automatically schedules another full iteration. Up to 3 failed-review loops per session before JFI stops so a bad cycle is visible instead of looping forever. |
 | **cleanup**   | Tidies the working directory: moves anything worth keeping (debug screenshots, scratch scripts, ...) into `JFI/readme/` for reference, and deletes the rest. Never touches the deliverable itself or the session's own bookkeeping files. |
 
 The plan file is the single source of truth across phases *and* across restarts — every phase re-reads it, and resuming a session picks up at the first unticked item (see [Resuming](#resuming-a-session)).
@@ -31,7 +31,7 @@ The plan file is the single source of truth across phases *and* across restarts 
 1. You type a **session name**, then your **goal** (be as detailed as you want).
 2. The planner writes `plan.md`. As soon as its last line is written and the phase-complete marker is emitted, JFI moves on automatically — there is no approval gate between phases; the review loop *is* the quality gate.
 3. During **imp** and **testing**, the model works strictly one checkbox at a time: it does the work, then ticks exactly that one box in `plan.md` (byte-identical text, only `[ ]`→`[x]`). This is what makes the header's live progress bars — the current phase's own checklist (`implement ████░░░░ 8/18`) alongside the whole plan (`total ███░░░░░ 8/21`) — meaningful and makes resumption robust.
-4. The **reviewer** reads the finished work; if it finds real issues it writes `review.md`, which — after **cleanup** still runs once more to tidy that pass — JFI deletes, folding its contents into a fresh user message and looping all five phases again (the header shows `loop #2`, etc.). A clean review just moves straight into cleanup.
+4. The **reviewer** reads the finished work — plus `NotesForReviewer.md`, if **imp** left one, treating each note as something to specifically re-check rather than accept at face value; if it finds real issues (including a note that turned out to be a genuine problem) it writes `review.md`, which — after **cleanup** still runs once more to tidy that pass — JFI deletes, folding its contents into a fresh user message and looping all five phases again (the header shows `loop #2`, etc.). A clean review just moves straight into cleanup. Either way, `NotesForReviewer.md` itself is cleared once the reviewer has read it, so a stale note never resurfaces in a later, unrelated pass.
 5. **cleanup** sweeps the working directory for stray files that aren't part of the deliverable — relocating anything worth keeping into the session's own `JFI/readme/` folder and deleting the rest — before the run considers this pass finished.
 6. Once done — or if you queue more requests at any point (see [Live input](#live-input-queue-force-idle)) — JFI either idles with a live input line waiting for your next request, or exits.
 
@@ -73,10 +73,12 @@ Then answer two prompts: **session name** and **goal**, and let it work.
 | `LLM_REQUEST_TIMEOUT` *(optional)* | Seconds to wait on a single LLM request (connect + read) before giving up and offering Retry/Stop, instead of hanging with no feedback — matters most after idling, when a local server that unloaded its model (or a dead localhost socket) otherwise looks indistinguishable from a genuine freeze. Can be overridden per phase like `MODEL`/`OPENAI_URL`. Defaults to `120` if unset. | `120` |
 | `THEME` *(optional)*| Live-console color preset — see [Themes](#themes)  | `dark-ocean`, `light-paper`, or empty for auto-detect |
 | `SHOW_STREAM_PROMPTS` *(optional, debug)* | Prints every message sent to the LLM each turn, in full — no truncation anywhere, unlike the normal tool-result preview. Verbose by design; meant for prompt-engineering and context-compression debugging, not everyday runs. Accepts `1`/`true`/`yes`/`on`. | `1` |
+| `LOG_LLM_CALL_DEBUG` *(optional, debug)* | Appends every LLM request/response pair to `JFI/<session>/llm_debug.jsonl` — one JSON object per line, full request (messages + tools) and full response (content + tool_calls), no truncation. Unlike `SHOW_STREAM_PROMPTS` (console/TUI-only, meant for watching a run live), this persists to disk so a run can be inspected afterward. Accepts `1`/`true`/`yes`/`on`. | `1` |
+| `PLANNER_SINGLE_PASS` *(optional)* | The planner phase runs as 4 internal passes by default — Architect (top-level shape only) → Team Lead (feature breakdown) → Journeyman (walks every branch down to genuinely atomic, checkbox-ready leaves) → Function Breakdown (for every atomic leaf that writes code, breaks it down further into one child leaf per function/method it implements) — instead of one combined pass, because a single pass was observed letting compound leaves through. Set this to opt back into the original one-pass planner (1 LLM call for the whole phase instead of 4) if you'd rather trade that decomposition quality for lower planner cost. Accepts `1`/`true`/`yes`/`on`. | `1` |
 | `SESSION_PATH` *(optional, advanced)* | Where the `JFI/` session folder is created, relative to. Defaults to the current working directory. | `.` |
 | `FLARESOLVERR_URL` *(optional)* | Base URL of a [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) instance. When a `curl` run via `execute_command` gets blocked by a site's anti-bot/DoS protection (Cloudflare challenge, etc.), the model is told to retry the request through this endpoint instead. Left unset, the model is just told the direct request was blocked. | `http://localhost:8192/` |
 
-Every one of `OPENAI_URL` / `OPENAI_API_KEY` / `MODEL` / `TEMPERATURE` / `FREQUENCY_PENALTY` can also be set **per phase**, prefixed `PLANNER_`, `IMP_`, `TESTING_`, `REVIEWER_`, or `CLEANUP_` (e.g. `REVIEWER_MODEL=gpt-4.1`, `IMP_OPENAI_URL=http://127.0.0.1:8080/v1`). A phase with no prefixed override falls back to the shared, unprefixed setting — so the default (unset) behavior is exactly one model for every phase, and you only add prefixed lines for the phases you actually want to route elsewhere (e.g. a cheap/fast model for `testing`, a stronger one for `reviewer`).
+Every one of `OPENAI_URL` / `OPENAI_API_KEY` / `MODEL` / `TEMPERATURE` / `FREQUENCY_PENALTY` / `CONTEXT_SIZE` can also be set **per phase**, prefixed `PLANNER_`, `IMP_`, `TESTING_`, `REVIEWER_`, or `CLEANUP_` (e.g. `REVIEWER_MODEL=gpt-4.1`, `IMP_OPENAI_URL=http://127.0.0.1:8080/v1`). A phase with no prefixed override falls back to the shared, unprefixed setting — so the default (unset) behavior is exactly one model for every phase, and you only add prefixed lines for the phases you actually want to route elsewhere (e.g. a cheap/fast model for `testing`, a stronger one for `reviewer`). `CONTEXT_SIZE` in particular is worth setting per phase whenever a phase's model differs from the shared default's real context window — otherwise compression budgets that phase against the wrong window.
 
 `.env` is loaded before anything else runs (see `runner.py::main()`), so a `THEME=...` line in it takes effect no matter how JFI was launched.
 
@@ -205,6 +207,30 @@ The dashboard also shows `plan.md`'s checklist progress and the latest `review.m
 
 ---
 
+## Fleet dashboard (`frontend/` — Node master)
+
+`jfi-web` needs a shared filesystem between the session and the dashboard. The fleet dashboard doesn't: its master is a small Node WebSocket server meant to run on its own machine (or just a different terminal) and watch *multiple* sessions, anywhere, over the network — a session and the master only ever talk over one socket, never files. The master is deliberately a separate Node project (`frontend/`), not Python — JFI (Python) sessions are pure WebSocket clients of it, so the wire protocol (plain WebSocket + JSON) is all that connects the two; nothing on the Python side cares what language the master is written in.
+
+```bash
+uv sync --extra master                    # pulls in websockets, for the Python client side
+cd frontend && npm install && npm run build   # build the fleet UI once
+npm run master                            # serves it on :8765 (MASTER_PORT to change)
+```
+
+Then, on each session you want it to watch (any machine that can reach the master's port):
+
+```bash
+MASTER_WS_URL=ws://<master-host>:8765/report ./JFI
+```
+
+That's independent of `JFI_WEB_BRIDGE`/`jfi-web` — both can run at once, and neither depends on the other. A session identifies itself to the master with an opaque `hostname::session-id` string and a short repo-directory label, never a filesystem path (the master has no way to read a remote session's disk anyway).
+
+Open `http://<master-host>:8765` for the fleet UI: a **Fleet** tab (every reporting session as a card, grouped by phase, with a live phase-distribution chart — click any card for detail), an **Activity** tab (a merged, chronological feed of every session's phase changes, ticks, and prompts), and a **Session** tab (the clicked session's own phase timeline, current task, and token usage). A theme dropdown top-right switches the whole palette — the same 20 presets `THEME` supports in the terminal itself (see [Themes](#themes)), derived into this app's full CSS token set from each preset's 5 raw colors — remembered per browser via `localStorage`. Everything shown is a real field from `get_status_snapshot()` or derived from it server-side — there's no invented "cost" or "model" number anywhere.
+
+**Security:** the master ships with no authentication — anyone who can reach its port can see every reporting session's live status (task text, token counts, review findings). Only run it where you already trust the network (behind a VPN, a firewalled LAN), the same trust model `execute_command` already has. The **Session** tab's awaiting-prompt panel is read-only in this version — answer a pending prompt from the session's own terminal or `jfi-web`, not from the fleet dashboard.
+
+---
+
 ## `uv run build` — standalone binary
 
 Builds a single native `jfi` executable with PyInstaller — the machine that runs it needs no Python install at all (unlike `./JFI`, which still needs a system Python to bootstrap its own venv on first run).
@@ -245,7 +271,8 @@ Just-Finish-It/
 │   │   ├── pt_console_manager.py# PromptToolkitConsoleManager: full-screen UI — header/task/status lines, streaming AI space,
 │   │   │                        #   always-live input line (queue/force/answer), scroll lock, theme presets, live run.log mirroring
 │   │   ├── key_bindings.py      # teaches the terminal Shift+Enter/Ctrl+Enter encodings so multiline input works everywhere
-│   │   └── web_bridge.py        # WebBridge: mirrors live status + relays answers/new-request text to/from jfi-web, see "Web dashboard" below
+│   │   ├── web_bridge.py        # WebBridge: mirrors live status + relays answers/new-request text to/from jfi-web, see "Web dashboard" below
+│   │   └── socket_reporter.py   # SocketReporter: a WebSocket CLIENT mirroring live status to the fleet master (frontend/server/master.js), see "Fleet dashboard" below
 │   ├── orchestrator/
 │   │   └── basic_orchestrator.py# legacy single-turn orchestrator (kept for reference/testing; runner.py is what JFI actually runs)
 │   ├── web/                     # jfi-web: an optional Streamlit dashboard, see "Web dashboard" below
@@ -259,10 +286,24 @@ Just-Finish-It/
 │       ├── image_tools.py       # capture_screenshot / view_image — the one tool pair that returns an image to the model, not just text
 │       ├── web_tools.py         # fetch_webpage_images — downloads a page's images to disk (view_image shows them, same as a screenshot)
 │       ├── video_tools.py       # extract_video_frames — dedupes a video down to its visually distinct frames (ffmpeg + a pure-Python pixel-diff pass)
-│       └── llm_tools.py         # ask_llm — a stateless one-off LLM call for text work with no dedicated tool
+│       ├── llm_tools.py         # ask_llm — a stateless one-off LLM call for text work with no dedicated tool
+│       ├── process_tools.py     # start_background_process / list_processes / stop_background_process — handle-based, never a raw pid or name pattern
+│       └── plan_renumber.py     # python -m JFI.tool.plan_renumber — deterministic plan.md subtree renumbering, not an LLM turn
 │
 ├── src/build_binary/             # `uv run build` — PyInstaller onefile packaging of src/JFI/runner.py
 │   └── __init__.py
+│
+├── frontend/                     # the fleet dashboard, END TO END — a separate Node project, deliberately kept out of src/
+│   ├── package.json              #   so the Python package and the JS build never mix; `npm run master` runs the server, `npm run build` -> dist/ it serves
+│   ├── vite.config.js            # dev-only: `npm run dev` + hot reload, proxying /view + /report to the master (MASTER_DEV_PROXY_TARGET)
+│   ├── index.html
+│   ├── server/
+│   │   ├── master.js             # `npm run master` — the fleet WebSocket server (Node, not Python) + static file host for ../dist/
+│   │   └── session-registry.js   # SessionRegistry/deriveEvents: master.js's in-memory fleet state, no dependency on ws/http (unit-testable alone)
+│   └── src/
+│       ├── main.js               # WebSocket client, all rendering, tab switching, theme dropdown — no framework
+│       ├── themes.js             # the SAME 20 THEME presets JFI's own terminal supports, expanded into this app's full CSS token set
+│       └── style.css             # component styles + a static-fallback token set (themes.js overrides these live via main.js)
 │
 ├── test/                        # pytest suite (see "Tests" below) — unit tests per module plus the plan-file protocol
 ├── utils/                       # dev-only scripts, not part of the shipped package
@@ -312,8 +353,13 @@ It's meant to stay small — a handful of high-value facts, not a transcript.
 | `view_image`       | Attach an image file into the model's next turn (the only tool whose result becomes an actual image message, not just text) — this is how the agent can actually *see* screenshots it captured or images `fetch_webpage_images` downloaded. |
 | `extract_video_frames` | Turn a video into a small set of unique screenshots: extracts the first frame plus every later frame whose pixels differ from the last *kept* frame by at least `threshold` (default 50%), saved to disk auto-numbered. Same "writes files, doesn't show you anything" design as `capture_screenshot` — `view_image` each one afterward. Requires the `ffmpeg` binary. |
 | `ask_llm`          | A general-purpose escape hatch: sends `prompt` as a fresh, **stateless** single-turn LLM call (no tools, no conversation history, no plan/file access) and returns the reply. For one-off text work — a description, a clarification, a rephrase, brainstorming a name — that doesn't warrant its own dedicated tool. Uses whatever model the calling phase itself is configured for (see [per-phase models](#configuration-env) above); its cost still counts toward the header's cumulative ↓/↑ token totals, real usage if the server reports it, an estimate otherwise. |
+| `start_background_process` | Starts a shell command (a dev/test server, anything long-running) detached, and returns a **handle** — never the raw OS pid. |
+| `list_processes`   | Lists processes *this session* started with `start_background_process` — never the whole OS process table. Use instead of `ps aux`/`ps -ef`. |
+| `stop_background_process` | Stops a process by its handle — SIGTERM to its whole process group, then SIGKILL after `timeout` (default 5s) if it's still alive. Structurally can't match and kill the wrong process, unlike `pkill`/`kill` by a guessed pid or name pattern (a real, observed failure: the shell running `execute_command` itself can share part of the pattern). |
 
 Every failed call gets a concrete `AUTO-RECTIFY:` instruction naming the exact tool/argument to change, and after 3 identical failures JFI tells the model to abandon that approach rather than loop — the difference between "retry forever" and "fix or move on."
+
+A related but standalone utility, not itself an LLM tool: `python -m JFI.tool.plan_renumber <plan_path> <parent-number>` deterministically renumbers every descendant of `<parent-number>` in `plan.md` (fixing gaps/duplicates and repairing drifted indentation) in one pass, driven by execute_command — the Journeyman planner stage is told to reach for this instead of hand-editing each shifted line with `replace_in_file`, which is exactly what was observed going wrong repeatedly in a real session.
 
 ---
 

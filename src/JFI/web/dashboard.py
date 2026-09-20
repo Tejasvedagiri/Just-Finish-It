@@ -139,7 +139,14 @@ def _render_queue_input(session_path: Path) -> None:
 
 def _render_status(status: dict) -> None:
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Phase", (status.get("phase") or "-").title() or "-")
+    phase_label = (status.get("phase") or "-").title() or "-"
+    # Planner's own internal stage (Arc/Lead/Journy/Func/Task -- see
+    # runner.PLANNER_STAGES) rides the same "Phase" metric rather than a
+    # separate widget, so at a glance this reads "Planner (Journy)" instead
+    # of leaving the dashboard indistinguishable across all four passes.
+    if status.get("stage"):
+        phase_label += f" ({status['stage']})"
+    c1.metric("Phase", phase_label)
     c2.metric("State", status.get("state") or "-")
     c3.metric("Iteration", status.get("iteration") or 1)
     tokens = status.get("tokens")
@@ -163,6 +170,22 @@ def _render_status(status: dict) -> None:
         f"written: {status.get('tokens_written', 0):,} · "
         f"queued input: {status.get('queue_size', 0)}"
     )
+
+    processes = status.get("background_processes")
+    if processes:
+        with st.expander(f"Background processes ({len(processes)})", expanded=True):
+            for p in processes:
+                where = " ".join(
+                    filter(None, [
+                        f"host={p['host']}" if p.get("host") else None,
+                        f"port={p['port']}" if p.get("port") else None,
+                    ])
+                )
+                st.caption(
+                    f"**{p['handle']}** · `{p['command']}` · pid={p['pid']}"
+                    + (f" · {where}" if where else "")
+                    + f" · {p['status']} · {p['elapsed']}s"
+                )
 
 
 def main() -> None:
@@ -227,9 +250,14 @@ def main() -> None:
 
     log_path = session_path / "run.log"
     if log_path.exists():
-        with st.expander("Recent activity (run.log tail)"):
+        with st.expander("Recent activity (run.log tail, newest first)"):
             lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            st.code("\n".join(lines[-200:]) or "(empty)")
+            # Newest line first -- this panel re-renders from scratch on every
+            # auto-refresh (see the st.rerun() below), so a chronological tail
+            # would put the newest activity at the BOTTOM, forcing a re-scroll
+            # every refresh just to see what's new. Reversed, the newest line
+            # is always visible at the top without scrolling.
+            st.code("\n".join(reversed(lines[-200:])) or "(empty)")
 
     if auto_refresh:
         time.sleep(refresh_seconds)

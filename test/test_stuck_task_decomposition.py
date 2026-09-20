@@ -37,6 +37,7 @@ class _RecordingConsole(AbstractManager):
     def __init__(self, responses, max_turns=None):
         self._responses = list(responses)
         self.status_calls: list[dict] = []
+        self.task_token_calls: list[tuple] = []
         self._max_turns = max_turns
         self._turns = 0
 
@@ -47,6 +48,9 @@ class _RecordingConsole(AbstractManager):
 
     def set_status(self, **kwargs):
         self.status_calls.append(kwargs)
+
+    def record_task_tokens(self, task, tokens, started_at=None, ended_at=None, phase=None):
+        self.task_token_calls.append((task, tokens))
 
     def display_rule(self, label=""):
         pass
@@ -181,6 +185,55 @@ def test_stuck_directive_resets_when_task_changes(make_manager, monkeypatch):
     assert not directives
 
 
+def test_task_transition_records_the_finished_leafs_token_cost(make_manager, monkeypatch):
+    """Feeds the fleet dashboard's tasks-vs-tokens heatmap: when a leaf's
+    box gets ticked (current_task changes), the JUST-FINISHED leaf's
+    accumulated token cost must be handed to
+    console.record_task_tokens BEFORE the counter resets for the next
+    leaf — see runner._drive_turn_loop."""
+    from JFI.runner import run_phase
+
+    ssm = make_manager("records-task-tokens")
+    Path(ssm.plan_path).write_text(
+        "# Plan\n\n## Implementation\n"
+        "- [ ] 1.1 First leaf\n"
+        "- [ ] 1.2 Second leaf\n\n## Testing\n- [ ] 2.1 n/a\n",
+        encoding="utf-8",
+    )
+
+    def _tick_first_leaf():
+        text = Path(ssm.plan_path).read_text(encoding="utf-8")
+        Path(ssm.plan_path).write_text(text.replace("- [ ] 1.1", "- [x] 1.1"), encoding="utf-8")
+        return {"content": "ticked 1.1", "tool_calls": None}
+
+    def _tick_second_leaf():
+        text = Path(ssm.plan_path).read_text(encoding="utf-8")
+        Path(ssm.plan_path).write_text(text.replace("- [ ] 1.2", "- [x] 1.2"), encoding="utf-8")
+        return {"content": "ticked 1.2", "tool_calls": None}
+
+    console = _RecordingConsole(
+        [_tick_first_leaf, _tick_second_leaf, {"content": "IMP_COMPLETE", "tool_calls": None}],
+        max_turns=6,
+    )
+
+    run_phase(console, {"imp": _FakeLLM()}, ssm, "imp")
+
+    # First call is always the empty starting title (no leaf finished yet) —
+    # ignore it and check the two real leaf transitions that followed.
+    real_calls = [c for c in console.task_token_calls if c[0]]
+    assert len(real_calls) == 2
+    assert real_calls[0][0] == "1.1 First leaf"
+    assert real_calls[1][0] == "1.2 Second leaf"
+    # Leaf 1.1 is the very first turn of the whole phase: token_usage()
+    # reflects only prior conversation HISTORY (never the system prompt,
+    # added separately per get_messages), and there IS no prior history
+    # yet on turn one — so its recorded cost is legitimately 0, not a bug.
+    # By leaf 1.2's turn, 1.1's own response has been appended to history,
+    # so its cost must be real and positive.
+    assert real_calls[0][1] == 0
+    assert real_calls[1][1] > 0
+
+
 def test_stuck_directive_fires_for_adaptive_session_manager_too(make_adaptive_manager, monkeypatch):
     """run_phase's stuck-task tracking only calls SessionManager-interface
     methods (current_task_title, add_message, get_messages, ...) —
@@ -216,6 +269,11 @@ def test_stuck_task_tracking_ignores_phases_without_a_task_queue(make_manager, m
 
     monkeypatch.setenv("TASK_STUCK_TIME_LIMIT_SECONDS", "300")
     monkeypatch.setenv("TASK_STUCK_TOKEN_LIMIT", "1")
+    # This test is about stuck-task tracking, not planner staging — pin the
+    # single-pass planner (see test_tiered_planner.py for stage coverage) so
+    # the 3 canned turns below map onto one PLANNER_COMPLETE marker, not the
+    # tiered default's 3 separate stage markers.
+    monkeypatch.setenv("PLANNER_SINGLE_PASS", "1")
 
     ssm = make_manager("planner-phase")
     console = _RecordingConsole([

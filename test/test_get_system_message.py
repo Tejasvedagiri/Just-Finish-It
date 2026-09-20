@@ -111,6 +111,42 @@ class TestVerificationOrderingGuidance:
         assert "sudo" in msg
 
 
+class TestStructuredProcessToolsGuidance:
+    """VERIFICATION_RULES points at start_background_process/
+    stop_background_process (handle-based, never a raw pid/name pattern)
+    as the default for anything long-running, instead of a shell `&` plus
+    hand-tracked PID -- see process_tools.py's own module docstring for the
+    self-inflicted `pkill -f` failure this replaces."""
+
+    def test_mentions_structured_process_tools(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("testing", manager.plan_path)
+        assert "start_background_process" in msg
+        assert "stop_background_process" in msg
+
+    def test_still_warns_about_name_based_search_as_fallback(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("testing", manager.plan_path)
+        assert "pgrep" in msg or "pkill" in msg
+
+
+class TestReadFilePreferredOverCat:
+    def test_imp_prompt_prefers_read_file_over_cat(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("imp", manager.plan_path)
+        assert "prefer read_file" in msg
+        assert "`cat`" in msg
+
+    def test_testing_prompt_prefers_read_file_over_cat(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("testing", manager.plan_path)
+        assert "prefer read_file over" in msg
+
+
 class TestPendingItems:
     def test_pending_items_returns_unchecked_under_section(self, manager):
         manager.plan_file.write_text(
@@ -164,6 +200,32 @@ class TestContextCache:
 
         msg = get_system_message("imp", "JFI/demo/plan.md")
         assert isinstance(msg, str) and "context.json" in msg
+
+
+class TestRunCommandsPersistence:
+    """Observed failure this guidance exists to prevent: a session discovers
+    the correct interpreter/command the hard way (plain `python3` fails with
+    ModuleNotFoundError, THEN `.venv/bin/python`/`uv run` is tried), and then
+    re-discovers it the same way again later once the turn that figured it
+    out ages out of context. The fix is the SAME context-cache auto-load
+    mechanism other durable facts already use (see CONTEXT_CACHE_RULES /
+    render_facts_for_auto_load) — a stable "run_commands" key, not a new
+    file or tool."""
+
+    def test_context_cache_rules_instruct_saving_run_commands(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        for phase in ("planner", "imp", "testing", "reviewer", "cleanup"):
+            msg = get_system_message(phase, manager.plan_path, manager.context_cache_path)
+            assert "run_commands" in msg
+            assert "context_save" in msg
+
+    def test_names_the_python3_then_uv_failure_pattern(self, manager):
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = get_system_message("imp", manager.plan_path, manager.context_cache_path)
+        assert "ModuleNotFoundError" in msg
+        assert "uv run" in msg
 
 
 class TestReviewerSystemMessage:

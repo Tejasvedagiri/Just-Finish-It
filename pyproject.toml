@@ -22,6 +22,12 @@ dependencies = [
 # Only needed for `jfi-web` / src/JFI/web/dashboard.py -- the core agent has
 # no dependency on this, so it stays opt-in rather than in the base install.
 web = ["streamlit>=1.38"]
+# Only needed for a session reporting to a fleet master
+# (src/JFI/manager/socket_reporter.py, gated on MASTER_WS_URL being set) --
+# the core agent has no dependency on this either. The master itself is a
+# separate Node project (frontend/, `npm run master`), not Python -- see
+# "Fleet dashboard" in README.
+master = ["websockets>=13"]
 
 [project.scripts]
 jfi = "JFI.runner:main"

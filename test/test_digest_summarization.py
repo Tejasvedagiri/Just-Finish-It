@@ -173,6 +173,24 @@ def test_build_digest_uses_llm_summary_on_first_digest_regardless_of_size(make_m
     assert ssm.metadata["digest_block_count"] > 0
 
 
+def test_digest_summary_prompt_favors_completeness_over_brevity(make_manager):
+    """The summarizer's own system prompt used to cap it at 'well under 200
+    words' -- too lossy for a long session's worth of aged-out history, per
+    live use. It now explicitly trades brevity for completeness instead."""
+    ssm = make_manager("digest-completeness-wording")
+    ssm.add_message("user", "build the thing")
+    _fill_middle(ssm, 12)
+
+    llm = FakeLLMStream(reply="Learned X, decided Y.")
+    ssm.set_llm_streams({"imp": llm})
+
+    ssm.compress_history(reserve=ssm.context_budget() - 50, phase="imp")
+
+    system_prompt = llm.calls[0][0]["content"]
+    assert "200 words" not in system_prompt
+    assert "Favor completeness" in system_prompt
+
+
 def test_build_digest_persists_across_a_resumed_session(make_manager):
     ssm = make_manager("resume-me")
     ssm.add_message("user", "build the thing")
@@ -272,3 +290,63 @@ def test_set_llm_streams_is_optional(make_manager):
 
     digest = next(m for m in view if DIGEST_MARKER in str(m.get("content", "")))
     assert "Tool calls:" in digest["content"]
+
+
+# ---------------------------------------------------------------------------
+# _build_digest summarizes from PRE-Tier-2/3 content (compress_history's
+# pretrim_blocks) -- a fact buried past TOOL_RESULT_HEAD (600 chars) into a
+# long tool result must still reach the summarizer, not just the ~600+400
+# head/tail scraps Tier 2 leaves for the live model request. See
+# compress_history's pretrim_blocks comment for the run.log evidence this
+# guards against: a fact established via execute_command getting compressed
+# away before the digest ever saw it, forcing the agent to re-run the same
+# diagnostic command turns later with no memory of the answer.
+# ---------------------------------------------------------------------------
+
+def test_digest_summarization_sees_tool_result_text_past_the_elision_window(make_manager):
+    ssm = make_manager("deep-fact")
+    ssm.add_message("user", "build the thing")
+    _fill_middle(ssm, 12)
+    llm = FakeLLMStream(reply="v1")
+    ssm.set_llm_streams({"imp": llm})
+    ssm.compress_history(reserve=ssm.context_budget() - 50, phase="imp")
+    assert len(llm.calls) == 1
+
+    # A single tool result long enough that Tier 2's head(600)/tail(400)
+    # elision would cut this marker out entirely if it ran before the digest
+    # summarizer saw the content -- it sits well past character 600 and well
+    # before the last 400 characters.
+    marker = "DISCOVERED_FACT_db_path_is_slash_data_slash_stockmcp_db"
+    long_result = ("a" * 700) + marker + ("b" * 700)
+    ssm.append_raw({"role": "assistant", "content": "", "tool_calls": [{
+        "function": {"name": "execute_command", "arguments": json.dumps({"command": "probe db path"})}
+    }]})
+    ssm.append_raw({"role": "tool", "content": long_result})
+
+    # Push enough additional bulky blocks (and past KEEP_RECENT_BLOCKS more
+    # blocks) to both cross DIGEST_SUMMARY_MIN_CHARS and age the marker block
+    # out of the protected recent tail, so it actually reaches the summarizer
+    # instead of just riding along untouched in the live view.
+    for i in range(20):
+        ssm.append_raw({"role": "assistant", "content": "", "tool_calls": [{
+            "function": {"name": "execute_command", "arguments": json.dumps({"command": f"big {i}"})}
+        }]})
+        ssm.append_raw({"role": "tool", "content": "y" * (DIGEST_SUMMARY_MIN_CHARS // 10)})
+    ssm.add_message("user", "keep going")
+    llm.reply = "v2, learned the db path"
+
+    ssm.compress_history(reserve=ssm.context_budget() - 50, phase="imp")
+
+    assert len(llm.calls) == 2
+    sent_text = json.dumps(llm.calls[1])
+    assert marker in sent_text
+
+
+def test_keep_recent_blocks_raised_for_less_aggressive_recent_trimming():
+    """Raised from 6 -> 10 after live use showed genuinely RECENT turns (not
+    just history old enough to digest) getting trimmed/elided more often
+    than felt right under a tight CONTEXT_SIZE -- see the constant's own
+    comment in simple_session_manager.py for the full rationale."""
+    from JFI.session.simple_session_manager import KEEP_RECENT_BLOCKS
+
+    assert KEEP_RECENT_BLOCKS >= 10
