@@ -36,7 +36,7 @@ def test_no_just_finish_it_occurrences_in_source():
 
 
 def test_jfi_folder_present_and_used_in_code():
-    """The JFI folder is the canonical session/plan location."""
+    """The flat .jfi/ folder is the canonical session/plan location."""
     from JFI.session.simple_session_manager import DEFAULT_PLAN_PATH
 
-    assert DEFAULT_PLAN_PATH == "JFI/plan.md"
+    assert DEFAULT_PLAN_PATH == ".jfi/plan.md"

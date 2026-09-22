@@ -28,7 +28,7 @@ from JFI.manager.socket_reporter import SocketReporter, master_ws_url as _read_m
 from JFI.session.abstract_session_manager import SessionManager
 from JFI.session.adaptive_session_manager import AdaptiveSessionManager
 from JFI.session.simple_session_manager import (
-    DEFAULT_CONTEXT_CACHE_PATH, SessionInUseError, SimpleSessionManager, get_phase_trigger, _marker_present,
+    SessionInUseError, SimpleSessionManager, get_phase_trigger, _marker_present,
 )
 
 # Tools and Schemas
@@ -37,8 +37,10 @@ from JFI.tool.file_tools import write_file, read_file, append_to_file, replace_i
 from JFI.tool.cmd_tools import execute_command, make_gated_execute_command
 from JFI.tool.context_tools import make_context_tools
 from JFI.tool.deferred_tools import make_load_tool
+from JFI.tool.note_tools import clear_note, get_note, make_note_tools, PLAN_FEEDBACK, REVIEW_REPORT, REVIEWER_NOTES
 from JFI.tool.image_tools import capture_screenshot, view_image
 from JFI.tool.llm_tools import make_ask_llm
+from JFI.tool.plan_db_tools import has_leaves, render_plan_markdown
 from JFI.tool.web_tools import fetch_webpage_images
 from JFI.tool.browser_tools import browse_webpage
 from JFI.tool.video_tools import extract_video_frames
@@ -89,10 +91,15 @@ TOOL_MAP = {
     # matters. Kept in TOOL_MAP anyway so the generic "unknown tool" /
     # signature-introspection error paths still cover it uniformly.
     "view_image": view_image,
-    # Rebound to the actual session's context.json in _run_session, same as
-    # execute_command above — these defaults only matter before a session
-    # exists (import time, direct testing).
-    **make_context_tools(DEFAULT_CONTEXT_CACHE_PATH),
+    # Rebound to the actual session's own DB engine in _run_session, same
+    # as execute_command below — these defaults only matter before a
+    # session exists (import time, direct testing).
+    "context_save": lambda key="", value="": "Error: context_save is not available yet — no session is active.",
+    "context_lookup": lambda keyword="": "Error: context_lookup is not available yet — no session is active.",
+    "add_reviewer_note": lambda text="": "Error: add_reviewer_note is not available yet — no session is active.",
+    "get_reviewer_notes": lambda: "Error: get_reviewer_notes is not available yet — no session is active.",
+    "write_review_report": lambda text="": "Error: write_review_report is not available yet — no session is active.",
+    "write_plan_feedback": lambda text="": "Error: write_plan_feedback is not available yet — no session is active.",
     # Rebound to the active phase's own LLM stream in run_phase (a phase can
     # have its own model/endpoint — see PHASE_ENV_PREFIX) — this default
     # only matters before any phase has run.
@@ -101,6 +108,15 @@ TOOL_MAP = {
     # as execute_command/context_save/context_lookup above — this default
     # only matters before a session exists.
     "load_tool": lambda name="": "Error: load_tool is not available yet — no session is active.",
+    # Rebound to the actual session's DB engine in _run_session via
+    # ssm.plan_db_tools() (see JFI.tool.plan_db_tools) — these defaults
+    # only matter before a session exists.
+    "get_plan": lambda: "Error: get_plan is not available yet — no session is active.",
+    "add_leaf": lambda phase="", description="", parent_id=0: "Error: add_leaf is not available yet — no session is active.",
+    "start_leaf": lambda leaf_id=0: "Error: start_leaf is not available yet — no session is active.",
+    "mark_leaf_done": lambda leaf_id=0, tokens=0: "Error: mark_leaf_done is not available yet — no session is active.",
+    "split_leaf": lambda leaf_id=0, into=(): "Error: split_leaf is not available yet — no session is active.",
+    "reorder_leaf": lambda leaf_id=0, after_leaf_id=0: "Error: reorder_leaf is not available yet — no session is active.",
 }
 
 PHASES = ["planner", "product_owner", "imp", "testing", "reviewer", "cleanup"]
@@ -459,29 +475,40 @@ def handle_skip_all_request(console: AbstractManager, ssm: SessionManager, phase
 
 
 def _clear_reviewer_notes(ssm: SessionManager) -> None:
-    """Removes JFI/<session>/NotesForReviewer.md once the reviewer phase has
-    finished reading it (see get_system_message's imp/reviewer branches --
-    imp appends a note there whenever a step hit a problem worth flagging;
-    reviewer reads it before deciding PASS/FAIL). Cleared here at the
-    harness level, unconditionally and regardless of PASS/FAIL, rather than
-    relying on the model to tidy it up itself: the notes are only relevant
-    to the ONE review pass that just consumed them, and a stale note left
-    behind would otherwise resurface in a later, unrelated review pass. Any
-    issue a note pointed to either already made it into review.md (which
-    schedules its own follow-up iteration) or was confirmed harmless -- the
-    note itself has done its job either way."""
-    try:
-        (ssm.session_path / "NotesForReviewer.md").unlink(missing_ok=True)
-    except OSError:
-        pass
+    """Clears this session's SessionNote(kind=REVIEWER_NOTES) row (see
+    JFI.tool.note_tools) once the reviewer phase has finished reading it
+    (see get_system_message's imp/reviewer branches -- imp calls
+    add_reviewer_note whenever a step hit a problem worth flagging;
+    reviewer calls get_reviewer_notes before deciding PASS/FAIL). Cleared
+    here at the harness level, unconditionally and regardless of PASS/FAIL,
+    rather than relying on the model to tidy it up itself: the notes are
+    only relevant to the ONE review pass that just consumed them, and a
+    stale note left behind would otherwise resurface in a later, unrelated
+    review pass. Any issue a note pointed to either already made it into
+    the review report (which schedules its own follow-up iteration) or was
+    confirmed harmless -- the note itself has done its job either way."""
+    if hasattr(ssm, "db_engine"):
+        clear_note(ssm.db_engine, ssm.session_id, REVIEWER_NOTES)
 
 
 def _read_plan_markdown(ssm: SessionManager) -> str:
-    """Raw current text of plan.md, for AbstractManager.set_status's
-    plan_markdown param -- a fleet-dashboard viewer has no filesystem access
-    to read plan.md itself, so the full checklist rides along in the status
-    snapshot. Empty string before the planner has written the file yet (no
-    session ever starts implementation without one, so this is transient)."""
+    """Text for AbstractManager.set_status's plan_markdown param -- a
+    fleet-dashboard viewer has no filesystem access to read plan.md (or
+    query a DB) itself, so the full checklist rides along in the status
+    snapshot as plain text.
+
+    Prefers the DB (see JFI.tool.plan_db_tools) the same way
+    SimpleSessionManager's own plan_progress/phase_progress/etc. do once a
+    session has leaves there -- render_plan_markdown renders it in
+    plan.md's OLD bullet syntax byte-for-byte, so
+    frontend/src/main.js's existing parsePlanLines/buildPlanTree keeps
+    working completely unchanged; no frontend changes needed for a
+    DB-backed session's checklist to show up there. Falls back to reading
+    plan.md directly for a session that predates the DB migration. Empty
+    string before either exists yet (no session ever starts implementation
+    without one, so this is transient)."""
+    if hasattr(ssm, "db_engine") and has_leaves(ssm.db_engine, ssm.session_id):
+        return render_plan_markdown(ssm.db_engine, ssm.session_id)
     try:
         return Path(ssm.plan_path).read_text(encoding="utf-8")
     except OSError:
@@ -507,7 +534,6 @@ def _run_product_owner_loop(console: AbstractManager, llms: Dict[str, BaseLLMStr
     the whole run should stop (mirrors every other "if not run_phase(...):
     return" call site in _run_session).
     """
-    feedback_path = str(ssm.session_path / "feedback_to_plan.md")
     rounds = 0
 
     while True:
@@ -518,15 +544,12 @@ def _run_product_owner_loop(console: AbstractManager, llms: Dict[str, BaseLLMStr
         if not run_phase(console, llms, ssm, "product_owner"):
             return False
 
-        feedback = product_owner_feedback_outcome(feedback_path)
+        feedback = product_owner_feedback_outcome(ssm.db_engine, ssm.session_id)
         # Cleared immediately and unconditionally, whether or not there was
-        # feedback to act on -- this file's presence is a one-shot signal
+        # feedback to act on -- this row's presence is a one-shot signal
         # for THIS round only; a stale copy must never resurface in a later,
         # unrelated round. Never deferred to cleanup or any later pass.
-        try:
-            Path(feedback_path).unlink(missing_ok=True)
-        except OSError:
-            pass
+        clear_note(ssm.db_engine, ssm.session_id, PLAN_FEEDBACK)
 
         if feedback is None:
             console.display_rule("✅ PRODUCT OWNER APPROVED — proceeding to implementation")
@@ -543,7 +566,7 @@ def _run_product_owner_loop(console: AbstractManager, llms: Dict[str, BaseLLMStr
             return False
 
         ssm.add_message("user", feedback)
-        planner_trigger = get_phase_trigger("planner", initial_goal, ssm.plan_path, po_feedback_path=feedback_path)
+        planner_trigger = get_phase_trigger("planner", initial_goal, ssm.plan_path, po_feedback_given=True)
         ssm.add_message("user", planner_trigger)
         if not run_phase(console, llms, ssm, "planner"):
             return False
@@ -562,22 +585,20 @@ MAX_REVIEW_ITERATIONS = 3
 MAX_PRODUCT_OWNER_ITERATIONS = 3
 
 
-def product_owner_feedback_outcome(feedback_path: str) -> Optional[str]:
+def product_owner_feedback_outcome(engine, session_id: str) -> Optional[str]:
     """
     Mirrors review_outcome() for the planner<->product_owner loop: a
-    generated feedback_to_plan.md means Product Owner found a real problem
-    with the plan and wants the planner to fix it before implementation
-    starts. No file means the plan was approved as-is — return None.
+    SessionNote(kind=PLAN_FEEDBACK) row means Product Owner found a real
+    problem with the plan and wants the planner to fix it before
+    implementation starts. No row means the plan was approved as-is —
+    return None.
 
     The returned feedback embeds the report's full content, so the planner
-    sees every point even after the file is cleared away.
+    sees every point even after the row is cleared away.
     """
-    if not Path(feedback_path).exists():
+    report = get_note(engine, session_id, PLAN_FEEDBACK)
+    if report is None:
         return None
-    try:
-        report = Path(feedback_path).read_text(encoding="utf-8")
-    except OSError:
-        report = "(the feedback file could not be read — re-inspect the plan and the repo)"
     return (
         f"PRODUCT OWNER FEEDBACK: the plan was reviewed against the real repo state before "
         f"implementation and found wanting. Its feedback:\n\n"
@@ -588,22 +609,19 @@ def product_owner_feedback_outcome(feedback_path: str) -> Optional[str]:
     )
 
 
-def review_outcome(review_path: str) -> Optional[str]:
+def review_outcome(engine, session_id: str) -> Optional[str]:
     """
-    Post-review decision (1): a generated review.md means the reviewer found
-    issues and wants another full iteration (planner → imp → testing →
-    reviewer). No review.md means the review was good — return None to end
-    the run normally.
+    Post-review decision (1): a SessionNote(kind=REVIEW_REPORT) row means
+    the reviewer found issues and wants another full iteration (planner →
+    imp → testing → reviewer). No row means the review was good — return
+    None to end the run normally.
 
     The returned feedback embeds the report's full content, so the next
-    planner sees every issue even after the file is cleared away.
+    planner sees every issue even after the row is cleared away.
     """
-    if not Path(review_path).exists():
+    report = get_note(engine, session_id, REVIEW_REPORT)
+    if report is None:
         return None
-    try:
-        report = Path(review_path).read_text(encoding="utf-8")
-    except OSError:
-        report = "(the review report could not be read — re-inspect the plan and the code)"
     return (
         f"REVIEW FAILED: the reviewer found issues in the finished work. Its report:\n\n"
         f"{report}\n\n"
@@ -613,30 +631,28 @@ def review_outcome(review_path: str) -> Optional[str]:
     )
 
 
-def collect_next_iteration(console: AbstractManager, review_path: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+def collect_next_iteration(console: AbstractManager, engine=None, session_id: Optional[str] = None) -> tuple[Optional[str], bool]:
     """
     Decides what happens once the review phase has landed.
 
-    A failed review (review.md present) and anything the user queued while
-    the run was in flight are no longer mutually exclusive: both fold into
-    the SAME next iteration's feedback when both are present, instead of a
-    review failure starving queued follow-ups until some later iteration
-    happens to pass cleanly. Nothing here asks for approval; with neither
-    signal present, the pipeline idles with the input line live so feeding
-    it more work stays optional. Returns a (feedback, review_path) tuple —
-    feedback is None to end the run; review_path is set only when this
-    iteration was (at least partly) triggered by a failed review, for the
-    caller's loop-guard counter and to enrich the next planner trigger.
+    A failed review (a SessionNote(kind=REVIEW_REPORT) row present) and
+    anything the user queued while the run was in flight are no longer
+    mutually exclusive: both fold into the SAME next iteration's feedback
+    when both are present, instead of a review failure starving queued
+    follow-ups until some later iteration happens to pass cleanly. Nothing
+    here asks for approval; with neither signal present, the pipeline
+    idles with the input line live so feeding it more work stays optional.
+    Returns a (feedback, review_failed) tuple — feedback is None to end the
+    run; review_failed is True only when this iteration was (at least
+    partly) triggered by a failed review, for the caller's loop-guard
+    counter and to enrich the next planner trigger.
     """
-    review_feedback = review_outcome(review_path) if review_path else None
+    review_feedback = review_outcome(engine, session_id) if engine is not None else None
     if review_feedback:
         console.display_rule("🔁 REVIEW FAILED — SCHEDULING ANOTHER FULL ITERATION")
         # Remove the stale report so it cannot re-trigger a loop on its own;
-        # only a freshly written review.md may schedule another iteration.
-        try:
-            Path(review_path).unlink()
-        except OSError:
-            pass
+        # only a freshly written review report may schedule another iteration.
+        clear_note(engine, session_id, REVIEW_REPORT)
 
     queued = console.drain_queued_input()
     if not queued and not review_feedback:
@@ -646,7 +662,7 @@ def collect_next_iteration(console: AbstractManager, review_path: Optional[str] 
 
     requests = [q for q in (queued or []) if q.strip().lower() not in EXIT_WORDS]
     if not review_feedback and not requests:
-        return None, None  # stopped, nothing queued, and the review passed
+        return None, False  # stopped, nothing queued, and the review passed
 
     parts = []
     if review_feedback:
@@ -664,7 +680,7 @@ def collect_next_iteration(console: AbstractManager, review_path: Optional[str] 
             )
         parts.append(queued_block)
 
-    return "\n\n".join(parts), (review_path if review_feedback else None)
+    return "\n\n".join(parts), bool(review_feedback)
 
 
 # ----------------------------------------------------------------- the phases
@@ -704,9 +720,9 @@ def _session_manager_class(console: AbstractManager):
 
 def _web_bridge_enabled() -> bool:
     """JFI_WEB_BRIDGE=1: mirror this session's live status to
-    JFI/<session>/web_status.json and accept answers to get_user_choice /
+    .jfi/web_status.json and accept answers to get_user_choice /
     get_user_input prompts, plus new queued requests, from
-    JFI/<session>/web_answer.json -- see web_bridge.WebBridge. Also makes
+    .jfi/web_answer.json -- see web_bridge.WebBridge. Also makes
     run_pipeline auto-launch the jfi-web dashboard itself (see
     _launch_web_dashboard) unless JFI_WEB_DASHBOARD=0. Off by default:
     nobody who isn't running the web dashboard should pay for a background
@@ -911,7 +927,7 @@ def dump_prompt(console: AbstractManager, phase: str, messages: List[Dict[str, A
 
 def _log_llm_call_debug() -> bool:
     """LOG_LLM_CALL_DEBUG=1 (or true/yes/on) in .env: append every LLM
-    request/response pair to JFI/<session>/llm_debug.jsonl -- one JSON
+    request/response pair to .jfi/llm_debug.jsonl -- one JSON
     object per line, full request (messages + tools) and full response
     (content + tool_calls), no truncation. Unlike SHOW_STREAM_PROMPTS
     (console/TUI-only, meant for watching a run live), this persists to
@@ -925,7 +941,7 @@ def log_llm_call(ssm: SessionManager, phase: str, messages: List[Dict[str, Any]]
                   tools: Optional[List[Dict[str, Any]]], parsed_response: Dict[str, Any]) -> None:
     """
     Appends one JSON-line record of this turn's exact request and response
-    to JFI/<session>/llm_debug.jsonl. Gated by LOG_LLM_CALL_DEBUG -- see
+    to .jfi/llm_debug.jsonl. Gated by LOG_LLM_CALL_DEBUG -- see
     _log_llm_call_debug. The log is a debugging aid, not part of the
     pipeline's contract, so any I/O error here is swallowed rather than
     interrupting the run (same tradeoff pt_console_manager's own _log
@@ -1322,17 +1338,29 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
         # 2. Gate execute_command behind the human's approval, backed by this
         # session's own context.json (approved "Save" prefixes live there,
         # alongside whatever facts the LLM itself has stashed there).
-        TOOL_MAP["execute_command"] = make_gated_execute_command(console, ssm.context_cache_path)
-        TOOL_MAP.update(make_context_tools(ssm.context_cache_path))
-        TOOL_MAP.update(make_process_tools(ssm.context_cache_path))
+        TOOL_MAP["execute_command"] = make_gated_execute_command(console, ssm.db_engine, ssm.session_id)
+        TOOL_MAP.update(make_context_tools(ssm.db_engine, ssm.session_id))
+        TOOL_MAP.update(make_process_tools(ssm.db_engine, ssm.session_id))
+        TOOL_MAP.update(make_note_tools(ssm.db_engine, ssm.session_id))
         TOOL_MAP["load_tool"] = make_load_tool(ssm)
-        console.start_session_log(ssm.session_path / "run.log")
+        # DB-backed plan tools (get_plan/add_leaf/start_leaf/mark_leaf_done/
+        # split_leaf/reorder_leaf) -- see JFI.tool.plan_db_tools and SimpleSessionManager.
+        # plan_db_tools(). A manager that doesn't define it (a future
+        # non-DB-backed SessionManager) just leaves these at their
+        # "not available yet" placeholders below.
+        if hasattr(ssm, "plan_db_tools"):
+            TOOL_MAP.update(ssm.plan_db_tools())
+        if hasattr(ssm, "db_engine"):
+            console.start_session_db_log(ssm.db_engine, ssm.session_id)
         if _web_bridge_enabled():
             web_bridge = WebBridge(console, ssm.session_path)
             web_bridge.start()
         master_url = _master_ws_url()
         if master_url:
-            socket_reporter = SocketReporter(console, master_url, session_id=ssm.session_id)
+            socket_reporter = SocketReporter(
+                console, master_url, session_id=ssm.session_id,
+                db_engine=getattr(ssm, "db_engine", None),
+            )
             socket_reporter.start()
         # Requests queued but never drained before the process closed (killed,
         # crashed, or just quit) live in metadata.json — hand them back now, and
@@ -1360,8 +1388,8 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
             console.display_system(f"⏩ Skipping completed phases: {', '.join(skipped).upper()}")
 
         # 4. Outer Loop for Re-runs and Feedback
-        review_feedback: Optional[str] = None  # set when a failed review re-iteration starts
-        review_failures = 0                    # counts consecutive failed reviews (loop guard)
+        review_failed = False   # set when a failed review re-iteration starts
+        review_failures = 0     # counts consecutive failed reviews (loop guard)
         while not console.should_stop():
             if not active_phases:
                 console.display_system("All phases have already been completed for this session.")
@@ -1377,7 +1405,7 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
                     continue
 
                 trigger_message = get_phase_trigger(phase, initial_goal, ssm.plan_path, iteration,
-                                                    review_path=review_feedback)
+                                                    review_failed=review_failed)
 
                 # Avoid inserting duplicate trigger if already present in history
                 last_user_msg = next((m.get("content", "") for m in reversed(ssm.history) if m.get("role") == "user"), "")
@@ -1390,13 +1418,13 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
                 if phase == "reviewer":
                     _clear_reviewer_notes(ssm)
 
-            # 5. Review has landed: a generated review.md (failed review) or queued
+            # 5. Review has landed: a review report (failed review) or queued
             # requests loop us round again, no prompt.
-            feedback, review_feedback = collect_next_iteration(console, review_path=str(Path(ssm.plan_path).with_name("review.md")))
+            feedback, review_failed = collect_next_iteration(console, ssm.db_engine, ssm.session_id)
             if feedback is None:
                 break
 
-            if review_feedback is not None:
+            if review_failed:
                 review_failures += 1
                 console.display_rule(f"🔎 REVIEW FAIL #{review_failures}/{MAX_REVIEW_ITERATIONS} THIS SESSION")
                 if review_failures >= MAX_REVIEW_ITERATIONS:

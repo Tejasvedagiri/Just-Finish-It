@@ -164,19 +164,23 @@ class TestGetSystemMessagePlannerStages:
     def test_team_lead_forbids_single_child_parents(self):
         msg = get_system_message("planner", planner_stage="team_lead")
         assert "AT LEAST 2" in msg
-        # Level-1 items are never checkboxed (Architect's own invariant) --
-        # the single-real-subtask edge case must not contradict that.
-        assert "NEVER gets a checkbox" in msg
+        # Top-level items are never marked done directly (Architect's own
+        # invariant, now enforced by mark_leaf_done rejecting a leaf with
+        # children rather than a "checkbox" convention) -- the
+        # single-real-subtask edge case must not contradict that.
+        assert "never becomes a leaf" in msg
 
     def test_single_pass_planner_forbids_single_child_parents(self):
         msg = get_system_message("planner")
         assert "AT LEAST 2" in msg
         assert "pointless nesting" in msg
 
-    def test_journeyman_points_to_the_plan_renumber_tool(self):
+    def test_journeyman_points_to_the_reorder_leaf_tool(self):
+        """DB-backed replacement for the old plan_renumber.py workflow --
+        see JFI.tool.plan_db_tools.reorder_leaf's own docstring."""
         msg = get_system_message("planner", planner_stage="journeyman")
-        assert "python -m JFI.tool.plan_renumber" in msg
-        assert "replace_in_file" in msg  # names the failure mode it replaces
+        assert "reorder_leaf" in msg
+        assert "plan_renumber.py workflow entirely" in msg  # names the failure mode it replaces
 
     def test_journeyman_checks_dependency_ordering(self):
         """Observed in practice: a leaf verifying a package import was
@@ -184,6 +188,69 @@ class TestGetSystemMessagePlannerStages:
         msg = get_system_message("planner", planner_stage="journeyman")
         assert "verify the ported" in msg
         assert "ordering bug" in msg
+
+    def test_journeyman_and_function_breakdown_enforce_one_leaf_per_turn(self):
+        """Observed live, multiple times in one real session (see /todo.md's
+        Live validation section): reasoning about many leaves' split
+        decisions in one turn repeatedly blew the reasoning-output cap and
+        separately hit the model server's own context-size limit, needing
+        manual recovery each time. Both stages that walk the whole tree
+        (Journeyman, Function Breakdown) must tell the model to decide ONE
+        leaf per turn."""
+        journeyman_msg = get_system_message("planner", planner_stage="journeyman")
+        assert "ONE item at a time" in journeyman_msg
+        assert "reasoning cap" in journeyman_msg
+
+        fb_msg = get_system_message("planner", planner_stage="function_breakdown")
+        assert "ONE leaf at a time" in fb_msg
+        assert "reasoning cap" in fb_msg
+
+    def test_journeyman_exempts_investigation_leaves_from_the_one_tool_call_test(self):
+        """Observed in a real run (StockUI's portfolio-api-wiring session):
+        a single "investigate the SectorPie rendering bug" leaf was
+        recursively split into 30+ leaves nested 7 levels deep by applying
+        the normal "could this be one tool call" atomicity test to
+        open-ended diagnostic work, which has no natural one-tool-call
+        bottom. Journeyman must name this as its own failure mode and
+        exempt investigation-shaped leaves from the normal test."""
+        msg = " ".join(get_system_message("planner", planner_stage="journeyman").split())
+        assert "FIFTH failure" in msg
+        assert "SectorPie rendering bug" in msg
+        assert "30+ leaves nested 7 levels deep" in msg
+        assert "exempt from rule 2" in msg.lower() or "are exempt from" in msg
+
+    def test_journeyman_names_the_same_investigation_keywords_the_tool_layer_enforces(self):
+        """The prompt-level guidance and the mechanical depth cap in
+        JFI.tool.plan_db_tools (MAX_INVESTIGATION_DEPTH) must agree on what
+        counts as investigation/diagnostic work, or the model will keep
+        hitting a tool error it was never told to expect."""
+        from JFI.tool.plan_db_tools import INVESTIGATION_KEYWORDS
+
+        msg = get_system_message("planner", planner_stage="journeyman").lower()
+        for keyword in INVESTIGATION_KEYWORDS:
+            if keyword == "determine why":
+                continue  # phrased as "determine why" verbatim below; skip exact dup check
+            assert keyword in msg, f"{keyword!r} named in plan_db_tools.INVESTIGATION_KEYWORDS but missing from the Journeyman prompt"
+
+    def test_journeyman_names_max_investigation_depth_as_a_rejection_source(self):
+        """The model needs to recognize add_leaf/split_leaf's own rejection
+        (see plan_db_tools._check_depth) as confirmation to stop, not a bug
+        to retry around."""
+        msg = get_system_message("planner", planner_stage="journeyman")
+        assert "MAX_INVESTIGATION_DEPTH" in msg
+        assert "REJECTED with an error" in msg
+
+    def test_imp_phase_forbids_add_leaf_as_an_investigation_notebook(self):
+        """The other half of the same real-run failure: imp itself kept
+        calling add_leaf for each new diagnostic sub-step it thought up
+        while investigating, instead of just doing the work and
+        context_save-ing findings -- add_leaf is for genuinely new
+        deliverable work discovered, never the next step of an ongoing
+        investigation."""
+        msg = " ".join(get_system_message("imp").split())
+        assert "do NOT call add_leaf for each new thing you think of trying" in msg
+        assert "context_save each real finding" in msg
+        assert "genuinely NEW deliverable work" in msg
 
     def test_planner_stage_ignored_for_other_phases(self):
         # planner_stage only means something for phase == "planner".

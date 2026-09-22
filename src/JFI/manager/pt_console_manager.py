@@ -358,7 +358,16 @@ class PromptToolkitConsoleManager(AbstractManager):
         # even keystrokes feel laggy by the time a transcript got long.
         self._line_count = 1
         self._snapshot: Optional[tuple] = None  # (fragments, line_count) from the last render pass
-        self._log_file = None  # open file handle from start_session_log(), or None
+        # Set by start_session_db_log() once the session id is known --
+        # every _log() call writes a LogEvent row here too (see that
+        # method's own docstring for why EVERY tag, not just SYSTEM/RULE:
+        # REASONING/ERROR have no other persistence path at all, and
+        # TOOL_CALL/TOOL_RESULT/USER/ASSISTANT's full text here can differ
+        # from HistoryMessage's structured version, e.g. a truncated arg
+        # preview vs the raw tool_calls JSON).
+        self._db_engine = None
+        self._db_session_id: Optional[str] = None
+        self._log_seq = 0
         self._follow = True
         self._anchor = 0
 
@@ -872,40 +881,56 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._invalidate()
 
     def _log(self, tag: str, text: str) -> None:
-        """Writes ONE clean, plain-text, timestamped record to run.log —
-        independent of whatever's drawn in the live TUI pane (see _write/
-        _line for that).
+        """Writes ONE clean, plain-text, timestamped record to this
+        session's LogEvent table (full cutover replacement for the old
+        run.log file -- see JFI.session.history_store's module docstring)
+        -- independent of whatever's drawn in the live TUI pane (see
+        _write/_line for that).
 
-        run.log used to be a byte-for-byte mirror of the TUI (see git
-        history): emoji prefixes, box-drawing rule lines sized to the LIVE
-        terminal's column count, and the SAME truncated previews the
-        terminal uses to avoid flooding a fixed-width pane. None of that
-        makes sense for a file meant to be tailed or grepped after the
-        fact — a log file has no width constraint, so callers pass this the
-        FULL text where the TUI equivalent would truncate (display_tool_call's
-        60-char arg preview, display_tool_result's 8-line/width-capped
-        preview, ...). Each line gets its own "[HH:MM:SS] TAG: ..." prefix
-        so `grep '^\\[.*\\] TOOL_RESULT:'` (etc.) works directly on the file.
+        Every tag gets a row here, not just SYSTEM/RULE: REASONING and
+        ERROR have no other persistence path at all (they're never part of
+        a HistoryMessage -- reasoning tokens in particular are ephemeral,
+        shown for transparency but never fed back to the model), and
+        TOOL_CALL/TOOL_RESULT/USER/ASSISTANT's full text here can differ
+        from HistoryMessage's structured version (a truncated arg preview
+        vs. the raw tool_calls JSON, for instance) -- see also
+        export_db._render_log_export, which now reads LogEvent alone.
+
+        The whole (possibly multi-line) `text` becomes ONE row, not one
+        row per line -- the old file version split on newlines so every
+        line got its own "[HH:MM:SS] TAG: ..." prefix for direct
+        `grep`-ability; that mattered for a real file meant to be tailed,
+        but costs an avoidable write per line once there's no file to grep
+        and a verbose TOOL_RESULT could otherwise mean dozens of rows for
+        one real event. _log_tail (the in-memory live-view ring buffer)
+        keeps the old per-line shape since the dashboard still wants that.
         """
         if not text:
             return
         timestamp = datetime.now().strftime("%H:%M:%S")
         lines = text.splitlines() or [""]
         with self._lock:
-            # Kept in memory regardless of whether the file write below
-            # succeeds -- get_status_snapshot's log_tail field (a fleet
-            # dashboard's live log view) has no filesystem access to
-            # run.log at all once the viewer is remote, so this ring
+            # Kept in memory regardless of DB write success -- get_status_
+            # snapshot's log_tail field (a fleet dashboard's live log view)
+            # has no direct DB access from a remote viewer, so this ring
             # buffer is the only way that view gets log content.
             for line in lines:
                 self._log_tail.append(f"[{timestamp}] {tag}: {line}")
-            if self._log_file is not None:
+            if self._db_engine is not None and self._db_session_id is not None:
                 try:
-                    for line in lines:
-                        self._log_file.write(f"[{timestamp}] {tag}: {line}\n")
-                    self._log_file.flush()
-                except OSError:
-                    self._log_file = None
+                    from JFI.models import LogEvent, get_session
+
+                    self._log_seq += 1
+                    with get_session(self._db_engine) as db:
+                        db.add(LogEvent(
+                            session_id=self._db_session_id,
+                            seq=self._log_seq,
+                            tag=tag.lower(),
+                            text=text,
+                        ))
+                        db.commit()
+                except Exception:
+                    pass  # the log is best-effort; never let it crash a real turn
 
     def _line(self, style: str, text: str) -> None:
         with self._lock:
@@ -1682,52 +1707,46 @@ class PromptToolkitConsoleManager(AbstractManager):
 
     # --------------------------------------------------------------- logging
 
-    def start_session_log(self, path) -> None:
+    def start_session_db_log(self, engine, session_id: str) -> None:
         """
-        Mirrors everything shown in the AI output pane to a plain-text file at
-        ``path``, live — the session id (and so this path) is only known
-        partway through startup, once the user has answered the session-name
-        prompt, so whatever was already shown before that (the startup
-        banner) is flushed out first, and every :meth:`_write` after this
-        appends to the file as it happens. Opened in append mode so resuming
-        a session keeps its prior runs' logs rather than overwriting them;
-        each open is marked with a timestamped banner so the boundary between
-        runs is visible in the file.
+        Every :meth:`_log` call from here on writes a LogEvent row for
+        (`engine`, `session_id`) -- full cutover replacement for the old
+        file-based run.log (see JFI.session.history_store's module
+        docstring for why). The session id is only known partway through
+        startup, once the user has answered the session-name prompt, so
+        whatever was logged before that point (the startup banner) simply
+        has no DB to write to yet and is not retroactively captured --
+        matching how the old file-based version never captured it either
+        (no path existed yet to open).
 
-        Live-appending (rather than writing once at exit) means the log
-        survives a crash or a forced-stop that never reaches
-        :meth:`dump_transcript`, and can be ``tail -f``'d while a run is in
-        flight.
+        Closes any DB log already active first — a session restarted with
+        Ctrl+N calls this again for the new session.
 
-        Closes any log already open first — a session restarted with Ctrl+N
-        calls this again for the new session, and would otherwise leak the
-        previous session's file handle.
+        `_log_seq` is re-derived from the highest `seq` already in the DB
+        for this session_id, not reset to 0 -- a RESUMED session already
+        has LogEvent rows from its prior process, and starting back at 1
+        would collide with them (breaking the seq ordering export_db's own
+        `ORDER BY seq` relies on), the same reason history_store.
+        append_history_to_db re-derives HistoryMessage's own seq counter
+        from MAX(seq) on every append rather than trusting an in-memory
+        count across a restart.
         """
         self.close_session_log()
-        path = Path(path)
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            log_file = open(path, "a", encoding="utf-8")
-        except OSError as exc:
-            self.display_error(f"Could not open run log at {path}: {exc}")
-            return
+        from JFI.models import LogEvent, get_session
+        from sqlmodel import select
 
+        with get_session(engine) as db:
+            existing_max = db.exec(
+                select(LogEvent.seq)
+                .where(LogEvent.session_id == session_id)
+                .order_by(LogEvent.seq.desc())
+            ).first()
         with self._lock:
-            timestamp = datetime.now().isoformat(timespec="seconds")
-            log_file.write(f"\n===== JFI run started {timestamp} =====\n")
-            # Cover the part of the run that happened before the session id
-            # (and so this path) was known.
-            already_shown = "".join(block[1] for block in self._blocks)
-            if already_shown:
-                log_file.write(already_shown)
-            log_file.flush()
-            self._log_file = log_file
+            self._db_engine = engine
+            self._db_session_id = session_id
+            self._log_seq = existing_max or 0
 
     def close_session_log(self) -> None:
         with self._lock:
-            log_file, self._log_file = self._log_file, None
-        if log_file is not None:
-            try:
-                log_file.close()
-            except OSError:
-                pass
+            self._db_engine = None
+            self._db_session_id = None

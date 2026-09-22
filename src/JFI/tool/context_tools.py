@@ -1,108 +1,90 @@
-import json
-from pathlib import Path
-from typing import Callable, Dict
+"""context_save / context_lookup -- the model's own persistent scratchpad,
+DB-backed via JFI.models.ContextEntry (full cutover replacement for
+context.json; see /todo.md's Live validation section).
 
-# Keys that are internal bookkeeping, not facts the model wrote itself — kept
-# out of context_lookup's index/search results so they don't clutter what is
-# meant to be the model's own scratchpad. cmd_tools.APPROVED_CMD_KEY lives
-# here too (import would be circular the other way: cmd_tools imports the
-# load/save helpers below).
+Pulled, never pushed: the model decides what it needs via these two tools
+as ordinary calls in the normal loop -- LLM call -> tool call -> context
+comes back -> the action -- rather than every saved fact being force-fed
+into every system message whether relevant to this turn or not (the old
+context.json era auto-loaded everything into every prompt; that's gone).
+
+context_save replaces the old "read_file the whole cache, hand-merge,
+write_file it back" habit with one atomic upsert per fact -- no risk of a
+write dropping a key it didn't retype, which a whole-file rewrite always
+risked. context_lookup replaces the matching whole-cache-dump habit for
+retrieval: a blank keyword lists every key plus a short preview, a real
+keyword searches keys and values case-insensitively.
+
+get_context_value/set_context_value are the raw single-key accessors
+underneath the two tools above -- also what cmd_tools.py uses directly to
+store its own internal "approved-cmd" bookkeeping (see _INTERNAL_KEYS),
+without going through the model-facing tool functions.
+"""
+
+from typing import Callable, Dict, Optional
+
+from sqlmodel import select
+
+from JFI.models import ContextEntry, get_session
+from JFI.models._util import utcnow
+
+# Keys that are internal bookkeeping, not facts the model wrote itself --
+# kept out of context_lookup's index/search results so they don't clutter
+# what is meant to be the model's own scratchpad. cmd_tools.APPROVED_CMD_KEY
+# lives here too (import would be circular the other way: cmd_tools imports
+# the accessors below).
 _INTERNAL_KEYS = {"approved-cmd"}
-
-
-def load_context_cache(cache_path: str) -> dict:
-    """Reads the whole context-cache JSON object at `cache_path`. Never
-    raises: a missing file, unreadable file, malformed JSON, or a JSON value
-    that isn't an object all come back as `{}` — the cache is meant to be
-    disposable scratch state, not something a read failure should ever crash
-    a phase over."""
-    path = Path(cache_path)
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def save_context_cache(data: dict, cache_path: str) -> None:
-    path = Path(cache_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-
-# ---------------------------------------------------------------------------
-# context_save / context_lookup
-#
-# CONTEXT_CACHE_RULES (simple_session_manager.py) used to tell the model to
-# read_file the whole cache, merge its new fact in by hand, then write_file
-# the entire object back — two calls per fact, and a real correctness trap:
-# any write_file that didn't faithfully round-trip every existing key (easy
-# on a long turn) silently dropped them, "approved-cmd" (see cmd_tools.py)
-# included. context_save replaces that with one atomic read-modify-write
-# call per fact, so a dropped key is no longer possible.
-#
-# context_lookup replaces the matching read_file-the-whole-thing habit for
-# *retrieval*. The cache is meant to stay "a handful of high-value facts,
-# not a transcript" (CONTEXT_CACHE_RULES), but nothing enforces that, and on
-# a long-running session with many iterations it can grow past what's worth
-# spending context tokens to dump wholesale every time it's needed. Rather
-# than have the model maintain a second, separate keyword -> fact index
-# (extra bookkeeping that can silently drift out of sync with the facts
-# themselves — the exact failure mode this module exists to avoid), lookup
-# is computed live over the cache on every call: cheap at this scale (a
-# "handful" of entries), and structurally unable to go stale. A blank
-# keyword returns the index itself — every key plus a short value preview —
-# so the model can browse what exists before spending a call on any one
-# fact's full text.
-# ---------------------------------------------------------------------------
 
 _PREVIEW_LEN = 80
 
 
-def _preview(value) -> str:
-    text = value if isinstance(value, str) else json.dumps(value)
-    text = " ".join(text.split())
+def get_context_value(engine, session_id: str, key: str) -> Optional[str]:
+    with get_session(engine) as db:
+        row = db.exec(
+            select(ContextEntry).where(ContextEntry.session_id == session_id, ContextEntry.key == key)
+        ).first()
+        return row.value if row else None
+
+
+def set_context_value(engine, session_id: str, key: str, value: str) -> None:
+    with get_session(engine) as db:
+        row = db.exec(
+            select(ContextEntry).where(ContextEntry.session_id == session_id, ContextEntry.key == key)
+        ).first()
+        if row is None:
+            db.add(ContextEntry(session_id=session_id, key=key, value=value))
+        else:
+            row.value = value
+            row.updated_at = utcnow()
+            db.add(row)
+        db.commit()
+
+
+def _all_facts(engine, session_id: str) -> Dict[str, str]:
+    with get_session(engine) as db:
+        rows = list(db.exec(select(ContextEntry).where(ContextEntry.session_id == session_id)))
+    return {row.key: row.value for row in rows if row.key not in _INTERNAL_KEYS}
+
+
+def _preview(value: str) -> str:
+    text = " ".join(value.split())
     return text[:_PREVIEW_LEN] + ("…" if len(text) > _PREVIEW_LEN else "")
 
 
-def _facts(cache_path: str) -> dict:
-    data = load_context_cache(cache_path)
-    return {k: v for k, v in data.items() if k not in _INTERNAL_KEYS}
-
-
-def context_save(key: str, value: str, cache_path: str) -> str:
-    """
-    Merges one fact into the context cache at `cache_path`, preserving every
-    other key already there (including ones other tools own, like
-    cmd_tools's "approved-cmd") — the single-call replacement for
-    read_file + hand-merge + write_file.
-    """
+def context_save(engine, session_id: str, key: str, value: str) -> str:
     key = (key or "").strip()
     if not key:
         return "Error: context_save needs a non-empty key."
     try:
-        data = load_context_cache(cache_path)
-        data[key] = value
-        save_context_cache(data, cache_path)
+        set_context_value(engine, session_id, key, value)
     except Exception as e:
         return f"Error saving context key '{key}': {e}"
     return f"Success: Saved context key '{key}'."
 
 
-def context_lookup(keyword: str, cache_path: str) -> str:
-    """
-    Searches the context cache instead of dumping it wholesale.
-
-    A blank `keyword` lists every fact's key plus a short preview — use this
-    first to see what's already known. A non-blank `keyword` is matched
-    case-insensitively against both keys and values; matches are returned in
-    full (not previewed), since a filtered result is expected to already be
-    small.
-    """
+def context_lookup(engine, session_id: str, keyword: str) -> str:
     try:
-        facts = _facts(cache_path)
+        facts = _all_facts(engine, session_id)
     except Exception as e:
         return f"Error reading context cache: {e}"
 
@@ -115,81 +97,20 @@ def context_lookup(keyword: str, cache_path: str) -> str:
         return "Context cache index (" + str(len(facts)) + " key(s)):\n" + "\n".join(lines)
 
     needle = keyword.lower()
-    hits = {
-        k: v for k, v in facts.items()
-        if needle in k.lower() or needle in (v if isinstance(v, str) else json.dumps(v)).lower()
-    }
+    hits = {k: v for k, v in facts.items() if needle in k.lower() or needle in v.lower()}
     if not hits:
         keys = ", ".join(sorted(facts)) or "(none)"
         return f"No context entries match '{keyword}'. Existing keys: {keys}"
 
-    lines = [f"- {k}: {v if isinstance(v, str) else json.dumps(v)}" for k, v in sorted(hits.items())]
+    lines = [f"- {k}: {v}" for k, v in sorted(hits.items())]
     return f"{len(hits)} match(es) for '{keyword}':\n" + "\n".join(lines)
 
 
-_AUTO_LOAD_VALUE_CAP = 500
-_AUTO_LOAD_TOTAL_CAP = 2500
-
-
-def render_facts_for_auto_load(cache_path: str) -> str:
-    """Formats every saved fact for automatic inclusion in the system message
-    (see CONTEXT_CACHE_RULES / _phase_system_message), so a fact survives
-    history compression without the model having to remember to call
-    context_lookup itself at the right moment.
-
-    Returns "" when the cache is empty (nothing to inject). Each value is
-    capped so one oversized fact can't blow the request budget on its own;
-    the whole block is capped too, dropping the least-recently-saved facts
-    first (dict insertion order) if it's still too big — a cache that's
-    grown past "a handful of facts" loses its oldest entries from auto-load
-    rather than crowding out the rest of the system message.
-    """
-    facts = _facts(cache_path)
-    if not facts:
-        return ""
-
-    lines = []
-    for key, value in facts.items():
-        text = value if isinstance(value, str) else json.dumps(value)
-        text = " ".join(text.split())
-        if len(text) > _AUTO_LOAD_VALUE_CAP:
-            text = text[:_AUTO_LOAD_VALUE_CAP] + "… [truncated]"
-        lines.append(f"- {key}: {text}")
-
-    block = "\n".join(lines)
-    if len(block) > _AUTO_LOAD_TOTAL_CAP:
-        kept = []
-        total = 0
-        for line in lines:
-            if total + len(line) + 1 > _AUTO_LOAD_TOTAL_CAP:
-                kept.append(f"… [{len(lines) - len(kept)} more fact(s) omitted — use "
-                             f"context_lookup to see them]")
-                break
-            kept.append(line)
-            total += len(line) + 1
-        block = "\n".join(kept)
-    return block
-
-
-def make_context_save(cache_path: str) -> Callable[[str, str], str]:
-    """Binds context_save to one session's own context.json — mirrors
-    cmd_tools.make_gated_execute_command's per-session binding pattern."""
-    def bound(key: str, value: str) -> str:
-        return context_save(key, value, cache_path)
-    return bound
-
-
-def make_context_lookup(cache_path: str) -> Callable[[str], str]:
-    def bound(keyword: str = "") -> str:
-        return context_lookup(keyword, cache_path)
-    return bound
-
-
-def make_context_tools(cache_path: str) -> Dict[str, Callable]:
-    """{"context_save": ..., "context_lookup": ...}, both bound to one
-    session's context.json — what runner.py wires into TOOL_MAP per session,
-    the same way execute_command is rebound via make_gated_execute_command."""
+def make_context_tools(engine, session_id: str) -> Dict[str, Callable]:
+    """{"context_save": ..., "context_lookup": ...} bound to one session's
+    own DB engine -- what runner.py wires into TOOL_MAP, the same
+    per-session rebinding pattern execute_command/plan_db_tools use."""
     return {
-        "context_save": make_context_save(cache_path),
-        "context_lookup": make_context_lookup(cache_path),
+        "context_save": lambda key, value: context_save(engine, session_id, key, value),
+        "context_lookup": lambda keyword="": context_lookup(engine, session_id, keyword),
     }

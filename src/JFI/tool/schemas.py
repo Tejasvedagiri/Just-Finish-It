@@ -189,7 +189,7 @@ DEFERRED_TOOLS = [
                     "directory": {
                         "type": "string",
                         "description": (
-                            "Where to save the screenshot — pass your session's JFI/<session> "
+                            "Where to save the screenshot — pass your session's .jfi/<session> "
                             "folder (the same directory your plan file lives in)."
                         )
                     }
@@ -243,7 +243,7 @@ DEFERRED_TOOLS = [
                         "type": "string",
                         "description": (
                             "Where to save downloaded images — pass your session's "
-                            "JFI/<session> folder (the same directory your plan file lives in)."
+                            ".jfi/<session> folder (the same directory your plan file lives in)."
                         )
                     },
                     "max_images": {
@@ -338,7 +338,7 @@ DEFERRED_TOOLS = [
                         "type": "string",
                         "description": (
                             "Where to save the extracted frames -- pass your session's "
-                            "JFI/<session> folder (the same directory your plan file lives in)."
+                            ".jfi/<session> folder (the same directory your plan file lives in)."
                         )
                     },
                     "max_frames": {
@@ -514,6 +514,226 @@ CORE_TOOLS += [
     {
         "type": "function",
         "function": {
+            "name": "add_reviewer_note",
+            "description": (
+                "Leaves a short note for the Reviewer about a problem this implementation step "
+                "hit — something you had to work around, an assumption you made because the "
+                "plan/spec was ambiguous, a check you couldn't fully verify, a discrepancy from "
+                "what was planned. Appends (never overwrites) across however many notes you "
+                "leave this phase; the Reviewer reads them all, then they're cleared once that "
+                "review pass consumes them. Skip this for clean, uneventful steps."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The note itself — what happened, and why, concrete enough for the Reviewer to specifically re-check it."
+                    }
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_reviewer_notes",
+            "description": (
+                "Shows whatever notes the Implementation agent left via add_reviewer_note during "
+                "this pass — problems it hit, workarounds it made, or things it couldn't fully "
+                "verify. Empty/no notes just means nothing was flagged. Call this once, near the "
+                "start of your review, before deciding PASS/FAIL."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_review_report",
+            "description": (
+                "Records that the finished work has real problems, triggering another full "
+                "planner -> imp -> testing -> reviewer iteration. Only call this when you found "
+                "genuine issues after personally re-running the project's own mechanical checks — "
+                "a good review needs no call here at all, just reply with a short 'Review: PASS' "
+                "summary instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Concrete, actionable issues — one numbered item per problem, naming file(s)/line(s) where relevant, plus how to fix it."
+                    }
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_plan_feedback",
+            "description": (
+                "Records that the plan has a real problem, checked against the ACTUAL repo state, "
+                "sending it back to the planner for one more pass before you review it again. Only "
+                "call this when the plan is genuinely not ready — an approved plan needs no call "
+                "here at all, just reply with a short 'Product Owner: APPROVED' summary instead."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Concrete, actionable feedback — one numbered item per concern, each naming the specific plan item number and/or file involved, plus what should change."
+                    }
+                },
+                "required": ["text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_plan",
+            "description": (
+                "Shows the current plan tree — every leaf's id, its display number "
+                "(e.g. '1.1.2'), phase, description, and status ('[ ]' todo, '[x]' done). "
+                "Parent bullets (anything with children) show no status. Use the leaf id "
+                "shown here (NOT the number, which can shift) when calling add_leaf's "
+                "parent_id, start_leaf, mark_leaf_done, or split_leaf."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_leaf",
+            "description": (
+                "Adds one new leaf (or root-level parent) to the plan. Replaces hand-editing "
+                "plan.md's markdown — no numbering to get right, it's computed for display. "
+                "A leaf you plan to add children to later must be split_leaf'd once you do; "
+                "do not call add_leaf with parent_id pointing at a leaf that already has "
+                "status/timing of its own (get_plan shows you which ones do)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phase": {
+                        "type": "string",
+                        "enum": ["planner", "product_owner", "imp", "testing", "reviewer", "cleanup"],
+                        "description": "Which section this belongs under — almost always 'imp' or 'testing'."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "The smallest doable piece of work this leaf represents."
+                    },
+                    "parent_id": {
+                        "type": "integer",
+                        "description": "The parent leaf's id from get_plan. Omit (or 0) for a top-level item."
+                    }
+                },
+                "required": ["phase", "description"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_leaf",
+            "description": (
+                "Marks a leaf as the one you're currently working on — records its start "
+                "time and shows it as the session's current task. Call this right before "
+                "you begin a leaf's real work; call mark_leaf_done when it's finished."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan."}
+                },
+                "required": ["leaf_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mark_leaf_done",
+            "description": (
+                "Marks a leaf complete — sets its status to done and records the end time. "
+                "Only ever call this on a genuine leaf (no children of its own); marking a "
+                "parent bullet done is rejected, same as ticking a plan.md parent checkbox "
+                "was never allowed."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan."},
+                    "tokens": {
+                        "type": "integer",
+                        "description": "Optional: approximate context cost this leaf took, if worth recording."
+                    }
+                },
+                "required": ["leaf_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "split_leaf",
+            "description": (
+                "Turns an existing leaf into a parent with new child leaves under it — the "
+                "DB-backed replacement for plan_renumber.py's role: no renumbering needed, "
+                "since numbers are computed for display, not stored. Use this the moment you "
+                "realize a leaf is really more than one piece of work (e.g. it implies writing "
+                "a check AND then fixing whatever it finds), rather than attempting it as one "
+                "leaf first and only splitting after getting stuck."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan."},
+                    "into": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "At least 2 descriptions, one per new child leaf, in the order they should run."
+                    }
+                },
+                "required": ["leaf_id", "into"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reorder_leaf",
+            "description": (
+                "Moves a leaf to sit right after another leaf among its OWN current "
+                "siblings (same parent, same phase) — the DB-backed replacement for "
+                "plan_renumber.py's role when you catch an ordering bug (e.g. a leaf verifies "
+                "something a LATER-numbered leaf is responsible for creating first). Every "
+                "sibling's display number recomputes automatically after the move — nothing "
+                "else to fix by hand."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan, to move."},
+                    "after_leaf_id": {
+                        "type": "integer",
+                        "description": "A SIBLING leaf's id to place it right after. Omit (or 0) to move it to the very front."
+                    }
+                },
+                "required": ["leaf_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ask_llm",
             "description": (
                 "Asks a fresh, single-turn LLM call anything — write a description, brainstorm "
@@ -566,6 +786,16 @@ _DEFERRED_TOOL_SUMMARIES = {
     "replace_in_file": "replace one exact substring in a file, leaving the rest untouched (tick a checkbox, patch a few lines)",
     "context_save": "save one fact to your persistent context cache (survives history compression)",
     "context_lookup": "search/list your persistent context cache",
+    "add_reviewer_note": "(imp) leave a short note for the Reviewer about a problem this step hit",
+    "get_reviewer_notes": "(reviewer) read whatever notes the Implementation agent left this pass",
+    "write_review_report": "(reviewer) record real problems found, triggering another full iteration",
+    "write_plan_feedback": "(product owner) record a real problem with the plan, sending it back to the planner",
+    "get_plan": "show the current plan tree (leaf ids, numbers, phase, status) -- the DB-backed replacement for reading plan.md",
+    "add_leaf": "add one new leaf/parent to the plan -- the DB-backed replacement for hand-editing plan.md",
+    "start_leaf": "mark a leaf as the one you're currently working on, recording its start time",
+    "mark_leaf_done": "mark a leaf complete, recording its end time -- rejected on a parent bullet",
+    "split_leaf": "turn a leaf into a parent with new child leaves -- no renumbering needed, unlike plan_renumber.py's old role",
+    "reorder_leaf": "move a leaf to sit right after another sibling -- fixes an ordering bug without any manual renumbering",
     "ask_llm": "a fresh, single-turn, STATELESS LLM call for a one-off text task (no file/conversation access)",
     "capture_screenshot": "capture the primary monitor to a PNG (headless environments fail cleanly)",
     "view_image": "attach an image file (a screenshot, a project asset, ...) so you can actually see it next turn",

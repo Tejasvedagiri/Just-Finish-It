@@ -74,16 +74,20 @@ class TestTestingPhaseGetsOnlyTestingPending:
 
 class TestPhaseTriggers:
     def test_imp_trigger_points_at_pending_implementation(self, manager):
+        """The plan is DB-backed now (JFI.tool.plan_db_tools) -- the trigger
+        names the tool calls to use instead of a plan.md path."""
         from JFI.session.simple_session_manager import get_phase_trigger
 
         trigger = get_phase_trigger("imp", plan_path=manager.plan_path)
-        assert "Implementation" in trigger and manager.plan_path in trigger
+        assert "implementation" in trigger.lower()
+        assert "start_leaf" in trigger and "mark_leaf_done" in trigger
 
     def test_testing_trigger_points_at_pending_testing(self, manager):
         from JFI.session.simple_session_manager import get_phase_trigger
 
         trigger = get_phase_trigger("testing", plan_path=manager.plan_path)
-        assert "Testing" in trigger and manager.plan_path in trigger
+        assert "testing" in trigger.lower()
+        assert "start_leaf" in trigger and "mark_leaf_done" in trigger
 
     def test_cleanup_trigger_points_at_session_folder(self, manager):
         from pathlib import Path
@@ -113,13 +117,14 @@ class TestIteration2Sections:
         msg = _system_message(manager, "imp")
         assert "Your work queue" in msg
         # The agent is told to take the FIRST item from the embedded list.
-        assert "work queue (the unchecked Implementation items)" in msg
+        assert "work queue (the pending imp leaves)" in msg
 
-    def test_testing_prompt_still_points_at_plan_file_for_context(self, manager):
+    def test_testing_prompt_still_points_at_get_plan_for_context(self, manager):
+        """Plan is DB-backed now -- the testing prompt names get_plan()
+        (not a plan.md path) as the thing to fall back on for context."""
         manager.plan_file.write_text(PLAN)
         msg = _system_message(manager, "testing")
-        # Testing prompt still names the plan file it should read for context.
-        assert manager.plan_path in msg
+        assert "get_plan()" in msg
         assert "Your work queue" in msg
 
 
@@ -142,9 +147,11 @@ class TestWordingUsesEmbeddedListFirst:
         assert f"read_file {manager.plan_path} and take" not in msg
         assert "take the FIRST item from it" in msg
 
-    def test_one_box_per_step_rule_intact(self, manager):
+    def test_one_mark_leaf_done_call_per_step_rule_intact(self, manager):
+        """DB-backed replacement for the old "tick one box per step" rule --
+        mark_leaf_done is called once per finished leaf, right away, never
+        batched -- see the imp/testing phase prompts' own step 5."""
         manager.plan_file.write_text(PLAN)
         for phase in ("imp", "testing"):
             msg = _system_message(manager, phase)
-            # imp: "Tick exactly one box per step"; testing: "One box per step"
-            assert "box per step" in msg
+            assert "call per" in msg or "call per leaf" in msg

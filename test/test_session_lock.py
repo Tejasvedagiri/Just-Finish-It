@@ -1,8 +1,13 @@
-"""Session locking: two processes must never run the same session_id at
-once (they'd race on history.jsonl.gz/plan.md/context.json), but two
-SimpleSessionManager instances for the same session_id *within this same
-process* (the common test-suite pattern of building a fresh manager to
-simulate a restart, or a brief Ctrl+N handoff) must not trip that guard.
+"""Session locking: two processes must never run ANY session against the
+same project at once (they'd race on the shared .jfi/JFI.db and its few
+remaining file-based artifacts) -- the lock is PROJECT-WIDE now, scoped to
+the flat `.jfi/` folder, not per session_id (see SimpleSessionManager.
+__init__'s own note on why `.jfi/` is flat). But two SimpleSessionManager
+instances *within this same process* (the common test-suite pattern of
+building a fresh manager to simulate a restart, or a brief Ctrl+N
+handoff), even for different session_ids, must not trip that guard --
+they share this process's own in-process refcount registry regardless of
+session name, since the lock file itself is the same one path either way.
 See SimpleSessionManager._acquire_session_lock/release_session_lock."""
 
 import fcntl
@@ -27,13 +32,29 @@ def test_a_genuinely_external_lock_holder_is_refused(console):
     """Simulates a real second OS process: opens and flocks the lock file
     directly, bypassing SimpleSessionManager's own in-process registry
     entirely — exactly what an unrelated process would do, unaware of it."""
-    lock_path = Path("JFI") / "external" / ".lock"
+    lock_path = Path(".jfi") / ".lock"
     lock_path.parent.mkdir(parents=True)
     external_fd = open(lock_path, "w")
     try:
         fcntl.flock(external_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with pytest.raises(SessionInUseError):
             SimpleSessionManager(console, "external")
+    finally:
+        fcntl.flock(external_fd, fcntl.LOCK_UN)
+        external_fd.close()
+
+
+def test_a_genuinely_external_holder_refuses_a_different_session_id_too(console):
+    """The lock is project-wide now, not per session_id (see module
+    docstring) -- an external process holding it must refuse EVERY session
+    name, not just the one it happened to start with."""
+    lock_path = Path(".jfi") / ".lock"
+    lock_path.parent.mkdir(parents=True)
+    external_fd = open(lock_path, "w")
+    try:
+        fcntl.flock(external_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(SessionInUseError):
+            SimpleSessionManager(console, "some-other-session-name")
     finally:
         fcntl.flock(external_fd, fcntl.LOCK_UN)
         external_fd.close()
@@ -54,7 +75,13 @@ def test_release_is_safe_to_call_twice(console):
     manager.release_session_lock()  # must not raise
 
 
-def test_different_session_ids_do_not_interfere(console):
+def test_different_session_ids_in_the_same_process_share_the_one_lock(console):
+    """Not "do not interfere" in the old per-session-lock sense (that
+    guarantee no longer exists -- see module docstring): this only proves
+    two different session_ids from the SAME process don't spuriously trip
+    SessionInUseError against each other, because they resolve to the
+    exact same lock path (`.jfi/.lock`) and refcount together, same as two
+    managers for the identical session_id would."""
     a = SimpleSessionManager(console, "session-a")
     b = SimpleSessionManager(console, "session-b")
     a.release_session_lock()
@@ -69,7 +96,7 @@ def test_refcount_keeps_the_os_lock_held_until_every_claim_releases(console):
     second = SimpleSessionManager(console, "refcounted")
     first.release_session_lock()
 
-    lock_path = Path("JFI") / "refcounted" / ".lock"
+    lock_path = Path(".jfi") / ".lock"
     external_fd = open(lock_path, "w")
     try:
         with pytest.raises(OSError):
@@ -117,20 +144,34 @@ class _RetryConsole(AbstractManager):
     def mark_phase_done(self, *a, **k): pass
 
 
-def test_run_session_reprompts_for_a_name_instead_of_crashing_when_locked():
+def test_run_session_reprompts_instead_of_crashing_when_locked():
+    """The lock is project-wide now (see module docstring), so trying a
+    DIFFERENT session name no longer helps while another process holds
+    it -- unlike the old per-session lock, where the retry loop's whole
+    point was that a different name would succeed. What still matters,
+    and is still true: a SessionInUseError must never crash the process,
+    just display the error and keep re-prompting until the caller gives
+    up (should_stop) or the external holder eventually releases it."""
     from JFI.runner import _run_session
 
-    lock_path = Path("JFI") / "taken" / ".lock"
+    lock_path = Path(".jfi") / ".lock"
     lock_path.parent.mkdir(parents=True)
     external_fd = open(lock_path, "w")
     fcntl.flock(external_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     try:
-        console = _RetryConsole(["taken", "free", "my goal"])
+        # A 3rd name is queued but never actually attempted: popping the
+        # LAST answer sets should_stop() before the loop gets back around
+        # to trying it (see _RetryConsole.safe_get_user_input) -- same
+        # "every queued answer consumed, loop exits cleanly" shape the
+        # original version of this test relied on for its successful-retry
+        # case, just with no success possible here since the external lock
+        # never releases.
+        console = _RetryConsole(["taken", "still-locked", "never-attempted"])
         _run_session(console, {})  # llms is never indexed: we stop before run_phase
 
-        assert len(console.errors) == 1
-        assert "taken" in console.errors[0]
-        assert "already running" in console.errors[0]
+        assert len(console.errors) == 2
+        for error in console.errors:
+            assert "already running" in error
         assert console.answers == []  # every queued answer was actually consumed
     finally:
         fcntl.flock(external_fd, fcntl.LOCK_UN)

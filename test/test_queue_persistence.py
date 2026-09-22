@@ -4,8 +4,9 @@ Regression: the queue used to live only in PromptToolkitConsoleManager's
 in-memory queue.Queue — closing the process (killed, crashed, or just quit)
 before the pipeline reached "review landed, drain queue" silently lost
 anything the user had queued. SimpleSessionManager.{load,save}_queued_requests
-persist it into metadata.json; PromptToolkitConsoleManager.set_queue_store
-wires the two together (seed on start, report on every add/drain/promotion).
+persist it via JFI.session.metadata_store (DB-backed);
+PromptToolkitConsoleManager.set_queue_store wires the two together (seed on
+start, report on every add/drain/promotion).
 """
 
 from prompt_toolkit.buffer import Buffer
@@ -25,16 +26,15 @@ class TestSessionManagerQueuePersistence:
         manager.save_queued_requests(["a", "b", "c"])
         assert manager.load_queued_requests() == ["a", "b", "c"]
 
-    def test_save_persists_to_metadata_json(self, make_manager):
-        import json
-
+    def test_save_persists_across_manager_instances(self, make_manager):
+        """Metadata (including queued_requests) is DB-backed now (see
+        JFI.session.metadata_store) -- a second manager for the same
+        session_id must see it via the shared project-root .JFI.db."""
         first = make_manager("persist")
         first.save_queued_requests(["do the thing"])
 
         second = make_manager("persist")
         assert second.load_queued_requests() == ["do the thing"]
-        raw = json.loads(second.metadata_path.read_text(encoding="utf-8"))
-        assert raw["queued_requests"] == ["do the thing"]
 
     def test_save_empty_list_clears_it(self, make_manager):
         ssm = make_manager("clear")

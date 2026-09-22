@@ -1,10 +1,13 @@
 """
-Tests for session_manager.get_system_message: it must be present, expose the
-plan file location (inside the JFI folder) to the LLM, and no longer generate
-any markdown of its own.
+Tests for session_manager.get_system_message: it must be present, instruct
+the LLM to use the DB-backed plan tools (get_plan/add_leaf/...) rather than
+writing a plan file, and no longer generate any markdown of its own.
 
 `get_system_message` is a module-level function (phase, plan_path); the manager
 threads its own resolved plan path through `_phase_system_message(phase)`.
+`plan_path` is a legacy label used for review.md's location and cleanup's
+own bookkeeping-folder references — the plan tree itself lives entirely in
+the DB (see JFI.tool.plan_db_tools), never at that path.
 """
 
 
@@ -19,18 +22,20 @@ class TestGetSystemMessage:
 
         msg = get_system_message("planner", manager.plan_path)
         assert isinstance(msg, str) and msg.strip()
-        # The LLM is told where the plan lives.
-        assert "plan.md" in msg and "JFI" in msg
+        # The LLM is told to use the DB-backed plan tools, not a file path
+        # (the planner phase never sees plan.md/JFI -- the plan lives
+        # entirely in the DB, see JFI.tool.plan_db_tools).
+        assert "get_plan()" in msg and "add_leaf" in msg
 
     def test_phase_system_message_threads_plan_path(self, manager):
         """The per-phase system message must reference the resolved JFI plan path."""
         manager.plan_file.write_text("# Plan\n## Implementation\n- [ ] 1.1 x\n")
         msg = manager._phase_system_message("imp")
-        assert "plan.md" in msg and "JFI" in msg
+        assert "plan.md" in msg and ".jfi" in msg
 
     def test_plan_lives_inside_jfi_folder(self, manager):
-        """The plan path must be inside the JFI session folder."""
-        assert manager.plan_path.startswith("JFI/")
+        """The plan path must be inside the flat .jfi/ folder."""
+        assert manager.plan_path.startswith(".jfi/")
         assert manager.plan_file.name == "plan.md"
 
     def test_does_not_write_or_generate_markdown(self, manager):
@@ -167,39 +172,33 @@ class TestPendingItems:
 
 
 class TestContextCache:
-    """A small JSON scratchpad the model can read/write for facts that would
-    otherwise be lost once older turns are compressed out of context — see
-    CONTEXT_CACHE_RULES. It must exist before the model ever asks for it, and
-    every phase's system message must tell the model where to find it."""
+    """A small DB-backed fact store (JFI.models.ContextEntry) the model can
+    read/write via the context_save/context_lookup tools for facts that
+    would otherwise be lost once older turns are compressed out of context
+    — see CONTEXT_CACHE_RULES. There is no file backing it, and nothing is
+    auto-loaded into the prompt: the model pulls what it needs via
+    context_lookup as an ordinary tool call, so every phase's system
+    message only needs to describe those two tools, never a path."""
 
-    def test_context_cache_file_pre_created_empty(self, manager):
-        assert manager.context_cache_file.exists()
-        assert manager.context_cache_file.read_text().strip() == "{}"
-
-    def test_context_cache_path_lives_inside_jfi_folder(self, manager):
-        assert manager.context_cache_path.startswith("JFI/")
-        assert manager.context_cache_file.name == "context.json"
-
-    def test_get_system_message_references_the_cache_path(self, manager):
+    def test_get_system_message_describes_context_save_and_lookup(self, manager):
         from JFI.session.simple_session_manager import get_system_message
 
         for phase in ("planner", "imp", "testing", "reviewer", "cleanup"):
-            msg = get_system_message(phase, manager.plan_path, manager.context_cache_path)
-            assert manager.context_cache_path in msg
+            msg = get_system_message(phase, manager.plan_path)
+            assert "context_save" in msg and "context_lookup" in msg
             assert "CONTEXT CACHE" in msg
 
-    def test_phase_system_message_threads_context_cache_path(self, manager):
+    def test_phase_system_message_describes_context_tools(self, manager):
         for phase in ("planner", "imp", "testing", "reviewer", "cleanup"):
             msg = manager._phase_system_message(phase)
-            assert manager.context_cache_path in msg
+            assert "context_save" in msg and "context_lookup" in msg
 
     def test_default_get_system_message_call_still_works(self):
-        """context_cache_path is optional (defaults to DEFAULT_CONTEXT_CACHE_PATH),
-        so existing callers that only pass plan_path keep working."""
+        """Only plan_path is required; every other parameter has a default."""
         from JFI.session.simple_session_manager import get_system_message
 
         msg = get_system_message("imp", "JFI/demo/plan.md")
-        assert isinstance(msg, str) and "context.json" in msg
+        assert isinstance(msg, str) and "context_save" in msg
 
 
 class TestRunCommandsPersistence:
@@ -207,77 +206,66 @@ class TestRunCommandsPersistence:
     the correct interpreter/command the hard way (plain `python3` fails with
     ModuleNotFoundError, THEN `.venv/bin/python`/`uv run` is tried), and then
     re-discovers it the same way again later once the turn that figured it
-    out ages out of context. The fix is the SAME context-cache auto-load
-    mechanism other durable facts already use (see CONTEXT_CACHE_RULES /
-    render_facts_for_auto_load) — a stable "run_commands" key, not a new
-    file or tool."""
+    out ages out of context. The fix is the SAME DB-backed context cache
+    other durable facts already use via context_save (see
+    CONTEXT_CACHE_RULES) — a stable "run_commands" key, not a new file or
+    tool."""
 
     def test_context_cache_rules_instruct_saving_run_commands(self, manager):
         from JFI.session.simple_session_manager import get_system_message
 
         for phase in ("planner", "imp", "testing", "reviewer", "cleanup"):
-            msg = get_system_message(phase, manager.plan_path, manager.context_cache_path)
+            msg = get_system_message(phase, manager.plan_path)
             assert "run_commands" in msg
             assert "context_save" in msg
 
     def test_names_the_python3_then_uv_failure_pattern(self, manager):
         from JFI.session.simple_session_manager import get_system_message
 
-        msg = get_system_message("imp", manager.plan_path, manager.context_cache_path)
+        msg = get_system_message("imp", manager.plan_path)
         assert "ModuleNotFoundError" in msg
         assert "uv run" in msg
 
 
 class TestReviewerSystemMessage:
-    """The reviewer phase must carry BOTH branches of the conditional review.md
-    instruction: do not generate it when the work is good; generate it (via
-    write_file) into JFI/<session>/review.md when issues exist."""
+    """The reviewer phase must carry BOTH branches of the conditional
+    review-report instruction: do not call write_review_report when the
+    work is good; call it (DB-backed, see JFI.tool.note_tools) when issues
+    exist."""
 
-    def test_good_branch_instructs_not_to_generate_review_md(self, manager):
+    def test_good_branch_instructs_not_to_call_write_review_report(self, manager):
         from JFI.session.simple_session_manager import get_system_message
 
         msg = get_system_message("reviewer", manager.plan_path).lower()
-        assert "do not write or touch jfi/demo/review.md" in msg
+        assert "do not call write_review_report" in msg
         assert "pass" in msg  # the short 'Review: PASS' summary branch
 
-    def test_issues_branch_instructs_to_generate_review_md(self, manager):
+    def test_issues_branch_instructs_to_call_write_review_report(self, manager):
         from JFI.session.simple_session_manager import get_system_message
 
         msg = get_system_message("reviewer", manager.plan_path).lower()
-        assert "write_file to create jfi/demo/review.md" in msg
+        assert "call write_review_report with concrete" in msg
         # The report must be concrete and actionable.
         assert "line(s)" in msg or "file/line" in msg
 
-    def test_review_md_lives_next_to_plan(self, manager):
-        """The reviewer's review.md target is derived from the plan path — same folder."""
-        from pathlib import Path
+    def test_reviewer_reads_notes_via_get_reviewer_notes(self, manager):
         from JFI.session.simple_session_manager import get_system_message
 
-        expected = str(Path(manager.plan_path).with_name("review.md"))
-        assert expected == "JFI/demo/review.md"
         msg = get_system_message("reviewer", manager.plan_path)
-        assert expected in msg  # the exact path, not a placeholder
-
-    def test_other_phases_do_not_mention_review_md(self, manager):
-        """Only the reviewer decides about review.md."""
-        from JFI.session.simple_session_manager import get_system_message
-
-        for phase in ("planner", "imp", "testing"):
-            assert "review.md" not in get_system_message(phase, manager.plan_path)
+        assert "get_reviewer_notes()" in msg
 
 
 class TestCleanupSystemMessage:
     """The cleanup phase's sole job: sweep the working directory for stray,
-    non-deliverable files and relocate anything worth keeping into this
-    session's own JFI/<session_id>/ folder for reference, deleting the rest
-    -- while never touching the bookkeeping files already inside that
-    folder."""
+    non-deliverable files and relocate anything worth keeping into the
+    flat `.jfi/` folder for reference, deleting the rest -- while never
+    touching the bookkeeping files (or the shared DB) already inside it."""
 
     def test_names_the_session_folder_as_the_move_target(self, manager):
         from JFI.session.simple_session_manager import get_system_message
 
         msg = get_system_message("cleanup", manager.plan_path)
-        assert "JFI/demo" in msg
+        assert ".jfi" in msg
         assert "mv" in msg  # instructed via execute_command's mv
 
     def test_protects_bookkeeping_files_from_deletion(self, manager):
@@ -285,7 +273,18 @@ class TestCleanupSystemMessage:
 
         msg = " ".join(get_system_message("cleanup", manager.plan_path).lower().split())
         assert "never delete, move, or overwrite" in msg
-        assert "history.jsonl.gz" in msg and "context.json" in msg
+        assert "llm_debug.jsonl" in msg
+
+    def test_protects_the_shared_db_from_deletion(self, manager):
+        """The shared SQLite database sits inside the flat `.jfi/` folder
+        at the project ROOT -- it will look unrecognized/stray when
+        cleanup scans the working directory unless the prompt explicitly
+        calls it out (see todo.md's independent-review findings)."""
+        from JFI.session.simple_session_manager import get_system_message
+
+        msg = " ".join(get_system_message("cleanup", manager.plan_path).lower().split())
+        assert ".jfi" in msg and "shared sqlite database" in msg
+        assert "never" in msg and "not stray" in msg
 
     def test_completion_marker_present(self, manager):
         from JFI.session.simple_session_manager import get_system_message

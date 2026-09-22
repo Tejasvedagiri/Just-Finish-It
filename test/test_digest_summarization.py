@@ -1,27 +1,26 @@
-"""LLM-based digest summarization (Tier 4) and context-cache auto-loading.
+"""LLM-based digest summarization (Tier 4).
 
-Two features layered on top of the existing compress_history/_digest
-machinery, added so aged-out history stops losing all its reasoning and
-saved facts stop depending on the model remembering to call context_lookup:
+A feature layered on top of the existing compress_history/_digest
+machinery, added so aged-out history stops losing all its reasoning:
 
-1. _build_digest: Tier 4 now LLM-summarizes newly-aged-out blocks into a
-   running prose summary (persisted in metadata.json) instead of only
-   recording tool/file/command names — but only once enough new material has
-   piled up (DIGEST_SUMMARY_MIN_CHARS) or on the very first digest, and only
-   when a phase's LLM stream is actually wired in via set_llm_streams(). No
-   stream, too little new material, or a failed call all fall back to the
-   original cheap metadata note, never crashing compression.
+_build_digest: Tier 4 now LLM-summarizes newly-aged-out blocks into a
+running prose summary (persisted via metadata_store, see
+JFI.session.metadata_store) instead of only recording tool/file/command
+names — but only once enough new material has piled up
+(DIGEST_SUMMARY_MIN_CHARS) or on the very first digest, and only when a
+phase's LLM stream is actually wired in via set_llm_streams(). No stream,
+too little new material, or a failed call all fall back to the original
+cheap metadata note, never crashing compression.
 
-2. render_facts_for_auto_load / _phase_system_message: whatever's been
-   context_save()'d is now folded into every phase's system message
-   automatically, since that's rebuilt fresh every request and never
-   touched by compress_history — a fact no longer depends on the model
-   proactively calling context_lookup at the right moment.
+Note: this module used to also cover render_facts_for_auto_load, a
+mechanism that auto-injected saved context() facts into every phase's
+system message. That was intentionally removed in favor of a pure
+pull-based model: context_save/context_lookup are ordinary tool calls the
+model decides to use, never auto-injected (see JFI.tool.context_tools).
 """
 import json
 
 from JFI.session.simple_session_manager import DIGEST_MARKER, DIGEST_SUMMARY_MIN_CHARS
-from JFI.tool.context_tools import render_facts_for_auto_load
 
 
 class FakeChunk:
@@ -63,77 +62,6 @@ def _fill_middle(ssm, n):
 
 
 # ---------------------------------------------------------------------------
-# render_facts_for_auto_load
-# ---------------------------------------------------------------------------
-
-def test_render_facts_for_auto_load_empty_cache_returns_empty_string(tmp_path):
-    cache_path = str(tmp_path / "context.json")
-    assert render_facts_for_auto_load(cache_path) == ""
-
-
-def test_render_facts_for_auto_load_formats_saved_facts(tmp_path):
-    from JFI.tool.context_tools import context_save
-
-    cache_path = str(tmp_path / "context.json")
-    context_save("server_pid", "12345", cache_path)
-    context_save("api_base", "http://127.0.0.1:3334", cache_path)
-
-    rendered = render_facts_for_auto_load(cache_path)
-
-    assert "server_pid: 12345" in rendered
-    assert "api_base: http://127.0.0.1:3334" in rendered
-
-
-def test_render_facts_for_auto_load_caps_an_oversized_value(tmp_path):
-    from JFI.tool.context_tools import context_save
-
-    cache_path = str(tmp_path / "context.json")
-    context_save("huge", "x" * 5000, cache_path)
-
-    rendered = render_facts_for_auto_load(cache_path)
-
-    assert "[truncated]" in rendered
-    assert len(rendered) < 2000
-
-
-def test_render_facts_for_auto_load_excludes_internal_keys(tmp_path):
-    from JFI.tool.context_tools import save_context_cache
-
-    cache_path = str(tmp_path / "context.json")
-    save_context_cache({"approved-cmd": "rm -rf /tmp/x", "real_fact": "keep me"}, cache_path)
-
-    rendered = render_facts_for_auto_load(cache_path)
-
-    assert "real_fact" in rendered
-    assert "approved-cmd" not in rendered
-    assert "rm -rf" not in rendered
-
-
-# ---------------------------------------------------------------------------
-# _phase_system_message auto-loads saved facts
-# ---------------------------------------------------------------------------
-
-def test_system_message_includes_saved_context_facts(manager):
-    manager.add_message("user", "goal")
-    from JFI.tool.context_tools import context_save
-
-    context_save("db_schema", "users(id, email)", manager.context_cache_path)
-
-    system_msg = manager.get_messages("imp")[0]["content"]
-
-    assert "SAVED CONTEXT" in system_msg
-    assert "db_schema: users(id, email)" in system_msg
-
-
-def test_system_message_omits_saved_context_section_when_cache_empty(manager):
-    manager.add_message("user", "goal")
-
-    system_msg = manager.get_messages("imp")[0]["content"]
-
-    assert "SAVED CONTEXT" not in system_msg
-
-
-# ---------------------------------------------------------------------------
 # _build_digest: no LLM stream wired in -> identical cheap-digest behavior
 # ---------------------------------------------------------------------------
 
@@ -147,7 +75,7 @@ def test_build_digest_falls_back_to_metadata_note_without_llm_streams(make_manag
     digest = next(m for m in view if DIGEST_MARKER in str(m.get("content", "")))
     assert "Tool calls: execute_command" in digest["content"]
     # No LLM was ever wired in, so nothing should have been persisted.
-    assert "digest_summary" not in ssm.metadata
+    assert not ssm.metadata.get("digest_summary")
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +202,7 @@ def test_build_digest_falls_back_when_llm_call_raises(make_manager):
     # Never crashes; falls back to the cheap metadata note.
     digest = next(m for m in view if DIGEST_MARKER in str(m.get("content", "")))
     assert "Tool calls: execute_command" in digest["content"]
-    assert "digest_summary" not in ssm.metadata
+    assert not ssm.metadata.get("digest_summary")
     assert any("Digest summarization failed" in msg for msg in ssm.console.system_messages)
 
 

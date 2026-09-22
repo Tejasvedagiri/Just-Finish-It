@@ -33,6 +33,7 @@ where ``playwright install`` actually put the browser. Setting
 lookup: the env var always wins, in every install mode (frozen or not).
 """
 
+import concurrent.futures
 import os
 import sys
 from typing import Optional
@@ -102,8 +103,18 @@ def browse_webpage(
     `click_selector` (if a single click is enough to reach the state you
     need) or verify each step with its own separate call.
 
-    `timeout` is seconds allowed for navigation and for the optional
-    click/wait — raise it for a slow-loading page.
+    `timeout` is seconds allowed for navigation, for the optional
+    click/wait, AND for `eval_js` — raise it for a slow-loading page or an
+    `eval_js` that genuinely needs to wait a while (e.g. its own internal
+    `setTimeout`). A hung `eval_js` (a Promise whose resolve() is never
+    reached on some code path — the single most common way this fires) is
+    force-recovered at exactly `timeout` seconds: the browser is closed out
+    from under it (Playwright's sync API applies no timeout of its own to
+    `evaluate()`, unlike every other action here, so nothing else would
+    ever unblock it) and an error naming this is returned instead of the
+    call hanging forever. If you hit this, the fix is almost always in the
+    eval_js expression itself — make sure every code path actually resolves
+    (or add your own `Promise.race([..., timeoutPromise])` inside it).
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
@@ -174,12 +185,52 @@ def browse_webpage(
                 eval_result = None
                 eval_error = None
                 if eval_js:
+                    # Page.evaluate() has NO timeout of its own in
+                    # Playwright's sync API (unlike goto/click/
+                    # wait_for_selector above, which all genuinely honor
+                    # timeout_ms) -- a hung eval_js (observed in practice: a
+                    # `new Promise(...)` whose resolve() was never reached
+                    # on some code path) blocks this call, and therefore
+                    # this whole tool call, and therefore the entire JFI
+                    # turn, forever. Bounding it here: run it on a worker
+                    # thread with a hard wall-clock .result(timeout=...),
+                    # and if it fires, close the browser to force the
+                    # still-hung evaluate() to unblock (a torn-down
+                    # connection is what actually ends it server-side --
+                    # nothing else will). The worker thread itself is left
+                    # to exit on its own once that happens; shutdown(wait=
+                    # False) never blocks THIS call waiting for it.
+                    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                    future = executor.submit(page.evaluate, eval_js)
                     try:
-                        eval_result = page.evaluate(eval_js)
+                        eval_result = future.result(timeout=timeout)
+                    except concurrent.futures.TimeoutError:
+                        eval_error = (
+                            f"eval_js did not return within {timeout}s -- most likely a "
+                            f"Promise whose resolve() is never reached on some code path. The "
+                            f"browser was force-closed to recover. Fix: make sure every branch "
+                            f"of the eval_js expression actually resolves, or wrap it in your "
+                            f"own Promise.race([..., a timeout promise]) instead of relying on "
+                            f"this tool's timeout alone."
+                        )
+                        try:
+                            browser.close()
+                        except PlaywrightError:
+                            pass
                     except PlaywrightError as e:
                         eval_error = str(e)
+                    finally:
+                        executor.shutdown(wait=False)
             finally:
-                browser.close()
+                # Already closed above on the eval_js-timeout path -- a
+                # second close() there would otherwise raise and get
+                # caught by the outer except below, masking the real
+                # eval_error/result this call already computed with a
+                # generic "Error browsing" instead.
+                try:
+                    browser.close()
+                except PlaywrightError:
+                    pass
     except PlaywrightError as e:
         return f"Error browsing {url}: {e}"
 

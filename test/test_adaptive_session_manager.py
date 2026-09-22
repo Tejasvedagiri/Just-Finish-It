@@ -94,9 +94,11 @@ def test_generic_goal_system_message_matches_plain_manager(console, make_manager
 
     plain_msg = plain._phase_system_message("planner")
     adaptive_msg = adaptive._phase_system_message("planner")
-    # Both resolve to their own session's plan_path/context_cache_path, so
-    # normalize those out rather than asserting raw equality.
+    # Both resolve to their own session's plan_path, so normalize that out
+    # rather than asserting raw equality. (Context is DB-backed and pulled
+    # via context_save/context_lookup tool calls now -- no per-session path
+    # threaded into the message to normalize.)
     def _normalize(msg, mgr):
-        return msg.replace(mgr.plan_path, "PLAN").replace(str(mgr.context_cache_path), "CTX")
+        return msg.replace(mgr.plan_path, "PLAN")
 
     assert _normalize(plain_msg, plain) == _normalize(adaptive_msg, adaptive)

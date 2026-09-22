@@ -11,7 +11,14 @@
 //    other end.
 // 3. Accepts WebSocket connections from browser viewers (path /view) and
 //    streams them the live fleet state: a full snapshot on connect, then
-//    a message per update.
+//    a message per update. Also relays "control" messages the other way
+//    (viewer -> session) -- pause/resume/queue/answer/stop, and a
+//    "db_query" action backing the "Session DB" tab (browsing a session's
+//    .jfi/JFI.db) whose actual query runs on the SESSION side (see
+//    socket_reporter.py's _handle_db_query) and whose JSON result rides
+//    back here as a "db_result" message to re-broadcast -- this process
+//    itself still never touches a filesystem path, same invariant as
+//    everything else here.
 //
 // All three share ONE port (MASTER_PORT, default 8765): plain HTTP
 // requests and the WebSocket upgrade are told apart per-request path, so
@@ -121,6 +128,17 @@ function handleReport(ws) {
       const entry = registry.get(key);
       broadcast({ type: "session_update", key, entry });
       for (const event of events) broadcast({ type: "activity", event });
+      return;
+    }
+    if (msg.type === "db_result" && key) {
+      // Answer to a viewer's "Session DB" tab query (see
+      // src/JFI/manager/socket_reporter.py's _handle_db_query) -- the
+      // session already ran the query itself and just needs this relayed
+      // back out; broadcasting (rather than tracking which single viewer
+      // asked) matches every other message here and is cheap since a
+      // db_result is only ever sent in response to an explicit click, not
+      // on a timer like "status" is.
+      broadcast(msg);
     }
   });
 
@@ -153,7 +171,17 @@ function handleView(ws) {
     if (msg.type !== "control" || !msg.key) return;
     const target = sessionSockets.get(String(msg.key));
     if (!target || target.readyState !== target.OPEN) return;
-    target.send(JSON.stringify({ type: "control", action: msg.action, text: msg.text, key: msg.answerKey }));
+    // table/scoped/request_id are the "Session DB" tab's own db_query
+    // payload (see socket_reporter.py's _handle_db_query) -- forwarded
+    // alongside the existing action/text/answerKey fields rather than
+    // spreading the whole `msg`, since `msg.key` here is the ROUTING key
+    // (which session) and must never be confused with `answerKey` (an
+    // answer action's own choice value), which is what the outgoing
+    // message's `key` field actually means to the receiving session.
+    target.send(JSON.stringify({
+      type: "control", action: msg.action, text: msg.text, key: msg.answerKey,
+      table: msg.table, scoped: msg.scoped, request_id: msg.request_id,
+    }));
   });
 
   ws.on("close", () => viewers.delete(ws));

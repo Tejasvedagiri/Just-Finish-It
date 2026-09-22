@@ -1,12 +1,12 @@
 """The planner<->product_owner loop: a NEW phase sitting between planning
 and implementation (see PHASES in runner.py), read-only like the Reviewer
 role but running before any code exists instead of after. It checks the
-plan against the REAL current repo state and, if it has concerns, writes
-feedback_to_plan.md — which sends the plan back to the planner for one
-more pass, then back to Product Owner again, entirely before "imp" ever
-starts. This is a SEPARATE, tighter loop from the reviewer's own
-planner->imp->testing->reviewer restart — see _run_product_owner_loop's
-own docstring.
+plan against the REAL current repo state and, if it has concerns, calls
+write_plan_feedback (DB-backed, see JFI.tool.note_tools) — which sends the
+plan back to the planner for one more pass, then back to Product Owner
+again, entirely before "imp" ever starts. This is a SEPARATE, tighter loop
+from the reviewer's own planner->imp->testing->reviewer restart — see
+_run_product_owner_loop's own docstring.
 """
 from pathlib import Path
 
@@ -17,6 +17,7 @@ from JFI.runner import (
     product_owner_feedback_outcome,
 )
 from JFI.session.simple_session_manager import get_phase_trigger, get_system_message
+from JFI.tool.note_tools import get_note, PLAN_FEEDBACK, set_note
 
 
 # ---------------------------------------------------------------------------
@@ -24,14 +25,16 @@ from JFI.session.simple_session_manager import get_phase_trigger, get_system_mes
 # ---------------------------------------------------------------------------
 
 class TestProductOwnerFeedbackOutcome:
-    def test_no_feedback_file_means_approved(self, tmp_path):
-        path = str(tmp_path / "feedback_to_plan.md")  # never created
-        assert product_owner_feedback_outcome(path) is None
+    def test_no_feedback_means_approved(self, make_manager):
+        ssm = make_manager("po-outcome-none")  # never called write_plan_feedback
+        assert product_owner_feedback_outcome(ssm.db_engine, ssm.session_id) is None
 
-    def test_feedback_file_present_returns_feedback_with_report(self, tmp_path):
-        p = tmp_path / "feedback_to_plan.md"
-        p.write_text("1. leaf 2.3 assumes config.py doesn't exist, it does", encoding="utf-8")
-        feedback = product_owner_feedback_outcome(str(p))
+    def test_feedback_present_returns_feedback_with_report(self, make_manager):
+        ssm = make_manager("po-outcome-present")
+        set_note(ssm.db_engine, ssm.session_id, PLAN_FEEDBACK, "1. leaf 2.3 assumes config.py doesn't exist, it does")
+
+        feedback = product_owner_feedback_outcome(ssm.db_engine, ssm.session_id)
+
         assert feedback is not None
         assert "leaf 2.3 assumes config.py doesn't exist, it does" in feedback
         assert "PRODUCT OWNER FEEDBACK" in feedback
@@ -42,9 +45,9 @@ class TestProductOwnerFeedbackOutcome:
 # ---------------------------------------------------------------------------
 
 class TestProductOwnerSystemMessage:
-    def test_mentions_feedback_path_and_marker(self):
+    def test_mentions_feedback_tool_and_marker(self):
         msg = get_system_message("product_owner", "JFI/demo/plan.md")
-        assert "JFI/demo/feedback_to_plan.md" in msg
+        assert "write_plan_feedback" in msg
         assert msg.strip().endswith("PRODUCT_OWNER_COMPLETE")
 
     def test_is_read_only_like_reviewer(self):
@@ -55,22 +58,27 @@ class TestProductOwnerSystemMessage:
         msg = get_system_message("product_owner", "JFI/demo/plan.md")
         assert "ACTUALLY EXISTS" in msg or "real current state" in msg.lower()
 
-    def test_other_phases_dont_mention_product_owner_feedback_file(self):
+    def test_other_phases_dont_actively_instruct_using_the_feedback_tool(self):
+        """Every deferred tool (see JFI.tool.schemas) is listed in every
+        phase's one-line tool CATALOG regardless of which phase actually
+        uses it -- write_plan_feedback legitimately appears there even in
+        "imp". What must NOT appear elsewhere is product_owner's own
+        ACTIVE instruction to call it."""
         msg = get_system_message("imp", "JFI/demo/plan.md")
-        assert "feedback_to_plan.md" not in msg
+        assert "call write_plan_feedback with concrete" not in msg
 
 
 class TestProductOwnerTrigger:
-    def test_trigger_mentions_feedback_path(self):
+    def test_trigger_mentions_feedback_tool(self):
         msg = get_phase_trigger("product_owner", "goal", "JFI/demo/plan.md")
-        assert "JFI/demo/feedback_to_plan.md" in msg
+        assert "write_plan_feedback" in msg
 
     def test_planner_trigger_mentions_po_feedback_when_given(self):
         msg = get_phase_trigger(
-            "planner", "goal", "JFI/demo/plan.md", po_feedback_path="JFI/demo/feedback_to_plan.md"
+            "planner", "goal", "JFI/demo/plan.md", po_feedback_given=True
         )
         assert "Product Owner" in msg
-        assert "JFI/demo/feedback_to_plan.md" in msg
+        assert "write_plan_feedback" in msg
         assert "- [x]" not in msg or "do NOT" in msg  # doesn't ask to touch ticked lines carelessly
 
     def test_planner_trigger_without_po_feedback_is_plain(self):
@@ -78,12 +86,12 @@ class TestProductOwnerTrigger:
         assert "Product Owner" not in msg
 
     def test_po_feedback_alone_switches_planner_to_update_mode(self):
-        """Even at iteration=1 (no outer review loop involved), a pending PO
-        feedback file must switch the planner into "update the existing
-        plan" wording, not "write a plan from scratch"."""
+        """Even at iteration=1 (no outer review loop involved), pending PO
+        feedback must switch the planner into "update the existing plan"
+        wording, not "write a plan from scratch"."""
         msg = get_phase_trigger(
             "planner", "goal", "JFI/demo/plan.md", iteration=1,
-            po_feedback_path="JFI/demo/feedback_to_plan.md",
+            po_feedback_given=True,
         )
         assert "Update the plan" in msg
         assert "Write the step-by-step plan" not in msg
@@ -153,16 +161,18 @@ class _FakeLLM:
 def _write_feedback(ssm):
     """Returns a zero-arg callable _RecordingConsole can invoke directly
     (print_agent_response calls canned callables with no arguments), closing
-    over `ssm` since the console itself never holds one."""
+    over `ssm` since the console itself never holds one. Directly calls
+    set_note the same way the write_plan_feedback TOOL would (this test
+    drives _run_product_owner_loop through canned print_agent_response
+    responses, not the real tool-execution dispatch loop, so this is the
+    equivalent of the model actually calling that tool)."""
     def _do():
-        (ssm.session_path / "feedback_to_plan.md").write_text(
-            "1. leaf 1.1 assumes a table that already exists", encoding="utf-8"
-        )
+        set_note(ssm.db_engine, ssm.session_id, PLAN_FEEDBACK, "1. leaf 1.1 assumes a table that already exists")
         # Product Owner always signs off with its own completion marker,
         # whether or not it had feedback -- the loop tells the two cases
-        # apart by checking feedback_to_plan.md separately (see
+        # apart by checking the DB note separately (see
         # product_owner_feedback_outcome).
-        return {"content": "wrote feedback_to_plan.md\nPRODUCT_OWNER_COMPLETE", "tool_calls": None}
+        return {"content": "called write_plan_feedback\nPRODUCT_OWNER_COMPLETE", "tool_calls": None}
     return _do
 
 
@@ -176,7 +186,7 @@ class TestRunProductOwnerLoop:
 
         assert ok is True
         assert any("APPROVED" in r for r in console.rule_labels)
-        assert not (ssm.session_path / "feedback_to_plan.md").exists()
+        assert get_note(ssm.db_engine, ssm.session_id, PLAN_FEEDBACK) is None
 
     def test_feedback_sends_it_back_to_planner_then_reviews_again(self, make_manager, monkeypatch):
         monkeypatch.setenv("PLANNER_SINGLE_PASS", "1")  # one PLANNER_COMPLETE marker, not 3 tiered stages
@@ -200,10 +210,10 @@ class TestRunProductOwnerLoop:
             "leaf 1.1 assumes a table that already exists" in str(m.get("content", ""))
             for m in ssm.history
         )
-        assert not (ssm.session_path / "feedback_to_plan.md").exists()
+        assert get_note(ssm.db_engine, ssm.session_id, PLAN_FEEDBACK) is None
 
-    def test_feedback_file_cleared_immediately_each_round_not_batched(self, make_manager, monkeypatch):
-        """Explicit requirement: the file's presence/absence must be acted
+    def test_feedback_cleared_immediately_each_round_not_batched(self, make_manager, monkeypatch):
+        """Explicit requirement: the row's presence/absence must be acted
         on right away each round, never left for a later pass to notice."""
         monkeypatch.setenv("PLANNER_SINGLE_PASS", "1")  # one PLANNER_COMPLETE marker, not 3 tiered stages
         ssm = make_manager("po-clears-immediately")
@@ -211,9 +221,9 @@ class TestRunProductOwnerLoop:
 
         def _check_cleared_before_planner_runs():
             # By the time this (the planner's canned turn) executes, the
-            # harness must have ALREADY unlinked the file from the
+            # harness must have ALREADY cleared the row from the
             # product_owner round that just ran — not deferred to later.
-            assert not (ssm.session_path / "feedback_to_plan.md").exists()
+            assert get_note(ssm.db_engine, ssm.session_id, PLAN_FEEDBACK) is None
             return {"content": "PLANNER_COMPLETE", "tool_calls": None}
 
         console = _RecordingConsole([

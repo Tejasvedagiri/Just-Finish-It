@@ -21,6 +21,20 @@ let activeTab = "fleet";
 let selectedKey = null;
 let sessionSubTab = "overview"; // "overview" | "checklist" -- sub-tabs within the Session tab
 
+// Must match JFI.tool.db_browse.table_registry()'s own key set (Python) --
+// this is just the picklist of names for the "Session DB" tab below; the
+// actual query logic lives entirely on the session side (see
+// socket_reporter.py's _handle_db_query), this side never runs SQL itself.
+const DB_TABLES = [
+  "ActivityEvent", "BackgroundProcess", "ContextEntry", "DonePhase", "HistoryMessage",
+  "ImplementedFile", "Leaf", "LogEvent", "QueuedItem", "SessionNote", "SessionRecord", "UnlockedTool",
+];
+let dbTable = DB_TABLES[0];
+let dbScoped = true;
+let dbRows = null;
+let dbError = null;
+let dbPendingRequestId = null;
+
 const app = document.getElementById("app");
 
 // ------------------------------------------------------------- theming
@@ -77,6 +91,21 @@ function connect() {
     } else if (msg.type === "activity") {
       state.activity.push(msg.event);
       if (state.activity.length > 200) state.activity.shift();
+    } else if (msg.type === "db_result") {
+      // Answer to the "Session DB" tab's own query -- request_id guards
+      // against a stale response landing after the user already picked a
+      // different table (see requestDbRows). Paints #db-rows directly
+      // instead of going through the generic render() -> renderSessionDbTab()
+      // path: that path now deliberately skips rebuilding anything once
+      // the shell already exists for this session (see dbShellFor), so it
+      // would never actually show this result on its own.
+      if (msg.request_id === dbPendingRequestId) {
+        dbRows = msg.rows || null;
+        dbError = msg.error || null;
+        dbPendingRequestId = null;
+      }
+      paintDbRows();
+      return;
     }
     render();
   };
@@ -168,6 +197,7 @@ function buildShell() {
       <button class="tab-btn" data-tab="fleet">Fleet</button>
       <button class="tab-btn" data-tab="activity">Activity</button>
       <button class="tab-btn" data-tab="session">Session</button>
+      <button class="tab-btn" data-tab="session-db">Session DB</button>
     </div>
     <div class="tab-panels" id="tab-content"></div>
     <footer>jfi fleet — live via WebSocket, no filesystem access between master and sessions</footer>
@@ -250,9 +280,14 @@ function render() {
   });
 
   if (activeTab === "session") {
+    dbShellFor = null; // leaving the Session DB tab invalidates its shell so returning rebuilds it fresh
     renderSessionTab(entries);
+  } else if (activeTab === "session-db") {
+    sessionShellFor = null; // leaving the Session tab invalidates its shell so returning rebuilds it fresh
+    renderSessionDbTab();
   } else {
     sessionShellFor = null; // leaving the tab invalidates the shell so returning rebuilds it fresh
+    dbShellFor = null; // ditto for the Session DB tab
     elTabContent.innerHTML = activeTab === "fleet" ? renderFleetTab(entries) : renderActivityTab();
     elTabContent.querySelectorAll(".card").forEach((card) => {
       card.addEventListener("click", () => {
@@ -395,6 +430,114 @@ function renderActivityTab() {
         .join("")}
     </div>
   `;
+}
+
+// ------------------------------------------------------------- render: session db
+//
+// A plain, mechanical table browser for the selected session's own
+// .jfi/JFI.db -- pick a table, optionally scope to just this session's own
+// rows, Refresh. No purpose-built rendering of any one table; the Session
+// tab's own checklist/log panels already cover the "make sense of this"
+// job for the tables that need it. The query itself never runs here --
+// see requestDbRows/sendControl and socket_reporter.py's _handle_db_query
+// on the other end.
+
+// `dbShellFor` mirrors `sessionShellFor`'s own pattern exactly (see
+// paintSection's comment on the Session tab, and buildShell's own comment
+// on the theme <select> for the original instance of this failure): the
+// shell -- the <select>/checkbox/button controls -- is built ONCE per
+// session and never touched again by an ordinary re-render. Every
+// "session_update"/"activity" WebSocket message calls render(), which used
+// to call renderSessionDbTab() and replace the WHOLE tab's innerHTML EVERY
+// time (about once a second while a session is actively reporting) --
+// destroying and recreating the <select> out from under anyone trying to
+// click it -- the exact same failure the theme <select> already hit once.
+let dbShellFor = null; // selectedKey the Session DB tab's shell was last built for
+
+function renderSessionDbTab() {
+  const entry = selectedKey && state.sessions[selectedKey];
+  if (!entry) {
+    dbShellFor = null;
+    elTabContent.innerHTML = `<p class="empty-note">Select a session from the Fleet tab first, then come back here to browse its database.</p>`;
+    return;
+  }
+
+  if (dbShellFor !== selectedKey) {
+    elTabContent.innerHTML = `
+      <div class="panel">
+        <div class="panel-head">Session DB · ${esc(entry.data?.session || entry.key)}</div>
+        <div class="panel-body">
+          <div class="db-controls">
+            <select id="db-table-select">
+              ${DB_TABLES.map((t) => `<option value="${esc(t)}" ${t === dbTable ? "selected" : ""}>${esc(t)}</option>`).join("")}
+            </select>
+            <label class="db-scope-label"><input type="checkbox" id="db-scoped-checkbox" ${dbScoped ? "checked" : ""}/> only this session's rows</label>
+            <button class="opt-btn" id="db-refresh-btn">Refresh</button>
+          </div>
+          <div id="db-rows"></div>
+        </div>
+      </div>
+    `;
+    dbShellFor = selectedKey;
+
+    document.getElementById("db-table-select").addEventListener("change", (e) => {
+      dbTable = e.target.value;
+      dbRows = null;
+      dbError = null;
+      paintDbRows();
+    });
+    document.getElementById("db-scoped-checkbox").addEventListener("change", (e) => {
+      dbScoped = e.target.checked;
+    });
+    document.getElementById("db-refresh-btn").addEventListener("click", () => requestDbRows(entry.key));
+
+    paintDbRows();
+  }
+
+  // Cheap property mutation, not a node replacement -- safe to run on
+  // every render() tick without disturbing an open <select>.
+  const refreshBtn = document.getElementById("db-refresh-btn");
+  if (refreshBtn) refreshBtn.disabled = !entry.online;
+}
+
+function paintDbRows() {
+  const el = document.getElementById("db-rows");
+  if (!el) return;
+  const entry = selectedKey && state.sessions[selectedKey];
+  if (dbRows === null) {
+    el.innerHTML = `<p class="empty-note">${entry?.online ? "Pick a table and click Refresh." : "This session is offline — no live connection to query its database."}</p>`;
+  } else if (dbError) {
+    el.innerHTML = `<p class="empty-note">Error: ${esc(dbError)}</p>`;
+  } else if (dbRows.length === 0) {
+    el.innerHTML = `<p class="empty-note">No rows.</p>`;
+  } else {
+    el.innerHTML = renderDbTable(dbRows);
+  }
+}
+
+function renderDbTable(rows) {
+  const columns = Object.keys(rows[0]);
+  return `
+    <div class="db-table-wrap">
+      <table class="db-table">
+        <thead><tr>${columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
+        <tbody>
+          ${rows.map((row) => `<tr>${columns.map((c) => `<td>${esc(formatCell(row[c]))}</td>`).join("")}</tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function formatCell(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function requestDbRows(sessionKey) {
+  dbPendingRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  sendControl(sessionKey, "db_query", { table: dbTable, scoped: dbScoped, request_id: dbPendingRequestId });
 }
 
 // ------------------------------------------------------------- render: session detail
@@ -605,11 +748,16 @@ function renderSessionTab(entries) {
 
   paintSection(
     "sd-current-task",
-    JSON.stringify([d.phase, d.task]),
+    JSON.stringify([d.phase, d.task, d.task_started_at]),
     () => `
       <div class="panel">
         <div class="panel-head"><span>Current task</span><span class="n">${esc(d.phase || "")}</span></div>
-        <div class="panel-body" style="font-size:12.5px;color:var(--ink-dim);">${d.task ? esc(d.task) : "—"}</div>
+        <div class="panel-body" style="font-size:12.5px;color:var(--ink-dim);">
+          ${d.task ? esc(d.task) : "—"}
+          ${d.task && d.task_started_at
+            ? `<div class="ct-timing"><span>Started ${fmtClock(d.task_started_at)}</span><span class="ct-running">Running ${fmtDuration(Date.now() / 1000 - d.task_started_at)}</span></div>`
+            : ""}
+        </div>
       </div>
     `
   );
@@ -814,15 +962,39 @@ function truncate(text, n) {
 // reset alongside it), the same lifecycle sessionSubTab itself already has.
 let checklistPath = [];
 
+// One drill-down level's tab row: branches (drill further, shown with a
+// done/total badge) and leaf siblings (already atomic, shown with their
+// own status icon instead) rendered together, in that order -- both use
+// the SAME data-pc-depth/data-pc-value attributes the click handler
+// already generically handles, so selecting a leaf tab needs no separate
+// code path from selecting a branch tab.
+function renderLevelTabRow(branches, leaves, selectedNumber, dataDepth) {
+  const branchTabs = branches.map((n) => {
+    const [d, t] = subtreeCounts(n);
+    return `<button class="pc-tab ${n.number === selectedNumber ? "active" : ""}" data-pc-depth="${dataDepth}" data-pc-value="${esc(n.number)}">${esc(n.number)} ${esc(truncate(n.desc, 28))} <span class="pc-tab-badge">${d}/${t}</span></button>`;
+  });
+  const leafTabs = leaves.map(
+    (n) =>
+      `<button class="pc-tab pc-tab-leaf ${n.number === selectedNumber ? "active" : ""}" data-pc-depth="${dataDepth}" data-pc-value="${esc(n.number)}">${n.done ? "✓" : "○"} ${esc(n.number)} ${esc(truncate(n.desc, 28))}</button>`
+  );
+  return `<div class="pc-tab-row">${branchTabs.join("")}${leafTabs.join("")}</div>`;
+}
+
 function renderLeafCard(node, currentPhase, currentNumber, currentTaskStartedAt, historyByKey) {
   const isCurrent = !node.done && currentPhase === node.phase && currentNumber && node.number === currentNumber;
   let timing = "";
   if (isCurrent && currentTaskStartedAt) {
-    timing = `<span class="pc-time pc-time-running">● ${fmtDuration(Date.now() / 1000 - currentTaskStartedAt)}</span>`;
+    timing = `
+      <span class="pc-time pc-time-running">● ${fmtDuration(Date.now() / 1000 - currentTaskStartedAt)}</span>
+      <span class="pc-time-range">since ${fmtClock(currentTaskStartedAt)}</span>
+    `;
   } else {
     const h = historyByKey[`${node.phase || ""}:${node.number}`];
     if (h && h.started_at && h.ended_at) {
-      timing = `<span class="pc-time" title="${fmtClock(h.started_at)} → ${fmtClock(h.ended_at)}">${fmtDuration(h.ended_at - h.started_at)}</span>`;
+      timing = `
+        <span class="pc-time">${fmtDuration(h.ended_at - h.started_at)}</span>
+        <span class="pc-time-range">${fmtClock(h.started_at)} → ${fmtClock(h.ended_at)}</span>
+      `;
     }
   }
   return `
@@ -887,14 +1059,32 @@ function renderPlanChecklist(planMarkdown, currentTask, currentTaskStartedAt, ta
     })
     .join("");
 
-  // Walk the rest of the path through the tree: one tab row per level for
-  // whichever siblings are themselves branches (have children), leaf cards
-  // rendered inline for whichever siblings at that SAME level are already
-  // atomic -- a level can genuinely be a mix of both.
+  // Walk the rest of the path through the tree: one tab row per level,
+  // covering whichever siblings are branches (drill further) AND whichever
+  // siblings at that SAME level are already leaves -- a level can
+  // genuinely be a mix of both (e.g. "3.2" is a leaf sibling of branches
+  // "3.1"/"3.3"). The leaf CARDS shown below, though, belong to exactly
+  // ONE level: the one the walk actually stops at (either a natural dead
+  // end with no branches, or a leaf-tab the user explicitly selected) --
+  // never accumulated across every level visited on the way there.
+  // Regression this replaces: leaf siblings used to be collected from
+  // EVERY level walked through into one merged, sorted list -- number-
+  // sorted, so not visibly out of order, but structurally wrong: a
+  // top-level leaf like "4" (a sibling of section "3" itself) ended up
+  // mixed into "3.3"'s own child list with no indication it belonged at a
+  // completely different level, and "3.2" (a sibling of "3.3", not a
+  // descendant) appeared there too, while being un-openable on its own --
+  // the walk always auto-descends into a default branch, so a shallower
+  // leaf sibling had no other way to surface at all. Fixed by making a
+  // leaf sibling a SELECTABLE TAB at its own level (same data-pc-depth/
+  // data-pc-value the click handler already generically supports for
+  // branches) instead of silently hoisting it into a deeper level's card
+  // list.
   let levelMap = tree[checklistPath[0]];
   let tabRows = "";
-  let leafCards = "";
+  let finalLeaves = [];
   let depth = 0;
+  let lastWrittenIndex = 0;
   const breadcrumb = [`<button class="pc-crumb" data-pc-crumb="0">${esc(PHASE_LABELS[checklistPath[0]] || checklistPath[0])}</button>`];
 
   while (levelMap) {
@@ -902,26 +1092,38 @@ function renderPlanChecklist(planMarkdown, currentTask, currentTaskStartedAt, ta
     const branches = nodes.filter((n) => Object.keys(n.children).length > 0);
     const leaves = nodes.filter((n) => Object.keys(n.children).length === 0);
 
-    if (leaves.length) {
-      leafCards += leaves.map((n) => renderLeafCard(n, currentPhase, currentNumber, currentTaskStartedAt, historyByKey)).join("");
-    }
-    if (!branches.length) break;
+    // An explicitly-selected leaf sibling stops the walk HERE, showing
+    // this level's own leaves below -- otherwise a leaf sibling of a
+    // branch would be permanently unreachable, since the walk always
+    // auto-descends into a default branch when nothing else is selected.
+    const selectedLeaf = leaves.find((n) => n.number === checklistPath[depth + 1]);
+    const stopHere = !!selectedLeaf || !branches.length;
+    const selected =
+      selectedLeaf ||
+      branches.find((n) => n.number === checklistPath[depth + 1]) ||
+      branches[0] ||
+      leaves[0];
+    if (!selected) break;
 
-    const selected = branches.find((n) => n.number === checklistPath[depth + 1]) || branches[0];
     checklistPath[depth + 1] = selected.number;
+    lastWrittenIndex = depth + 1;
 
-    tabRows += `<div class="pc-tab-row">${branches
-      .map((n) => {
-        const [d, t] = subtreeCounts(n);
-        return `<button class="pc-tab ${n.number === selected.number ? "active" : ""}" data-pc-depth="${depth + 1}" data-pc-value="${esc(n.number)}">${esc(n.number)} ${esc(truncate(n.desc, 28))} <span class="pc-tab-badge">${d}/${t}</span></button>`;
-      })
-      .join("")}</div>`;
+    tabRows += renderLevelTabRow(branches, leaves, selected.number, depth + 1);
     breadcrumb.push(`<button class="pc-crumb" data-pc-crumb="${depth + 1}">${esc(selected.number)} ${esc(truncate(selected.desc, 20))}</button>`);
+
+    if (stopHere) {
+      finalLeaves = leaves;
+      break;
+    }
 
     levelMap = selected.children;
     depth += 1;
   }
-  checklistPath.length = depth + 1; // drop any stale deeper segments from a shorter path
+  checklistPath.length = lastWrittenIndex + 1; // drop any stale deeper segments from a shorter path
+
+  const leafCards = sortByNumber(finalLeaves)
+    .map((n) => renderLeafCard(n, currentPhase, currentNumber, currentTaskStartedAt, historyByKey))
+    .join("");
 
   return `
     <div class="panel">

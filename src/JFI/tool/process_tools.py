@@ -231,39 +231,39 @@ def clear_finished_processes() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Context-cache mirroring -- make_process_tools binds start/stop to also
-# write a durable record of each process into the session's own context
-# cache, the same per-session binding pattern as
+# Context mirroring -- make_process_tools binds start/stop to also write a
+# durable record of each process into the session's own context store
+# (JFI.models.ContextEntry), the same per-session binding pattern as
 # cmd_tools.make_gated_execute_command / context_tools.make_context_tools.
 # ---------------------------------------------------------------------------
 
-def _mirror_to_context(handle: str, cache_path: str) -> None:
-    from JFI.tool.context_tools import context_save  # local import: avoid a hard dependency for callers that never bind a cache
+def _mirror_to_context(handle: str, engine, session_id: str) -> None:
+    from JFI.tool.context_tools import context_save  # local import: avoid a hard dependency for callers that never bind a session
 
     entry = next((p for p in snapshot_processes() if p["handle"] == handle), None)
     if entry is None:
         return
-    context_save(_CONTEXT_KEY_PREFIX + handle, _describe(entry), cache_path)
+    context_save(engine, session_id, _CONTEXT_KEY_PREFIX + handle, _describe(entry))
 
 
-def make_process_tools(cache_path: str) -> Dict[str, Callable]:
+def make_process_tools(engine, session_id: str) -> Dict[str, Callable]:
     """{"start_background_process": ..., "stop_background_process": ...},
-    each bound to one session's context.json so a process's command/pid/
-    host/port/status survives history compression and session resumption
-    as an ordinary context-cache fact (key "bg_process:<handle>") -- not
-    just live in this process's memory. list_processes needs no binding;
-    it already reads the live registry directly."""
+    each bound to one session's own context store so a process's command/
+    pid/host/port/status survives history compression and session
+    resumption as an ordinary context fact (key "bg_process:<handle>") --
+    not just live in this process's memory. list_processes needs no
+    binding; it already reads the live registry directly."""
 
     def bound_start(command: str, log_file: str = "", host: str = "", port: str = "") -> str:
         result = start_background_process(command, log_file=log_file, host=host, port=port)
         if result.startswith("Started "):
             handle = result.split(" as ", 1)[1].split(" ", 1)[0]
-            _mirror_to_context(handle, cache_path)
+            _mirror_to_context(handle, engine, session_id)
         return result
 
     def bound_stop(handle: str, timeout: float = 5.0) -> str:
         result = stop_background_process(handle, timeout=timeout)
-        _mirror_to_context(handle, cache_path)
+        _mirror_to_context(handle, engine, session_id)
         return result
 
     return {
