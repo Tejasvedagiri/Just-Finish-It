@@ -64,6 +64,21 @@ class TestLlamaCppBackend:
         assert __import__("os").environ["OPENAI_URL"] == "http://127.0.0.1:8080/v1"
 
 
+class TestLmStudioBackend:
+    @pytest.mark.parametrize("spelling", ["lmstudio", "lm-studio", "lm studio"])
+    def test_accepts_every_documented_spelling(self, monkeypatch, spelling):
+        monkeypatch.setenv("LLM_BACKEND", spelling)
+        backend_select.make_llm_stream()
+        assert __import__("os").environ["OPENAI_URL"] == "http://127.0.0.1:1234/v1"
+        assert __import__("os").environ["OPENAI_API_KEY"] == "lm-studio"
+
+    def test_never_overrides_an_explicitly_set_url(self, monkeypatch):
+        monkeypatch.setenv("LLM_BACKEND", "lmstudio")
+        monkeypatch.setenv("OPENAI_URL", "http://my-custom-lmstudio:9999/v1")
+        backend_select.make_llm_stream()
+        assert __import__("os").environ["OPENAI_URL"] == "http://my-custom-lmstudio:9999/v1"
+
+
 class TestPerPhaseOverride:
     def test_a_phase_specific_backend_wins_over_the_shared_default(self, monkeypatch):
         monkeypatch.setenv("LLM_BACKEND", "ollama")

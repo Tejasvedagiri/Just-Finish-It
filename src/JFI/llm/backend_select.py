@@ -15,6 +15,9 @@ one place to add a new backend rather than teaching runner.py about each.
   llama.cpp server's usual port (http://127.0.0.1:8080/v1, key
   "llamacpp" -- its server doesn't check the key either, any non-empty
   string works).
+- "lmstudio" (or "lm-studio"/"lm studio"): same idea, defaulted to LM
+  Studio's usual local server port (http://127.0.0.1:1234/v1, key
+  "lm-studio" -- LM Studio's own convention, not checked either).
 - "anthropic" (or "claude"): AnthropicStream -- Claude's own Messages API,
   which is NOT OpenAI-compatible (different request/response/streaming
   shape, tool_use/tool_result content blocks instead of tool_calls) -- see
@@ -34,7 +37,11 @@ logger = logging.getLogger(__name__)
 
 _OLLAMA_DEFAULTS = {"OPENAI_URL": "http://127.0.0.1:11434/v1", "OPENAI_API_KEY": "ollama"}
 _LLAMACPP_DEFAULTS = {"OPENAI_URL": "http://127.0.0.1:8080/v1", "OPENAI_API_KEY": "llamacpp"}
-_KNOWN_BACKENDS = {"", "openai", "ollama", "llamacpp", "llama.cpp", "llama-cpp", "anthropic", "claude"}
+_LMSTUDIO_DEFAULTS = {"OPENAI_URL": "http://127.0.0.1:1234/v1", "OPENAI_API_KEY": "lm-studio"}
+_KNOWN_BACKENDS = {
+    "", "openai", "ollama", "llamacpp", "llama.cpp", "llama-cpp", "lmstudio", "lm-studio", "lm studio",
+    "anthropic", "claude",
+}
 
 
 def make_llm_stream(prefix: str = ""):
@@ -53,6 +60,9 @@ def make_llm_stream(prefix: str = ""):
             os.environ.setdefault(key, value)
     elif backend in ("llamacpp", "llama.cpp", "llama-cpp"):
         for key, value in _LLAMACPP_DEFAULTS.items():
+            os.environ.setdefault(key, value)
+    elif backend in ("lmstudio", "lm-studio", "lm studio"):
+        for key, value in _LMSTUDIO_DEFAULTS.items():
             os.environ.setdefault(key, value)
     elif backend not in _KNOWN_BACKENDS:
         logger.warning(

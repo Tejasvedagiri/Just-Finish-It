@@ -14,6 +14,17 @@ OPENAI_API_KEY=ollama
 # Model name as the server expects it, e.g. qwen3:8b, gemma-4:31b, qwen3.5:35b-a3b
 MODEL=qwen3:8b
 
+# --- Optional: talk to Claude's own API instead of an OpenAI-compatible one --
+#
+# Set LLM_BACKEND=anthropic (or "claude") to bypass OPENAI_URL/OPENAI_API_KEY
+# entirely and talk to Claude's native Messages API via ANTHROPIC_API_KEY
+# instead (needs `uv sync --extra anthropic`). MODEL becomes a Claude model
+# id, e.g. claude-sonnet-5. See README.md -> "Configuration (.env)" for the
+# full picker of OPENAI_URL/MODEL/OPENAI_API_KEY per backend (Ollama,
+# llama.cpp, vLLM, OpenAI, Claude).
+# LLM_BACKEND=anthropic
+# ANTHROPIC_API_KEY=sk-ant-your-real-key
+
 # --- Optional ----------------------------------------------------------------
 
 # Which SessionManager drives a session: "adaptive" (default) detects the
