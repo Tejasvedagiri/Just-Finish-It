@@ -9,7 +9,7 @@ nobody who isn't running the dashboard should pay for a background thread
 and a file write every tick, and existing terminal-only sessions shouldn't
 gain new files in their session folder they never asked for.
 
-Two files live inside the session's own JFI/<session>/ folder:
+Two files live inside the session's own .jfi/<session>/ folder:
 
 - web_status.json  -- written by this bridge every _POLL_SECONDS from
   console.get_status_snapshot(). Read-only from the dashboard's side.

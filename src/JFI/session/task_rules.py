@@ -121,51 +121,60 @@ def detect_task_type(goal_text: str) -> str:
 
 
 CORE_PLAN_RULES = """
-    PLAN FILE FORMAT (mandatory, no exceptions):
-    - The plan file is exactly: {plan_path}
-    - Exactly two "##" section headers are mechanically required, spelled
-      exactly like this and nothing else: "## Implementation" and
-      "## Testing" -- JFI's own tooling scans for a header starting with
-      "Implementation"/"Testing" to build each phase's own work queue and
-      progress bar. However many logical groups your own project needs,
-      they ALL nest as plain bullets under those two headers -- never
-      their own "##"/"###" headers (any markdown header, any level,
-      anywhere in the file silently ends the section right there,
-      dropping everything below it from the work queue even though it's
-      still in the file). Architecture notes, data models, or other
-      context go under "## Context and Prerequisites" instead.
-    - {plan_path}'s own directory is internal bookkeeping ONLY -- never
-      put deliverables (source, tests, docs) inside it just because the
-      plan happens to live there. A project-scaffolding command that needs
-      an empty target directory (`npm create vite`, `django-admin
-      startproject`, ...) will see this folder already sitting in the
-      working directory and refuse to run here -- expected, not a real
-      error: scaffold into a throwaway subdirectory instead, then move
-      everything generated up into the working directory root (`mv
-      temp-app/* . ...; rmdir temp-app` or equivalent), leaving this
-      folder untouched.
+    PLAN TOOLS (mandatory, no exceptions) -- the plan is a DB-backed tree,
+    never a file you write directly. Use these six tools, never write_file/
+    append_to_file/replace_in_file on any plan file:
+    - get_plan() -- shows the current tree: every leaf's id, its display
+      number (e.g. "1.1.2", computed for you -- never hand-numbered, never
+      something you track or renumber yourself), phase, description, and
+      status. Call this first whenever you need to see what already exists.
+    - add_leaf(phase, description, parent_id=None) -- adds one new item.
+      `phase` is exactly "planner", "product_owner", "imp", "testing",
+      "reviewer", or "cleanup" -- almost always "imp" or "testing" for your
+      own additions. Omit parent_id (or pass none) for a top-level item;
+      pass an existing leaf's id (from get_plan) to nest under it. A leaf
+      you intend to give children to must be split_leaf'd once you do --
+      never add_leaf with parent_id pointing at something that already has
+      real status/timing of its own (get_plan shows which ones do).
+    - split_leaf(leaf_id, into=[...]) -- turns an existing leaf into a
+      parent with new child leaves under it. Use this the MOMENT you
+      realize a leaf is really more than one piece of work, before
+      attempting it as one leaf, not reactively after getting stuck
+      partway through. `into` needs at least 2 descriptions.
+    - start_leaf(leaf_id) / mark_leaf_done(leaf_id, tokens=None) -- call
+      start_leaf right before beginning a leaf's real work, mark_leaf_done
+      the moment it's finished. Only ever on a genuine leaf (no children of
+      its own) -- never on a parent; that's rejected the same way a plan.md
+      parent bullet never got a checkbox.
+    - reorder_leaf(leaf_id, after_leaf_id=0) -- moves a leaf among its own
+      siblings, if you catch an ordering bug (something depended on before
+      whatever creates it).
+    - {plan_path}'s directory is internal bookkeeping ONLY -- never put
+      deliverables (source, tests, docs) inside it. A project-scaffolding
+      command that needs an empty target directory (`npm create vite`,
+      `django-admin startproject`, ...) will see this folder already
+      sitting in the working directory and refuse to run here -- expected,
+      not a real error: scaffold into a throwaway subdirectory instead,
+      then move everything generated up into the working directory root
+      (`mv temp-app/* . ...; rmdir temp-app` or equivalent), leaving this
+      folder untouched. The plan itself lives entirely in the DB now,
+      nowhere on disk to collide with a scaffolder's own directory needs.
     - The plan is a TREE, not a flat list: break every task into the
       smallest doable pieces, recursing as many levels as it takes (2, 3,
       4+) -- stop nesting a branch only once its leaves are each small
-      enough to finish and verify in one focused step. Only LEAF items
-      (not broken down further) get a checkbox:
-          - [ ] 1.1.1 Short description of the smallest step
-      Parents are plain bullets, NO checkbox: `- 1.1 Description`. A
-      checkbox on a parent hands the implementer a fake duplicate task
-      alongside its own real children.
-    - Numbering shows a leaf's full path from its section root (1.1, then
-      1.1.1, then 1.1.1.1, ...) -- see the worked example below for this
-      kind of project's own typical shape.
-    - "- [ ]" = not started, "- [x]" = done, "- [○]" = user-skipped
-      (Ctrl+K -- never write this yourself; treat it exactly like done,
-      never redo or flag it). No other marker, ever -- no ballot boxes, no
-      emoji ticks, no checkbox tables. Tick a box by changing ONLY the
-      space inside the brackets to an x -- byte-identical otherwise, so a
-      targeted replace can find it.
+      enough to finish and verify in one focused step. Only genuine leaves
+      (no children of their own) ever get start_leaf/mark_leaf_done called
+      on them; a parent (anything you gave children to) never does --
+      calling either on a parent is rejected the same way a checkbox on a
+      parent bullet never made sense under the old markdown format.
     - A task with only one obvious, already-small action underneath it can
       stay a single leaf -- don't split for the sake of splitting. The
       goal is the smallest task that is still genuinely one task, not
       maximum depth.
+
+    Any markdown-bullet "worked example" appearing in the domain-specific
+    guidance below illustrates TREE SHAPE/GRANULARITY only -- translate it
+    into the equivalent add_leaf/split_leaf calls, never literal file text.
 """
 
 PYTHON_ADDENDUM = """

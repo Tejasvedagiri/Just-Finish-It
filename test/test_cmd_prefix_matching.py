@@ -1,6 +1,7 @@
 """Prefix-matching edge cases for the approval gate's Save behaviour."""
 
 from JFI.manager.abstract_manager import AbstractManager
+from JFI.models import get_engine
 from JFI.tool.cmd_tools import get_approved_cmd_prefixes, request_cmd_approval
 
 
@@ -18,39 +19,43 @@ class _Console(AbstractManager):
     def print_agent_response(self, *a, **k): pass
 
 
+def _engine(tmp_path):
+    return get_engine(tmp_path)
+
+
 class TestPrefixMatching:
 
     def test_saved_prefix_matches_same_base_word_different_flags(self, tmp_path):
-        cache = tmp_path / "context.json"
-        request_cmd_approval("ls -la", _Console(["s"]), str(cache))
-        assert get_approved_cmd_prefixes(str(cache)) == ["ls"]
+        engine = _engine(tmp_path)
+        request_cmd_approval("ls -la", _Console(["s"]), engine, "demo")
+        assert get_approved_cmd_prefixes(engine, "demo") == ["ls"]
 
         # Different flags, same leading word: auto-approved, no prompt needed.
         console2 = _Console([])
-        assert request_cmd_approval("ls -R /tmp", console2, str(cache)) is True
+        assert request_cmd_approval("ls -R /tmp", console2, engine, "demo") is True
 
     def test_empty_approved_list_always_prompts(self, tmp_path):
-        cache = tmp_path / "context.json"
+        engine = _engine(tmp_path)
         console = _Console(["y"])
-        assert request_cmd_approval("git status", console, str(cache)) is True
+        assert request_cmd_approval("git status", console, engine, "demo") is True
         # "y" (not "s") never wrote a prefix, so the list stays empty.
-        assert get_approved_cmd_prefixes(str(cache)) == []
+        assert get_approved_cmd_prefixes(engine, "demo") == []
 
     def test_multiple_saved_prefixes_all_match_independently(self, tmp_path):
-        cache = tmp_path / "context.json"
-        request_cmd_approval("npm install", _Console(["s"]), str(cache))
-        request_cmd_approval("uv run pytest", _Console(["s"]), str(cache))
-        assert get_approved_cmd_prefixes(str(cache)) == ["npm", "uv"]
+        engine = _engine(tmp_path)
+        request_cmd_approval("npm install", _Console(["s"]), engine, "demo")
+        request_cmd_approval("uv run pytest", _Console(["s"]), engine, "demo")
+        assert get_approved_cmd_prefixes(engine, "demo") == ["npm", "uv"]
 
-        assert request_cmd_approval("npm run build", _Console([]), str(cache)) is True
-        assert request_cmd_approval("uv sync", _Console([]), str(cache)) is True
+        assert request_cmd_approval("npm run build", _Console([]), engine, "demo") is True
+        assert request_cmd_approval("uv sync", _Console([]), engine, "demo") is True
         # An unrelated command still prompts.
-        assert request_cmd_approval("rm file.txt", _Console(["n"]), str(cache)) is False
+        assert request_cmd_approval("rm file.txt", _Console(["n"]), engine, "demo") is False
 
     def test_prefix_match_is_substring_not_whole_word(self, tmp_path):
         """Documents the current startswith() semantics: 'ls' also matches a
         command whose leading token merely starts with it, e.g. 'lsof' —
         not a bug fix here, just pinning the known behaviour."""
-        cache = tmp_path / "context.json"
-        request_cmd_approval("ls", _Console(["s"]), str(cache))
-        assert request_cmd_approval("lsof -i", _Console([]), str(cache)) is True
+        engine = _engine(tmp_path)
+        request_cmd_approval("ls", _Console(["s"]), engine, "demo")
+        assert request_cmd_approval("lsof -i", _Console([]), engine, "demo") is True

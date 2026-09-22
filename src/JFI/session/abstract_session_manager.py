@@ -30,9 +30,10 @@ class SessionManager(ABC):
       the job).
     - plan_path: where the plan lives -- surfaced verbatim to the model in
       every phase trigger message so it knows where to read/write it.
-    - context_cache_path: backing store for the context_save/context_lookup
+    - db_engine / session_id: the DB-backed context_save/context_lookup
       tools and the execute_command approval gate's persisted "Save"
-      prefixes.
+      prefixes are both keyed by these, not by a file path (see
+      JFI.tool.context_tools / JFI.tool.cmd_tools).
     - is_resuming: True when this session_id already had history before this
       process started -- runner.py skips the goal prompt and any
       already-completed phases when this is true.

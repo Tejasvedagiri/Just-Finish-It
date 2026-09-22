@@ -1,24 +1,22 @@
 """Session lifecycle tests: folder creation, resume, metadata round-trip,
 file tracking, and history persistence across manager instances."""
 
-import json
-
 
 def test_constructor_creates_jfi_session_folder(manager):
     from pathlib import Path
 
     assert (manager.session_path / "history.jsonl.gz").parent.is_dir()
-    assert manager.session_path.name == "demo"
-    parent = manager.session_path.parent
-    assert parent.name == "JFI"
+    # `.jfi/` is flat -- one folder per PROJECT, not per session (see
+    # SimpleSessionManager.__init__'s own note on why).
+    assert manager.session_path.name == ".jfi"
     # The on-disk folder is inside the test cwd.
-    assert (Path.cwd() / "JFI" / "demo").is_dir()
+    assert (Path.cwd() / ".jfi").is_dir()
 
 
 def test_constructor_normalises_session_id(make_manager):
     ssm = make_manager("My Demo")
     assert ssm.session_id == "my_demo"
-    assert ssm.session_path.parent.name == "JFI"
+    assert ssm.session_path.name == ".jfi"
 
 
 def test_resume_flag_reflects_existing_history(make_manager, manager):
@@ -34,17 +32,17 @@ def test_resume_flag_reflects_existing_history(make_manager, manager):
 
 def test_metadata_round_trip(make_manager):
     first = make_manager("meta")
-    assert first.metadata == {"implemented_files": []}
+    assert first.metadata["implemented_files"] == []
 
     first.track_file("src/a.py")
     first.save_metadata()
 
+    # Metadata is DB-backed now (JFI.session.metadata_store) -- a second
+    # manager for the same session_id reads it back from the shared
+    # project-root .JFI.db, not from a metadata.json file on disk.
     second = make_manager("meta")
     loaded = second.load_metadata()
     assert "src/a.py" in loaded["implemented_files"]
-    # metadata.json is plain JSON on disk, next to the history pickle.
-    raw = json.loads(second.metadata_path.read_text(encoding="utf-8"))
-    assert raw["implemented_files"] == ["src/a.py"]
 
 
 def test_track_file_dedupes_and_persists(make_manager):
@@ -86,17 +84,19 @@ def test_history_persistence_across_instances(make_manager):
 def test_save_history_appends_instead_of_rewriting(make_manager, monkeypatch):
     """Regression: history.pkl used to be rewritten in full on every message,
     so a turn's save cost grew with the whole session's size. save_history()
-    must only ever hand the newly added messages to the append helper."""
+    must only ever hand the newly added messages to the DB append helper
+    (JFI.session.history_store.append_history_to_db), never the whole
+    history again."""
     import JFI.session.simple_session_manager as ssm_module
 
     seen_batches = []
-    original = ssm_module._append_jsonl_gz
+    original = ssm_module.append_history_to_db
 
-    def spy(path, messages):
+    def spy(engine, session_id, messages):
         seen_batches.append(list(messages))
-        return original(path, messages)
+        return original(engine, session_id, messages)
 
-    monkeypatch.setattr(ssm_module, "_append_jsonl_gz", spy)
+    monkeypatch.setattr(ssm_module, "append_history_to_db", spy)
 
     ssm = make_manager("append-only")
     ssm.add_message("user", "one")
@@ -108,33 +108,14 @@ def test_save_history_appends_instead_of_rewriting(make_manager, monkeypatch):
     assert all(len(b) == 1 for b in seen_batches)
 
 
-def test_history_survives_a_truncated_final_write(make_manager):
-    """Regression: a crash mid-save used to risk the *entire* history file —
-    gzip.GzipFile.read() decodes however many members it needs to satisfy a
-    request, and raises without returning anything if that walk reaches a
-    truncated final member, even when earlier members are perfectly intact.
-    Only the in-flight message should be lost, never anything before it."""
-    ssm = make_manager("crashy")
-    for i in range(5):
-        ssm.add_message("user", f"message {i}")
-
-    size_before_last = ssm.history_path.stat().st_size
-    ssm.add_message("user", "this one gets corrupted")
-    full_size = ssm.history_path.stat().st_size
-
-    truncated_at = size_before_last + (full_size - size_before_last) // 2
-    with open(ssm.history_path, "r+b") as f:
-        f.truncate(truncated_at)
-
-    resumed = make_manager("crashy")
-    assert [m["content"] for m in resumed.history] == [f"message {i}" for i in range(5)]
-
-
 def test_legacy_pickle_history_is_migrated_on_load(make_manager):
-    """A pre-existing history.pkl (the old full-rewrite format) must still
-    load, and gets written out under the new append-only format immediately
-    so every save from then on appends instead of resurrecting the pickle."""
+    """A pre-existing history.pkl (the old full-rewrite format, from before
+    the DB cutover) must still load, and gets migrated straight into the DB
+    immediately so every save from then on appends there instead of
+    resurrecting the pickle."""
     import pickle
+
+    from JFI.session.history_store import has_history
 
     ssm = make_manager("legacy")
     legacy_path = ssm.session_path / "history.pkl"
@@ -145,7 +126,7 @@ def test_legacy_pickle_history_is_migrated_on_load(make_manager):
     migrated = make_manager("legacy")
     assert migrated.is_resuming
     assert [m["content"] for m in migrated.history] == ["old goal", "old reply"]
-    assert migrated.history_path.exists()
+    assert has_history(migrated.db_engine, migrated.session_id)
 
     # A save after migration appends cleanly, and a fresh load sees it all.
     migrated.add_message("user", "new turn after migration")

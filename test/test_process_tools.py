@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from JFI.models import get_engine
 from JFI.tool import context_tools, process_tools
 
 
@@ -198,42 +199,40 @@ class TestMakeProcessTools:
     (see the module docstring)."""
 
     def test_start_writes_a_context_cache_entry(self, tmp_path):
-        cache_path = str(tmp_path / "context.json")
-        tools = process_tools.make_process_tools(cache_path)
+        engine = get_engine(tmp_path)
+        tools = process_tools.make_process_tools(engine, "demo")
 
         tools["start_background_process"]("sleep 5", host="127.0.0.1", port="8000")
 
-        facts = context_tools.load_context_cache(cache_path)
-        assert "bg_process:bg1" in facts
-        assert "127.0.0.1" in facts["bg_process:bg1"]
-        assert "8000" in facts["bg_process:bg1"]
-        assert "status=running" in facts["bg_process:bg1"]
+        entry = context_tools.get_context_value(engine, "demo", "bg_process:bg1")
+        assert entry is not None
+        assert "127.0.0.1" in entry
+        assert "8000" in entry
+        assert "status=running" in entry
 
     def test_stop_updates_the_same_context_cache_entry(self, tmp_path):
-        cache_path = str(tmp_path / "context.json")
-        tools = process_tools.make_process_tools(cache_path)
+        engine = get_engine(tmp_path)
+        tools = process_tools.make_process_tools(engine, "demo")
         tools["start_background_process"]("sleep 30")
 
         tools["stop_background_process"]("bg1", timeout=3)
 
-        facts = context_tools.load_context_cache(cache_path)
-        assert "exited" in facts["bg_process:bg1"] or "status=exited" in facts["bg_process:bg1"]
+        entry = context_tools.get_context_value(engine, "demo", "bg_process:bg1")
+        assert "exited" in entry or "status=exited" in entry
 
     def test_does_not_clobber_other_context_cache_keys(self, tmp_path):
-        cache_path = str(tmp_path / "context.json")
-        context_tools.context_save("unrelated_fact", "still here", cache_path)
-        tools = process_tools.make_process_tools(cache_path)
+        engine = get_engine(tmp_path)
+        context_tools.context_save(engine, "demo", "unrelated_fact", "still here")
+        tools = process_tools.make_process_tools(engine, "demo")
 
         tools["start_background_process"]("sleep 5")
 
-        facts = context_tools.load_context_cache(cache_path)
-        assert facts["unrelated_fact"] == "still here"
+        assert context_tools.get_context_value(engine, "demo", "unrelated_fact") == "still here"
 
     def test_failed_start_does_not_write_a_context_entry(self, tmp_path):
-        cache_path = str(tmp_path / "context.json")
-        tools = process_tools.make_process_tools(cache_path)
+        engine = get_engine(tmp_path)
+        tools = process_tools.make_process_tools(engine, "demo")
 
         tools["start_background_process"]("   ")
 
-        facts = context_tools.load_context_cache(cache_path)
-        assert not any(k.startswith("bg_process:") for k in facts)
+        assert context_tools.get_context_value(engine, "demo", "bg_process:bg1") is None

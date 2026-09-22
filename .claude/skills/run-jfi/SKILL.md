@@ -76,29 +76,40 @@ JFI's planner is only as good as what you feed it. Before writing the goal:
 
 ## 3. Monitoring
 
-Each session writes `JFI/<jfi-session-name>/web_status.json` in the target
-repo — poll this instead of scraping the TUI for routine status:
+Everything JFI writes lives in ONE flat, hidden `.jfi/` folder at the
+target repo's root — not a per-session subfolder, and not a `JFI/<name>/`
+folder (that layout is retired; see the target repo's own
+`src/JFI/session/simple_session_manager.py::__init__` if you need the
+exact rationale). Only one JFI session can run against a given repo at a
+time, so `.jfi/`'s live-state files always describe whichever session is
+currently running:
 
 ```bash
-cat /path/to/repo/JFI/<jfi-session-name>/web_status.json | python3 -m json.tool
+cat /path/to/repo/.jfi/web_status.json | python3 -m json.tool
 ```
 
-Key fields: `phase` (planner/imp/testing/reviewer/cleanup), `done_phases`,
-`state` (`streaming`/`running tools`/`thinking`/`idle · queue empty`/
-`awaiting review approval`), `plan: [done, total]` leaf counts, `awaiting`
-(non-null when it's blocked on a prompt — retry/approve decision, or a
-skip/stop confirmation).
+Key fields: `session` (the running session's name — check this matches
+the one you launched), `phase` (planner/imp/testing/reviewer/cleanup),
+`done_phases`, `state` (`streaming`/`running tools`/`thinking`/
+`idle · queue empty`/`awaiting review approval`), `plan: [done, total]`
+leaf counts, `awaiting` (non-null when it's blocked on a prompt —
+retry/approve decision, or a skip/stop confirmation).
 
 For deeper context (what it's actually doing/why), use
 `tmux capture-pane -t <tmux-session-name> -p | tail -N` — the reasoning
 traces there are how you catch it going off track (see §6) or falsely
 marking work complete (see §9).
 
-Also read `JFI/<jfi-session-name>/plan.md` once it exists — always review a
-generated plan before trusting it for anything non-trivial: does it
+The plan itself is DB-backed (`.jfi/JFI.db`, a shared SQLite file — every
+session ever run against this repo is a row in it, keyed by session_id),
+not a file — there is no `plan.md` to `cat` or read directly. To review a
+generated plan before trusting it for anything non-trivial (does it
 correctly decompose into small leaves, does it correctly capture the facts
-you fed it, does it plan real verification (fresh process, hand-computed
-assertions) rather than superficial checks.
+you fed it, does it plan real verification rather than superficial
+checks), either watch it build live in `tmux capture-pane`, or run
+`uv run export-db` from the *JFI repo itself* (not the target repo) with
+the target repo as an argument — it writes a human-readable
+`.jfi/<session>_plan_export.md` you can read back in the target repo.
 
 ## 4. Handling prompts
 
@@ -110,9 +121,10 @@ JFI pauses the TUI with a prompt and needs a keypress to continue:
   in a row even when nothing else is contending for the model, that's a
   real problem (see §8), not something to keep blindly retrying.
 - **`Review failed — start another fix iteration?`** — read *why* before
-  approving: `grep -n "REVIEW FAIL\|review.md" JFI/<name>/run.log | tail`,
-  or read `JFI/<name>/review.md` if it still exists (it can get overwritten
-  by the next iteration fast, so check promptly). Approve
+  approving: read `.jfi/review.md` if it still exists (it can get
+  overwritten by the next iteration fast, so check promptly — and it's
+  flat like everything else in `.jfi/`, so it only ever reflects whichever
+  session most recently wrote one). Approve
   (`tmux send-keys -t <tmux-session-name> "" Enter`) for genuinely minor
   issues (missing README docs, a stray file). Treat correctness/regression
   findings as NOT minor — read the actual issue, don't rubber-stamp. JFI
@@ -172,14 +184,19 @@ critical, or a regression you caught that it hasn't noticed yet.
 
 - **User says "stop"**: `tmux send-keys -t <tmux-session-name> C-c` (mid-
   stream) or send `"s"` + Enter at an `awaiting` prompt. This closes the
-  tmux session/process; progress is saved on disk (`JFI/<name>/` history +
-  plan). It is not resumable *from that same tmux pane* — you must relaunch.
+  tmux session/process; progress is saved to `.jfi/JFI.db` (history, plan,
+  everything). It is not resumable *from that same tmux pane* — you must
+  relaunch.
 - **Resuming** (after a stop, or after an unexpected crash — see next
   bullet): relaunch exactly as in §1, then enter the **same session name**
   again at the "enter a session name" prompt. JFI detects the existing
-  session directory and auto-resumes at the exact phase/task it left off,
-  skipping already-completed phases. This is safe and expected — use it
-  liberally, it does not lose work.
+  session_id already has rows in `.jfi/JFI.db` and auto-resumes at the
+  exact phase/task it left off, skipping already-completed phases. This is
+  safe and expected — use it liberally, it does not lose work. Only one
+  session can run against a given repo at a time regardless of name (the
+  lock is project-wide, not per-session) — if a name is refused as
+  "already running," that means SOME session is live, not necessarily the
+  one you tried.
 - **Unexpected crashes**: if `tmux capture-pane` suddenly returns
   `can't find pane`, check `tmux ls` and `journalctl --user -n 30 | grep
   tmux-spawn` for a systemd-killed scope (can happen for long-running

@@ -1,7 +1,7 @@
 """Socket-based counterpart to web_bridge.py's file-based bridge: mirrors
 one session's live status to a remote "master" (frontend/server/master.js,
 the Node-based fleet dashboard server) over a WebSocket instead of writing
-JFI/<session>/web_status.json to disk -- the mechanism a session on one
+.jfi/<session>/web_status.json to disk -- the mechanism a session on one
 machine uses to report into a fleet dashboard running on a different one,
 where there is no shared filesystem to write a status file into in the
 first place.
@@ -22,9 +22,13 @@ JFI_WEB_BRIDGE's files, and vice versa.
 
 A reporting session is identified to the master purely by an opaque `key`
 (hostname + session id -- see _session_key) and a short display `repo`
-label (see _repo_label) -- never a filesystem path. The master has no way
-to read this machine's disk anyway once it's remote, so the protocol never
-assumes it can.
+label (see _repo_label) -- never a filesystem path. The master ITSELF has
+no way to read this machine's disk once it's remote, so nothing here ever
+sends it one. The fleet dashboard's "Session DB" tab (browsing
+.jfi/JFI.db) works anyway, without breaking that: the "db_query" control
+action below runs the actual query HERE, on this machine, via
+JFI.tool.db_browse, and only the resulting JSON rows cross the network --
+the master still never touches a path.
 """
 
 import asyncio
@@ -69,11 +73,20 @@ class SocketReporter:
     failure here is swallowed, exactly like WebBridge's own tick loop.
     """
 
-    def __init__(self, console: AbstractManager, master_ws_url: str, session_id: str):
+    def __init__(self, console: AbstractManager, master_ws_url: str, session_id: str, db_engine=None):
         self._console = console
         self._url = master_ws_url
         self._key = _session_key(session_id)
+        self._session_id = session_id
         self._repo = _repo_label()
+        # Used only to answer "db_query" control messages (see
+        # _handle_db_query) -- the fleet dashboard's "Session DB" tab has
+        # no direct filesystem access of its own (see this module's own
+        # docstring), so the query actually runs HERE, on the machine that
+        # has the file, and only the JSON result crosses the network.
+        # Optional: a caller with no db_engine (a future non-DB-backed
+        # SessionManager) just never gets asked for one.
+        self._db_engine = db_engine
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -133,14 +146,18 @@ class SocketReporter:
             except (json.JSONDecodeError, TypeError):
                 continue
             if payload.get("type") == "control":
-                self._dispatch_control(payload)
+                await self._dispatch_control(ws, payload)
 
-    def _dispatch_control(self, payload: dict) -> None:
+    async def _dispatch_control(self, ws, payload: dict) -> None:
         """One incoming {"type": "control", "action": ...} message from the
-        master (relayed from a viewer's browser -- see master.js) -- each
-        action maps straight onto the same AbstractManager methods a local
-        keypress or web_bridge.py's file-based relay already drive, so this
-        is a new transport for existing capabilities, not new behavior."""
+        master (relayed from a viewer's browser -- see master.js). Every
+        action but db_query maps straight onto the same AbstractManager
+        methods a local keypress or web_bridge.py's file-based relay
+        already drive, so this is mostly a new transport for existing
+        capabilities, not new behavior -- db_query is the one action that
+        needs to send something BACK (see _handle_db_query), which is why
+        this is async and holds `ws`, unlike those simple fire-and-forget
+        ones."""
         action = payload.get("action")
         if action == "pause":
             self._console.submit_external_pause(True)
@@ -156,6 +173,30 @@ class SocketReporter:
                 self._console.submit_external_answer(str(key))
         elif action == "stop":
             self._console.request_stop()
+        elif action == "db_query":
+            await self._handle_db_query(ws, payload)
+
+    async def _handle_db_query(self, ws, payload: dict) -> None:
+        """Answers the fleet dashboard's "Session DB" tab (see
+        JFI.tool.db_browse's own module docstring for the full round trip:
+        viewer -> master.js -> here -> master.js -> viewer). request_id is
+        opaque, just echoed back so the browser can match this response to
+        the request that triggered it even if the user changed the table
+        picker again before this one lands."""
+        from JFI.tool.db_browse import query_table
+
+        request_id = payload.get("request_id")
+        table = str(payload.get("table") or "")
+        scoped = bool(payload.get("scoped", True))
+        response = {"type": "db_result", "key": self._key, "request_id": request_id, "table": table}
+        if self._db_engine is None:
+            response["error"] = "This session has no database engine to query."
+        else:
+            try:
+                response["rows"] = query_table(self._db_engine, table, self._session_id if scoped else None)
+            except Exception as e:
+                response["error"] = str(e)
+        await ws.send(json.dumps(response))
 
 
 def master_ws_url() -> Optional[str]:

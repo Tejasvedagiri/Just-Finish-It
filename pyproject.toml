@@ -16,6 +16,11 @@ dependencies = [
     "playwright>=1.62.0",
     "prompt-toolkit>=3.0.53",
     "python-dotenv>=1.2.3",
+    # Session/plan persistence (src/JFI/models/) -- SQLModel is Pydantic +
+    # SQLAlchemy in one class definition, so the same model doubles as the
+    # validation schema and the DB table. SQLite (the default DB_BACKEND) is
+    # stdlib in Python, so no extra driver dependency is needed for it.
+    "sqlmodel>=0.0.22",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +38,10 @@ master = ["websockets>=13"]
 # path, which already covers Ollama/llama.cpp/vLLM/LM Studio) needs no
 # extra dependency at all.
 anthropic = ["anthropic>=0.40"]
+# Only needed when DB_BACKEND is "mysql" or "postgres" (see
+# src/JFI/models/db.py) -- SQLite, the default, needs no extra driver.
+mysql = ["pymysql>=1.1"]
+postgres = ["psycopg[binary]>=3.2"]
 
 [project.scripts]
 jfi = "JFI.runner:main"
@@ -40,9 +49,10 @@ JFI = "JFI.runner:main"
 jfi-web = "JFI.web.launcher:main"
 build = "build_binary:main"
 create-env = "JFI.create_env:main"
+export-db = "export_db:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/JFI", "src/build_binary"]
+packages = ["src/JFI", "src/build_binary", "src/export_db"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

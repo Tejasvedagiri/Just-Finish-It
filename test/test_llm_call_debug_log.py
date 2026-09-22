@@ -1,5 +1,5 @@
 """LOG_LLM_CALL_DEBUG=1 appends every LLM request/response pair this run
-makes to JFI/<session>/llm_debug.jsonl -- see runner._log_llm_call_debug
+makes to .jfi/llm_debug.jsonl -- see runner._log_llm_call_debug
 and runner.log_llm_call, wired into run_phase's turn loop right after each
 successful send_message/print_agent_response pair.
 
@@ -117,8 +117,14 @@ def test_logs_one_record_per_turn_when_flag_set(make_manager, monkeypatch):
 
 
 def test_accepts_truthy_variants(make_manager, monkeypatch):
+    """`.jfi/llm_debug.jsonl` is flat now -- shared by every session in this
+    same project (see SimpleSessionManager.__init__'s note on why), so each
+    loop iteration below APPENDS to the same file rather than getting its
+    own fresh one. Assert the DELTA (exactly one new record per iteration),
+    not an absolute count."""
     from JFI.runner import run_phase
 
+    previous_count = 0
     for value in ("true", "Yes", "ON"):
         monkeypatch.setenv("LOG_LLM_CALL_DEBUG", value)
         ssm = make_manager(f"flag-{value}")
@@ -127,4 +133,6 @@ def test_accepts_truthy_variants(make_manager, monkeypatch):
 
         run_phase(console, {"imp": _FakeLLM()}, ssm, "imp")
 
-        assert len(_log_records(ssm)) == 1
+        records = _log_records(ssm)
+        assert len(records) == previous_count + 1
+        previous_count = len(records)

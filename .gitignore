@@ -221,9 +221,13 @@ __marimo__/
 /.idea/inspectionProfiles/Project_Default.xml
 /.idea/inspectionProfiles/profiles_settings.xml
 /.idea/vcs.xml
+# Everything JFI-related (the shared .jfi/JFI.db plus every session's own
+# bookkeeping files) lives in this one flat hidden folder now.
+/.jfi/
+# Older layouts, kept ignored in case a leftover local dir from before
+# either rename still exists: /.JFI/ (hidden, pre-JFI/ rename) -> /JFI/
+# (visible, one folder per session) -> /.jfi/ (current, flat, above).
 /JFI/
-# Old hidden-dotfile location, pre-rename — keep ignoring any leftover
-# session folders created before the JFI/ (no leading dot) rename.
 /.JFI/
 
 # benchmark/harness.py's own project dirs + results, kept inside the repo on

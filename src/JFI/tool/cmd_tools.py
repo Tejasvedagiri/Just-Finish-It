@@ -1,8 +1,9 @@
+import json
 import os
 import shlex
 import subprocess
 
-from JFI.tool.context_tools import load_context_cache, save_context_cache
+from JFI.tool.context_tools import get_context_value, set_context_value
 
 APPROVED_CMD_KEY = "approved-cmd"
 
@@ -76,27 +77,31 @@ def execute_command(command: str, timeout: int = 300) -> str:
 #                 (in-memory only; a fresh run asks again)
 #   [N]o        — don't run it
 #
-# "Save" persists to the session's context.json — the same file the LLM uses
-# as its own scratchpad via the context_save/context_lookup tools
-# (context_tools.py, CONTEXT_CACHE_RULES in simple_session_manager.py).
-# Sharing that file is deliberate (one place to look); load/save_context_cache
-# (context_tools.py) always merge through the rest of the file so writing one
-# key here can never clobber the model's own facts, or vice versa.
+# "Save" persists to the session's own context store (JFI.models.ContextEntry)
+# under the APPROVED_CMD_KEY row -- the same store the LLM uses as its own
+# scratchpad via the context_save/context_lookup tools (context_tools.py,
+# CONTEXT_CACHE_RULES in simple_session_manager.py), just a row the model's
+# own context_lookup never sees (see context_tools._INTERNAL_KEYS). One row
+# per session, JSON-encoded list as its value -- get/set_context_value
+# (context_tools.py) already handle one key atomically, so there is no
+# whole-cache round trip to accidentally clobber another key with.
 
-def get_approved_cmd_prefixes(cache_path: str) -> list:
-    prefixes = load_context_cache(cache_path).get(APPROVED_CMD_KEY, [])
+def get_approved_cmd_prefixes(engine, session_id: str) -> list:
+    raw = get_context_value(engine, session_id, APPROVED_CMD_KEY)
+    if not raw:
+        return []
+    try:
+        prefixes = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
     return prefixes if isinstance(prefixes, list) else []
 
 
-def save_approved_cmd_prefix(prefix: str, cache_path: str) -> None:
-    data = load_context_cache(cache_path)
-    prefixes = data.get(APPROVED_CMD_KEY, [])
-    if not isinstance(prefixes, list):
-        prefixes = []
+def save_approved_cmd_prefix(prefix: str, engine, session_id: str) -> None:
+    prefixes = get_approved_cmd_prefixes(engine, session_id)
     if prefix not in prefixes:
         prefixes.append(prefix)
-    data[APPROVED_CMD_KEY] = prefixes
-    save_context_cache(data, cache_path)
+    set_context_value(engine, session_id, APPROVED_CMD_KEY, json.dumps(prefixes))
 
 
 def _command_prefix(command: str) -> str:
@@ -117,14 +122,13 @@ class CmdApprovalGate:
     Holds the in-memory "Yes for all" flag (deliberately not persisted —
     approving every command for a session is a one-time, in-the-moment call,
     not something a future session should silently inherit) alongside the
-    cache_path used to read/write persisted "Save" prefixes. `cache_path`
-    must be the owning session's own context.json (JFI/<session_id>/context.json)
-    — there is no shared fallback location.
+    DB engine/session_id used to read/write persisted "Save" prefixes.
     """
 
-    def __init__(self, console, cache_path: str):
+    def __init__(self, console, engine, session_id: str):
         self.console = console
-        self.cache_path = cache_path
+        self.engine = engine
+        self.session_id = session_id
         self.approve_all = False
 
     def request(self, command: str) -> bool:
@@ -134,7 +138,7 @@ class CmdApprovalGate:
             return True
         if self.approve_all:
             return True
-        if any(command.startswith(prefix) for prefix in get_approved_cmd_prefixes(self.cache_path)):
+        if any(command.startswith(prefix) for prefix in get_approved_cmd_prefixes(self.engine, self.session_id)):
             return True
 
         prefix = _command_prefix(command)
@@ -146,7 +150,7 @@ class CmdApprovalGate:
             ("n", "No, don't run"),
         ])
         if answer == "s":
-            save_approved_cmd_prefix(prefix, self.cache_path)
+            save_approved_cmd_prefix(prefix, self.engine, self.session_id)
             return True
         if answer == "a":
             self.approve_all = True
@@ -154,20 +158,20 @@ class CmdApprovalGate:
         return answer == "y"
 
 
-def request_cmd_approval(command: str, console, cache_path: str) -> bool:
+def request_cmd_approval(command: str, console, engine, session_id: str) -> bool:
     """One-shot approval check (no 'Yes for all' memory across calls) — a thin
     wrapper over CmdApprovalGate for callers that don't need session state."""
-    return CmdApprovalGate(console, cache_path).request(command)
+    return CmdApprovalGate(console, engine, session_id).request(command)
 
 
-def make_gated_execute_command(console, cache_path: str):
-    """Wraps execute_command behind a CmdApprovalGate for `console`/`cache_path`.
+def make_gated_execute_command(console, engine, session_id: str):
+    """Wraps execute_command behind a CmdApprovalGate for `console`/session.
 
     Bare `execute_command` (e.g. TOOL_MAP's default, or a script calling it
     directly) stays ungated — this is opt-in, wired in by the caller that
     actually has a console and a session to gate.
     """
-    gate = CmdApprovalGate(console, cache_path)
+    gate = CmdApprovalGate(console, engine, session_id)
 
     def gated_execute_command(command: str, timeout: int = 300) -> str:
         if not gate.request(command):

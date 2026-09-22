@@ -153,6 +153,8 @@ button { font-family: inherit; cursor: pointer; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-dim); font-weight: 700; }
 .panel-head .n { color: var(--ink-faint); font-weight: 400; text-transform: none; letter-spacing: 0; }
 .panel-body { padding: 14px; }
+.ct-timing { display: flex; gap: 16px; margin-top: 8px; font-size: 10.5px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+.ct-running { color: var(--accent); font-weight: 700; }
 .approval { border-color: var(--red-dim); } .approval .panel-head { color: var(--red); background: rgba(255, 95, 95, 0.06); }
 .approval-opts { display: flex; gap: 8px; flex-wrap: wrap; }
 
@@ -194,6 +196,17 @@ button { font-family: inherit; cursor: pointer; }
 
 .sd-progress { padding: 0 0 4px; }
 
+/* ---------- Session DB tab ---------- */
+.db-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+.db-controls select { font-family: var(--font-ui); font-size: 11.5px; background: var(--bg-raised); color: var(--ink); border: 1px solid var(--line); padding: 7px 10px; }
+.db-scope-label { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-dim); }
+.db-table-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--line); }
+.db-table { border-collapse: collapse; width: 100%; font-size: 11px; white-space: nowrap; }
+.db-table th, .db-table td { padding: 6px 10px; border-bottom: 1px solid var(--line-soft); text-align: left; max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.db-table th { position: sticky; top: 0; background: var(--bg-raised); color: var(--ink-faint); text-transform: uppercase; font-size: 9.5px; letter-spacing: 0.05em; }
+.db-table td { color: var(--ink-dim); }
+.db-table tr:hover td { background: var(--bg-card); color: var(--ink); }
+
 /* ---------- session sub-tabs (Overview / Plan checklist) ---------- */
 .subtab-bar { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 14px 0 20px; }
 .subtab-btn {
@@ -228,14 +241,34 @@ button { font-family: inherit; cursor: pointer; }
 .pc-status { color: var(--ink-faint); flex-shrink: 0; width: 14px; text-align: center; }
 .pc-num { color: var(--ink-faint); font-variant-numeric: tabular-nums; flex-shrink: 0; }
 .pc-desc { color: var(--ink-dim); overflow-wrap: anywhere; flex: 1; }
-.pc-time-slot { flex-shrink: 0; min-width: 56px; text-align: right; }
+.pc-time-slot { flex-shrink: 0; min-width: 92px; text-align: right; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
 .pc-time { color: var(--ink-faint); font-variant-numeric: tabular-nums; font-size: 10.5px; white-space: nowrap; }
 .pc-time-running { color: var(--accent); font-weight: 700; }
+.pc-time-range { color: var(--ink-faint); font-variant-numeric: tabular-nums; font-size: 9px; white-space: nowrap; opacity: 0.8; }
 .pc-card.pc-done { border-left-color: var(--accent-dim); opacity: 0.75; }
 .pc-card.pc-done .pc-status { color: var(--accent); }
 .pc-card.pc-done .pc-num, .pc-card.pc-done .pc-desc { color: var(--ink-faint); text-decoration: line-through; text-decoration-color: var(--line); }
-.pc-card.pc-current { border-left-color: var(--red); background: rgba(255, 95, 95, 0.06); }
-.pc-card.pc-current .pc-status { color: var(--red); }
+.pc-card.pc-current {
+  border-left-color: var(--red);
+  background: rgba(255, 95, 95, 0.06);
+  animation: pc-pulse 1.8s ease-in-out infinite;
+}
+.pc-card.pc-current .pc-status {
+  color: var(--red);
+  display: inline-block;
+  animation: pc-spin 1.4s linear infinite;
+}
+@keyframes pc-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 95, 95, 0.32); }
+  50% { box-shadow: 0 0 0 5px rgba(255, 95, 95, 0); }
+}
+@keyframes pc-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pc-card.pc-current, .pc-card.pc-current .pc-status { animation: none; }
+}
 
 .pc-tab-row { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 14px; border-top: 1px solid var(--line-soft); }
 .pc-tab-row-phase { border-top: 1px solid var(--line); }
@@ -248,6 +281,11 @@ button { font-family: inherit; cursor: pointer; }
 .pc-tab.active { border-color: var(--accent); color: var(--ink); background: color-mix(in oklab, var(--accent) 14%, var(--bg-raised)); }
 .pc-tab-badge { color: var(--ink-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
 .pc-tab.active .pc-tab-badge { color: var(--accent); }
+/* A leaf sibling shown as a tab (see renderLevelTabRow) -- dashed border
+   distinguishes "already atomic, just jump to it" from a branch tab's
+   "drill further", without a whole second component. */
+.pc-tab-leaf { border-style: dashed; }
+.pc-tab-leaf.active { border-style: solid; }
 
 .pc-breadcrumb { display: flex; align-items: center; gap: 6px; padding: 8px 14px; font-size: 10.5px; flex-wrap: wrap; }
 .pc-crumb { font-family: var(--font-ui); color: var(--ink-faint); background: none; border: none; padding: 0; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; }

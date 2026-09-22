@@ -7,6 +7,7 @@ approach for httpx), so these tests are fast and offline.
 import importlib
 import os
 import sys
+import time
 import types
 
 import pytest
@@ -39,7 +40,7 @@ def test_does_not_override_an_explicit_playwright_browsers_path(monkeypatch):
 class FakePage:
     def __init__(self, title="Example", text="hello world", raise_on_goto=None,
                  raise_on_click=None, raise_on_wait=None, eval_result=None,
-                 raise_on_evaluate=None):
+                 raise_on_evaluate=None, hang_seconds=None):
         self._title = title
         self._text = text
         self._raise_on_goto = raise_on_goto
@@ -47,6 +48,9 @@ class FakePage:
         self._raise_on_wait = raise_on_wait
         self._eval_result = eval_result
         self._raise_on_evaluate = raise_on_evaluate
+        # Simulates a hung eval_js (a page-side Promise whose resolve() is
+        # never reached) -- see test_hung_eval_js_is_recovered_via_timeout.
+        self._hang_seconds = hang_seconds
         self.goto_calls = []
         self.click_calls = []
         self.wait_calls = []
@@ -76,6 +80,8 @@ class FakePage:
 
     def evaluate(self, expression):
         self.evaluate_calls.append(expression)
+        if self._hang_seconds:
+            time.sleep(self._hang_seconds)
         if self._raise_on_evaluate:
             raise self._raise_on_evaluate
         return self._eval_result
@@ -299,3 +305,47 @@ def test_eval_js_error_reported_without_failing_whole_call(monkeypatch):
     assert result.startswith("Success:")
     assert "Eval error" in result
     assert "bad expression" in result
+
+
+def test_hung_eval_js_is_recovered_via_timeout_not_left_hanging_forever(monkeypatch):
+    """The real bug this guards: Page.evaluate() has no timeout of its own
+    in Playwright's sync API (unlike goto/click/wait_for_selector, which
+    all genuinely honor timeout_ms), so a hung eval_js -- a page-side
+    Promise whose resolve() is never reached on some code path -- used to
+    block the whole tool call, and therefore the whole JFI turn, forever.
+    Observed live: ~23 minutes with an actual headless Chrome renderer
+    process still burning CPU, only recovered by killing that OS process
+    by hand. Must now return around `timeout` seconds instead, with a
+    clear error, and force-close the browser rather than leaving it
+    running."""
+    page = FakePage(hang_seconds=2)
+    _, browser, page = _install_fake_playwright(monkeypatch, page=page)
+
+    start = time.monotonic()
+    result = browser_tools.browse_webpage(
+        "https://example.com", eval_js="new Promise(() => {})", timeout=1
+    )
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 2, f"took {elapsed:.2f}s -- waited for the full hang instead of the 1s timeout"
+    assert result.startswith("Success:")  # title/text were already read before eval_js hung
+    assert "Eval error" in result
+    assert "did not return within 1s" in result
+    assert browser.closed is True  # force-closed to unblock it, never left running
+
+    time.sleep(2.5)  # let the orphaned fake "hang" finish before the next test starts
+
+
+def test_normal_eval_js_unaffected_by_the_timeout_wrapper(monkeypatch):
+    """The threaded timeout wrapper must be transparent for the common,
+    non-hung case -- same behavior test_eval_js_result_included_in_output
+    already pins, just re-confirmed after wrapping evaluate() in a
+    worker thread."""
+    page = FakePage(eval_result=42)
+    _install_fake_playwright(monkeypatch, page=page)
+    result = browser_tools.browse_webpage(
+        "https://example.com", eval_js="1 + 41", timeout=5
+    )
+    assert result.startswith("Success:")
+    assert "Eval result" in result
+    assert "42" in result

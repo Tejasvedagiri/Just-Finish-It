@@ -361,13 +361,13 @@ class AbstractManager(ABC):
 
     # --------------------------------------------------------------- logging
 
-    def start_session_log(self, path) -> None:
-        """Begin mirroring everything shown to the user to a plain-text file
-        at ``path``, live, once the session id (and so the log's location)
-        is known. Managers that can't sensibly tee their output may leave
-        this a no-op."""
+    def start_session_db_log(self, engine, session_id: str) -> None:
+        """Begin mirroring everything shown to the user to this session's
+        own LogEvent table (see JFI.models), live, once the session id (and
+        so the DB engine to write it through) is known. Managers that
+        can't sensibly log may leave this a no-op."""
         pass
 
     def close_session_log(self) -> None:
-        """Flush and close the file opened by :meth:`start_session_log`, if any."""
+        """Stop whatever :meth:`start_session_db_log` started, if anything."""
         pass
