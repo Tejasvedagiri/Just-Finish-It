@@ -7,7 +7,7 @@ tested elsewhere, but nothing previously exercised main() actually wiring
 PHASE_ENV_PREFIX through to one real stream per phase (the default,
 LLM_BACKEND unset, OpenAICompatableStream path -- see
 llm/backend_select.py for the other backends) -- this pins that a phase
-with its own .env override gets its own model/endpoint, and a phase
+with its own .env_bk override gets its own model/endpoint, and a phase
 without one falls back to the shared default, through the real
 construction path.
 """
@@ -36,7 +36,7 @@ def test_main_builds_one_llm_stream_per_phase_honoring_overrides(monkeypatch):
             monkeypatch.delenv(f"{prefix}_{key}", raising=False)
 
     monkeypatch.setattr(runner, "load_dotenv", lambda *a, **k: True)
-    monkeypatch.setattr(runner, "find_dotenv", lambda *a, **k: ".env")
+    monkeypatch.setattr(runner, "find_dotenv", lambda *a, **k: ".env_bk")
 
     def spy_init(self, *args, **kwargs):
         self.run = lambda fn: fn()  # actually invoke the worker, unlike a no-op stub

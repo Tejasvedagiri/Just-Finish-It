@@ -20,7 +20,7 @@ back -- so print_agent_response's loop runs unmodified either way.
 
 Selected via LLM_BACKEND=anthropic (or "claude") -- see backend_select.py.
 Needs the `anthropic` extra (`uv sync --extra anthropic`) and
-ANTHROPIC_API_KEY in .env (optionally per-phase, like OPENAI_API_KEY).
+ANTHROPIC_API_KEY in .env_bk (optionally per-phase, like OPENAI_API_KEY).
 """
 
 import json
@@ -207,7 +207,7 @@ class AnthropicStream(BaseLLMStream):
         api_key = phase_env(prefix, "ANTHROPIC_API_KEY")
         if not api_key:
             hint = f" (or {prefix}_ANTHROPIC_API_KEY, for the {prefix} phase)" if prefix else ""
-            raise KeyError(f"Missing required .env setting: ANTHROPIC_API_KEY{hint}")
+            raise KeyError(f"Missing required .env_bk setting: ANTHROPIC_API_KEY{hint}")
         try:
             timeout = float(phase_env(prefix, "LLM_REQUEST_TIMEOUT", str(DEFAULT_REQUEST_TIMEOUT)))
         except ValueError:

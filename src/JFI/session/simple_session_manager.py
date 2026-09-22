@@ -1483,7 +1483,7 @@ class SimpleSessionManager(SessionManager):
     def current_task_title(self, phase: str, max_len: int = 140) -> Optional[str]:
         """
         The first unchecked item's descriptive text for `phase`'s section
-        (e.g. "1.1 Verify .env loading happens before theme resolution..."),
+        (e.g. "1.1 Verify .env_bk loading happens before theme resolution..."),
         or None when the phase has no checkbox-driven task queue at all
         (planner/reviewer just work on the plan/report directly) or nothing
         is pending. Mirrors `_phase_system_message`'s own work-queue

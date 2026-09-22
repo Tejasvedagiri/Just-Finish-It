@@ -1,7 +1,7 @@
-"""``uv run create-env`` -- a standalone system check + `.env` setup helper.
+"""``uv run create-env`` -- a standalone system check + `.env_bk` setup helper.
 
 Answers "am I ready to run JFI" without launching a real session: Python
-version, whether `.env` exists (creating it from `JFI_ENV_TEMPLATE` if not,
+version, whether `.env_bk` exists (creating it from `JFI_ENV_TEMPLATE` if not,
 the same copy `./JFI` itself does on first run -- see the launcher script),
 and a best-effort live reachability check against whatever OPENAI_URL is
 currently configured, so a dead/misconfigured local LLM server is caught
@@ -23,7 +23,7 @@ MIN_PYTHON = (3, 12)
 # Project root: two levels up from this file (src/JFI/create_env.py -> repo root),
 # same relationship the `./JFI` launcher's own `cd "$(dirname "$0")"` establishes.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-ENV_PATH = PROJECT_ROOT / ".env"
+ENV_PATH = PROJECT_ROOT / ".env_bk"
 ENV_TEMPLATE_PATH = PROJECT_ROOT / "JFI_ENV_TEMPLATE"
 
 CHECK = "✅"
@@ -67,17 +67,17 @@ def _parse_env_file(path: Path) -> dict:
 
 
 def ensure_env_file() -> dict:
-    """Creates `.env` from `JFI_ENV_TEMPLATE` if it doesn't exist yet (same
+    """Creates `.env_bk` from `JFI_ENV_TEMPLATE` if it doesn't exist yet (same
     behavior `./JFI` itself has on first run), and returns whatever's
     actually configured in it afterward."""
     if not ENV_PATH.exists():
         if not ENV_TEMPLATE_PATH.exists():
-            print(f"{CROSS} .env is missing AND {ENV_TEMPLATE_PATH.name} is missing too -- cannot create one automatically.")
+            print(f"{CROSS} .env_bk is missing AND {ENV_TEMPLATE_PATH.name} is missing too -- cannot create one automatically.")
             return {}
         shutil.copy(ENV_TEMPLATE_PATH, ENV_PATH)
-        print(f"{CHECK} Created .env from {ENV_TEMPLATE_PATH.name} -- fill in OPENAI_URL/OPENAI_API_KEY/MODEL, then run this again.")
+        print(f"{CHECK} Created .env_bk from {ENV_TEMPLATE_PATH.name} -- fill in OPENAI_URL/OPENAI_API_KEY/MODEL, then run this again.")
     else:
-        print(f"{CHECK} .env already exists ({ENV_PATH}).")
+        print(f"{CHECK} .env_bk already exists ({ENV_PATH}).")
     return _parse_env_file(ENV_PATH)
 
 
@@ -112,7 +112,7 @@ def main() -> None:
     python_ok = check_python_version()
     check_uv_available()
 
-    print("\nConfiguration (.env):")
+    print("\nConfiguration (.env_bk):")
     values = ensure_env_file()
     openai_url = values.get("OPENAI_URL", "")
     model = values.get("MODEL", "")
@@ -126,7 +126,7 @@ def main() -> None:
         print("\nLLM server reachability:")
         llm_ok = check_llm_reachable(openai_url)
     else:
-        print(f"\n{WARN}OPENAI_URL not set in .env -- skipping the reachability check.")
+        print(f"\n{WARN}OPENAI_URL not set in .env_bk -- skipping the reachability check.")
 
     print()
     if python_ok and values and openai_url and llm_ok:

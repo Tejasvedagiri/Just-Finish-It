@@ -65,7 +65,7 @@ def make_ask_llm(llm, console: Optional[object] = None) -> Callable[[str], str]:
     """Binds ask_llm to one phase's own LLM stream (see runner.PHASE_ENV_PREFIX)
     and console — rebound in runner.run_phase every phase, the same way
     execute_command/context_save are rebound per session in _run_session,
-    just per phase here since .env may point each phase at a different
+    just per phase here since .env_bk may point each phase at a different
     model."""
     def bound(prompt: str) -> str:
         return ask_llm(prompt, llm, console)

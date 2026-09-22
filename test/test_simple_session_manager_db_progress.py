@@ -71,10 +71,10 @@ class TestPendingItemsAndCurrentTaskTitle:
 
     def test_current_task_title_returns_a_clean_description_not_the_tagged_line(self, make_manager):
         manager = make_manager("demo")
-        _add(manager, "imp", "Verify .env loading happens before theme resolution")
+        _add(manager, "imp", "Verify .env_bk loading happens before theme resolution")
 
         title = manager.current_task_title("imp")
-        assert title == "Verify .env loading happens before theme resolution"
+        assert title == "Verify .env_bk loading happens before theme resolution"
         assert "[id=" not in title
 
     def test_current_task_title_truncates_long_descriptions(self, make_manager):

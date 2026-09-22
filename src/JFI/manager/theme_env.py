@@ -105,7 +105,7 @@ def resolve_explicit_theme(
 
 def theme_label(source: Optional[str]) -> str:
     """Human-readable label for the resolved theme source, e.g. ``env:THEME=dark-ocean``
-    or ``auto (dark)``. Used in status lines so users can confirm their .env value took effect."""
+    or ``auto (dark)``. Used in status lines so users can confirm their .env_bk value took effect."""
     if source is None:
         return "theme: auto"
     return f"theme: {source}"

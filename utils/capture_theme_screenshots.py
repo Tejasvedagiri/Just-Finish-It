@@ -58,7 +58,7 @@ def _preset_cases() -> "list[tuple[str | None, str, str]]":
 # The full preset set exercised by pt_console_manager.PT_THEME_PRESETS, plus
 # two edge cases (unset -> auto-detect, and an unknown name -> safe fallback).
 CASES: "list[tuple[str | None, str, str]]" = [
-    (None, "auto (THEME unset, honors .env)", "theme-auto-unset.png"),
+    (None, "auto (THEME unset, honors .env_bk)", "theme-auto-unset.png"),
     *_preset_cases(),
     ("bogus-theme-name", "THEME=bogus-theme-name (invalid -> should fall back)", "theme-invalid-fallback.png"),
 ]
@@ -70,7 +70,7 @@ def _capture_real_app_frame(
     """Spawns a real process on a real pty and captures what it renders.
 
     ``docs_frame=False`` (the default) spawns the actual `python -m
-    JFI.runner` — the most faithful proof for validating the live app (.env
+    JFI.runner` — the most faithful proof for validating the live app (.env_bk
     loading, auto-detection, fallback behavior), but it blocks on the
     session-name prompt, so the captured frame never shows an assistant
     reply, a tool call, or an error — no LLM is wired up to produce one.

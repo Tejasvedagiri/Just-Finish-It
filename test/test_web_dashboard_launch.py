@@ -296,7 +296,7 @@ class TestInternalWebDashboardFlag:
             "JFI.web.launcher.main", lambda extra_args=None: called.setdefault("extra_args", extra_args)
         )
         # If it fell through instead of returning early, this would explode
-        # (no .env, no real console) -- proves the early return actually happened.
+        # (no .env_bk, no real console) -- proves the early return actually happened.
         monkeypatch.setattr(runner, "load_dotenv", lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("must not reach the normal pipeline setup")
         ))

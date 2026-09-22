@@ -9,7 +9,7 @@ one place to add a new backend rather than teaching runner.py about each.
 - "ollama": OpenAICompatableStream, with OPENAI_URL/OPENAI_API_KEY defaulted
   to Ollama's own local server (http://127.0.0.1:11434/v1, key "ollama" --
   Ollama itself doesn't check it) whenever those aren't already set in
-  .env -- a named, discoverable shortcut for what typing the URL by hand
+  .env_bk -- a named, discoverable shortcut for what typing the URL by hand
   already let you do.
 - "llamacpp" (or "llama.cpp"/"llama-cpp"): same idea, defaulted to
   llama.cpp server's usual port (http://127.0.0.1:8080/v1, key

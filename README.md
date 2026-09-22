@@ -52,11 +52,11 @@ The terminal's own tab/window title tracks the same thing (session name plus liv
 The launcher:
 1. Ensures Python ≥ 3.12 is available (bundled venv → active venv → system `python3`).
 2. Creates `.venv` and installs dependencies on first run (or after a dependency change).
-3. Verifies the project's `.env` exists — if not, it copies the bundled `JFI_ENV_TEMPLATE` into it so you only have to fill in your own values.
+3. Verifies the project's `.env_bk` exists — if not, it copies the bundled `JFI_ENV_TEMPLATE` into it so you only have to fill in your own values.
 
 Then answer two prompts: **session name** and **goal**, and let it work.
 
-Not sure you're ready yet? `uv run create-env` is a standalone, stdlib-only check that reports Python version, `uv` availability, and — creating `.env` from `JFI_ENV_TEMPLATE` first if it doesn't exist yet, same as step 3 above — whether the `OPENAI_URL` it finds there is actually reachable, before you launch a real session:
+Not sure you're ready yet? `uv run create-env` is a standalone, stdlib-only check that reports Python version, `uv` availability, and — creating `.env_bk` from `JFI_ENV_TEMPLATE` first if it doesn't exist yet, same as step 3 above — whether the `OPENAI_URL` it finds there is actually reachable, before you launch a real session:
 
 ```bash
 $ uv run create-env
@@ -66,8 +66,8 @@ Python & tooling:
 ✅ Python 3.12 (need >= 3.12)
 ✅ uv on PATH
 
-Configuration (.env):
-✅ .env already exists (/path/to/Just-Finish-It/.env).
+Configuration (.env_bk):
+✅ .env_bk already exists (/path/to/Just-Finish-It/.env_bk).
   OPENAI_URL = http://127.0.0.1:1234/v1
   MODEL      = qwen3.5:35b-a3b
 
@@ -79,7 +79,7 @@ LLM server reachability:
 
 `./JFI --version` (or `jfi --version` once installed) prints the installed version and exits — useful for confirming which build you're actually running (e.g. after rebuilding `dist/jfi`) without launching a real session. `./JFI --help` lists every flag.
 
-### Configuration (`.env`)
+### Configuration (`.env_bk`)
 
 | Variable            | Purpose                                            | Example value                              |
 |---------------------|----------------------------------------------------|--------------------------------------------|
@@ -106,7 +106,7 @@ LLM server reachability:
 
 Every one of `OPENAI_URL` / `OPENAI_API_KEY` / `MODEL` / `TEMPERATURE` / `FREQUENCY_PENALTY` / `CONTEXT_SIZE` can also be set **per phase**, prefixed `PLANNER_`, `IMP_`, `TESTING_`, `REVIEWER_`, or `CLEANUP_` (e.g. `REVIEWER_MODEL=gpt-4.1`, `IMP_OPENAI_URL=http://127.0.0.1:8080/v1`). A phase with no prefixed override falls back to the shared, unprefixed setting — so the default (unset) behavior is exactly one model for every phase, and you only add prefixed lines for the phases you actually want to route elsewhere (e.g. a cheap/fast model for `testing`, a stronger one for `reviewer`). `CONTEXT_SIZE` in particular is worth setting per phase whenever a phase's model differs from the shared default's real context window — otherwise compression budgets that phase against the wrong window.
 
-`.env` is loaded before anything else runs (see `runner.py::main()`), so a `THEME=...` line in it takes effect no matter how JFI was launched.
+`.env_bk` is loaded before anything else runs (see `runner.py::main()`), so a `THEME=...` line in it takes effect no matter how JFI was launched.
 
 ### Resuming a session
 
@@ -116,7 +116,7 @@ Each session locks its own folder while it's running (a `.lock` file under `JFI/
 
 ### When an LLM request fails
 
-A transient failure (a dropped connection, a 5xx from the server, or a single response that outgrows `STREAM_OUTPUT_CAP` — a runaway/looping generation, abandoned mid-stream) is retried automatically a few times with a short delay. If those retries run out — or the failure wasn't the transient kind to begin with (a bad request, an auth error, ...) — JFI does **not** end the run on its own. It asks: **Retry now**, or **Stop (progress is saved)**. Pick Retry as many times as you need (fix the server, swap `.env` values, whatever it takes) and the same turn just tries again; only an explicit Stop — from that menu or Ctrl+C — actually ends the run.
+A transient failure (a dropped connection, a 5xx from the server, or a single response that outgrows `STREAM_OUTPUT_CAP` — a runaway/looping generation, abandoned mid-stream) is retried automatically a few times with a short delay. If those retries run out — or the failure wasn't the transient kind to begin with (a bad request, an auth error, ...) — JFI does **not** end the run on its own. It asks: **Retry now**, or **Stop (progress is saved)**. Pick Retry as many times as you need (fix the server, swap `.env_bk` values, whatever it takes) and the same turn just tries again; only an explicit Stop — from that menu or Ctrl+C — actually ends the run.
 
 ---
 
@@ -133,7 +133,7 @@ ollama serve &                                  # listens on http://127.0.0.1:11
 vllm serve <model> --port 8000                   # OpenAI-compatible at /v1
 ```
 
-Then point the `.env` at it — either set `OPENAI_URL`/`OPENAI_API_KEY` yourself, or just set `LLM_BACKEND=ollama`/`LLM_BACKEND=llamacpp` and let JFI fill in that server's usual localhost defaults for you:
+Then point the `.env_bk` at it — either set `OPENAI_URL`/`OPENAI_API_KEY` yourself, or just set `LLM_BACKEND=ollama`/`LLM_BACKEND=llamacpp` and let JFI fill in that server's usual localhost defaults for you:
 
 | Server        | `LLM_BACKEND`   | `OPENAI_URL`                    | `MODEL`                     | `OPENAI_API_KEY`      |
 |---------------|------------------|---------------------------------|-----------------------------|-----------------------|
@@ -152,7 +152,7 @@ Then point the `.env` at it — either set `OPENAI_URL`/`OPENAI_API_KEY` yoursel
 
 ## Themes
 
-The live console supports twenty named presets, selectable via `THEME=` in `.env`. Every preset but `dark-default` also paints the terminal's actual background — not just the message text — so it looks right regardless of what your terminal profile's own background happens to be:
+The live console supports twenty named presets, selectable via `THEME=` in `.env_bk`. Every preset but `dark-default` also paints the terminal's actual background — not just the message text — so it looks right regardless of what your terminal profile's own background happens to be:
 
 | Preset                 | Look                                                                  |
 |------------------------|------------------------------------------------------------------------|
@@ -179,7 +179,7 @@ The live console supports twenty named presets, selectable via `THEME=` in `.env
 
 Leave `THEME` unset (or set to `auto`) and JFI detects your terminal's background via the standard `COLORFGBG` environment variable and picks `dark-default` or `light-default` accordingly. An explicit value always wins; an unknown name falls back to auto-detection with a hint, so a typo never crashes startup.
 
-Want your own colors instead? Set `THEME` to a JSON object (wrapped in single quotes in `.env`) instead of a name, e.g. `THEME='{"": "bg:#112233 fg:#eee", "out.user": "bold #ff8800"}'` — any subset of style classes may be set, and invalid JSON or an invalid style both fall back safely rather than crashing. See [Custom themes](docs/Themes.md#custom-themes-theme-as-json) for the full syntax.
+Want your own colors instead? Set `THEME` to a JSON object (wrapped in single quotes in `.env_bk`) instead of a name, e.g. `THEME='{"": "bg:#112233 fg:#eee", "out.user": "bold #ff8800"}'` — any subset of style classes may be set, and invalid JSON or an invalid style both fall back safely rather than crashing. See [Custom themes](docs/Themes.md#custom-themes-theme-as-json) for the full syntax.
 
 Live screenshots of each preset: [docs/Themes.md](docs/Themes.md).
 
@@ -274,7 +274,7 @@ uv sync --group dev   # pulls in pyinstaller
 uv run build          # -> dist/jfi
 ```
 
-The binary is a onefile build of `src/JFI/runner.py`, bundling prompt_toolkit, the openai client, and every other dependency. It still reads `.env` from its current working directory at startup, same as `./JFI`. Build logic lives in `src/build_binary/__init__.py`.
+The binary is a onefile build of `src/JFI/runner.py`, bundling prompt_toolkit, the openai client, and every other dependency. It still reads `.env_bk` from its current working directory at startup, same as `./JFI`. Build logic lives in `src/build_binary/__init__.py`.
 
 ---
 

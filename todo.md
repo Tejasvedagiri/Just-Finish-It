@@ -765,7 +765,7 @@ over whichever path open-decision #1 resolves to.
 # Existing backlog (unrelated to the above, rolled in unchanged)
 
 - [ ] **Test with other models**
-  - Smoke-test each candidate (set `MODEL` in `.env`, short conversation through the runner). *Status: only the current model (`qwen3.8-27b-ultra…`) was smoke-tested and passed; alternatives were not loaded at test time ("Failed to load model" — server may keep one model resident). Deeper testing deferred per user request.*
+  - Smoke-test each candidate (set `MODEL` in `.env_bk`, short conversation through the runner). *Status: only the current model (`qwen3.8-27b-ultra…`) was smoke-tested and passed; alternatives were not loaded at test time ("Failed to load model" — server may keep one model resident). Deeper testing deferred per user request.*
   - Run the `evals/csv2md` harness against each candidate and record pass/fail + latency.
 
 - [ ] **Rename the LLM manager to OpenAI**

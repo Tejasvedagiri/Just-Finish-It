@@ -202,9 +202,9 @@ critical, or a regression you caught that it hasn't noticed yet.
   tmux-spawn` for a systemd-killed scope (can happen for long-running
   background tmux sessions on some systems). Relaunch/resume the same way —
   no data is lost since JFI persists state to disk continuously.
-- **`.env`'s `JFI_WEB_PORT`** (default 7777) only takes effect on process
+- **`../../../.env_bk`'s `JFI_WEB_PORT`** (default 7777) only takes effect on process
   start. If two repos share the same default port, only the first to bind
-  gets the web dashboard; change one repo's `.env` and relaunch that
+  gets the web dashboard; change one repo's `../../../.env_bk` and relaunch that
   session to get both dashboards live on different ports simultaneously.
 
 ## 8. Context/model contention
@@ -281,5 +281,5 @@ When a task spans a backend and frontend repo:
 2. Only then dispatch the frontend session to wire up to the now-verified
    backend, with the backend's real port/contract given explicitly in the
    goal.
-3. Keep `.env`/config values (ports, API URLs) consistent between the two
+3. Keep `../../../.env_bk`/config values (ports, API URLs) consistent between the two
    goals — mismatches here are a common self-inflicted bug.

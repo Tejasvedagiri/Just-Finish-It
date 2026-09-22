@@ -200,7 +200,7 @@ class SocketReporter:
 
 
 def master_ws_url() -> Optional[str]:
-    """MASTER_WS_URL in .env -- e.g. ws://203.0.113.5:8765/report. Blank or
+    """MASTER_WS_URL in .env_bk -- e.g. ws://203.0.113.5:8765/report. Blank or
     unset disables the reporter entirely. Read fresh each call, same
     reasoning as runner._show_stream_prompts: cheap, checked rarely."""
     value = os.environ.get("MASTER_WS_URL", "").strip()
