@@ -66,8 +66,8 @@ Python & tooling:
 ✅ Python 3.12 (need >= 3.12)
 ✅ uv on PATH
 
-Configuration (.env_bk):
-✅ .env_bk already exists (/path/to/Just-Finish-It/.env_bk).
+Configuration (.env):
+✅ .env already exists (/path/to/Just-Finish-It/.env).
   OPENAI_URL = http://127.0.0.1:1234/v1
   MODEL      = qwen3.5:35b-a3b
 
@@ -83,7 +83,7 @@ LLM server reachability:
 
 | Variable            | Purpose                                            | Example value                              |
 |---------------------|----------------------------------------------------|--------------------------------------------|
-| `LLM_BACKEND` *(optional)* | Which `BaseLLMStream` implementation actually serves requests (see `src/JFI/llm/backend_select.py`). Unset/`openai` talks to whatever OpenAI-compatible endpoint `OPENAI_URL` points at (the default, works for Ollama/llama.cpp/vLLM/real OpenAI alike). `ollama` and `llamacpp` (also accepted: `llama.cpp`, `llama-cpp`) are pure convenience — they just fill in `OPENAI_URL`/`OPENAI_API_KEY` with that server's usual localhost defaults *if you haven't already set them yourself*, then still go through the OpenAI-compatible path. `anthropic` (also accepted: `claude`) instead talks to Claude's own native Messages API directly via `AnthropicStream`, which needs `ANTHROPIC_API_KEY` set (not `OPENAI_API_KEY`) — install it with `uv sync --extra anthropic`. Can be overridden per phase like `MODEL` (e.g. `REVIEWER_LLM_BACKEND=anthropic` with its own `REVIEWER_ANTHROPIC_API_KEY`), so different phases can even run on entirely different backends in the same session. An unrecognized value logs a warning and falls back to plain `openai`. | `anthropic` |
+| `LLM_BACKEND` *(optional)* | Which `BaseLLMStream` implementation actually serves requests (see `src/JFI/llm/backend_select.py`). Unset/`openai` talks to whatever OpenAI-compatible endpoint `OPENAI_URL` points at (the default, works for Ollama/llama.cpp/LM Studio/vLLM/real OpenAI alike). `ollama`, `llamacpp` (also accepted: `llama.cpp`, `llama-cpp`) and `lmstudio` (also accepted: `lm-studio`, `lm studio`) are pure convenience — they just fill in `OPENAI_URL`/`OPENAI_API_KEY` with that server's usual localhost defaults *if you haven't already set them yourself*, then still go through the OpenAI-compatible path. `anthropic` (also accepted: `claude`) instead talks to Claude's own native Messages API directly via `AnthropicStream`, which needs `ANTHROPIC_API_KEY` set (not `OPENAI_API_KEY`) — install it with `uv sync --extra anthropic`. Can be overridden per phase like `MODEL` (e.g. `REVIEWER_LLM_BACKEND=anthropic` with its own `REVIEWER_ANTHROPIC_API_KEY`), so different phases can even run on entirely different backends in the same session. An unrecognized value logs a warning and falls back to plain `openai`. | `anthropic` |
 | `ANTHROPIC_API_KEY` *(required only when `LLM_BACKEND=anthropic`/`claude`)* | Claude API key, used instead of `OPENAI_API_KEY` for that backend. | `sk-ant-...` |
 | `ANTHROPIC_MAX_TOKENS` *(optional)* | Max output tokens per request on the Anthropic backend — this API requires an explicit cap, unlike most OpenAI-compatible servers. Defaults to `8192` if unset. | `8192` |
 | `OPENAI_URL`        | Base URL of any OpenAI-compatible chat API         | `http://127.0.0.1:1234/v1` (Ollama) or `https://api.openai.com/v1` |
@@ -139,6 +139,7 @@ Then point the `.env_bk` at it — either set `OPENAI_URL`/`OPENAI_API_KEY` your
 |---------------|------------------|---------------------------------|-----------------------------|-----------------------|
 | Ollama        | `ollama` *(or unset + set `OPENAI_URL` yourself)* | `http://127.0.0.1:11434/v1`     | e.g. `qwen3:8b`             | anything (`ollama`)   |
 | llama.cpp     | `llamacpp` *(same)* | `http://127.0.0.1:8080/v1`      | whatever you loaded         | anything (e.g. `llama`) |
+| LM Studio     | `lmstudio` *(same)* | `http://127.0.0.1:1234/v1`      | whatever you loaded         | anything (`lm-studio`) |
 | vLLM / others | unset            | that server's `/v1` URL         | the served model id         | real key if required  |
 | Claude (Anthropic's own API, not an OpenAI-compatible proxy) | `anthropic` (or `claude`) | *(not used — talks to Claude's Messages API directly)* | e.g. `claude-sonnet-5` | *(use `ANTHROPIC_API_KEY` instead)* |
 

@@ -40,7 +40,7 @@ class OpenAICompatableStream(BaseLLMStream):
         # Build the keyword arguments dynamically
         kwargs = {
             # self.model / self.temperature come from MODEL and TEMPERATURE in
-            # .env_bk; these used to be hardcoded, so changing .env_bk did nothing.
+            # .env; these used to be hardcoded, so changing .env did nothing.
             "model": self.model,
             "messages": message,
             "temperature": float(self.temperature),

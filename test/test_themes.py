@@ -124,7 +124,7 @@ def test_pt_returns_copy_not_shared_dict(monkeypatch):
 
 def test_main_loads_dotenv_before_console(monkeypatch):
     """`load_dotenv` must run BEFORE the console is built in `runner.main()`,
-    otherwise a THEME set in .env_bk would be resolved from an empty environment.
+    otherwise a THEME set in .env would be resolved from an empty environment.
     A spy records the call order so any future reorder fails this test."""
     import sys
 
@@ -136,7 +136,7 @@ def test_main_loads_dotenv_before_console(monkeypatch):
     monkeypatch.setattr(
         runner, "load_dotenv", lambda *a, **k: order.append("load_dotenv") or True
     )
-    monkeypatch.setattr(runner, "find_dotenv", lambda *a, **k: ".env_bk")
+    monkeypatch.setattr(runner, "find_dotenv", lambda *a, **k: ".env")
 
     def spy_init(self, *args, **kwargs):
         order.append("console_init")
@@ -277,7 +277,7 @@ def test_inline_custom_theme_json_is_honored(monkeypatch):
 
 def test_inline_custom_theme_whitespace_tolerated(monkeypatch):
     """Leading/trailing whitespace around the JSON blob (easy to introduce
-    when wrapping a long THEME value in .env_bk) must not break parsing."""
+    when wrapping a long THEME value in .env) must not break parsing."""
     import JFI.manager.pt_console_manager as ptm
 
     monkeypatch.setenv("THEME", '   {"out.system": "#888888"}  \n')

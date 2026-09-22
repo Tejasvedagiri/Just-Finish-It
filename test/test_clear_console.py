@@ -109,7 +109,7 @@ def test_main_clears_console_after_dump_transcript(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["jfi"])  # main() now parses argv; don't see pytest's own
     order: list[str] = []
     monkeypatch.setattr(runner, "load_dotenv", lambda *a, **k: True)
-    monkeypatch.setattr(runner, "find_dotenv", lambda *a, **k: ".env_bk")
+    monkeypatch.setattr(runner, "find_dotenv", lambda *a, **k: ".env")
 
     def spy_init(self, *args, **kwargs):
         order.append("console_init")

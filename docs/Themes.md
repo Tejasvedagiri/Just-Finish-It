@@ -30,7 +30,7 @@ shown below.
 
 ## Selecting a theme (`THEME`)
 
-The theme is chosen from the `THEME` variable in your `../.env_bk`, resolved by
+The theme is chosen from the `THEME` variable in your `../.env`, resolved by
 [`src/JFI/manager/theme_env.py`](../src/JFI/manager/theme_env.py). The rules, in order:
 
 1. **An explicit value always wins over auto-detection** — either form below.
@@ -58,10 +58,10 @@ The theme is chosen from the `THEME` variable in your `../.env_bk`, resolved by
 ### Confirming your theme took effect
 
 The console's header bar shows the resolved source on every frame so you can verify your
-`../.env_bk` value:
+`../.env` value:
 
-- `theme: env:THEME=dark-ocean` — a named preset from `../.env_bk` was applied;
-- `theme: env:THEME=<custom theme>` — an inline JSON theme from `../.env_bk` was applied;
+- `theme: env:THEME=dark-ocean` — a named preset from `../.env` was applied;
+- `theme: env:THEME=<custom theme>` — an inline JSON theme from `../.env` was applied;
 - `theme: auto (light)` / `theme: auto (dark)` — no usable `THEME`, so detection kicked in;
 - `theme: invalid (using default)` — a custom theme's JSON parsed, but named a style
   prompt_toolkit rejected, so it fell back to the plain ANSI base.
@@ -80,7 +80,7 @@ THEME=dark-ocean
 ## Custom themes (`THEME` as JSON)
 
 Don't want any of the twenty presets? Set `THEME` to a JSON object instead of a name.
-Wrap it in **single quotes** in `../.env_bk` so the double quotes JSON needs don't need escaping:
+Wrap it in **single quotes** in `../.env` so the double quotes JSON needs don't need escaping:
 
 ```dotenv
 THEME='{"": "bg:#112233 fg:#eeeeee", "out.user": "bold #ff8800", "out.assistant": "#88ff88", "out.assistant.tag": "bold #ff00ff", "out.system": "#888888"}'

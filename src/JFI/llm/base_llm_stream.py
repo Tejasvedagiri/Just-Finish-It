@@ -4,11 +4,11 @@ import os
 
 def phase_env(prefix: str, key: str, fallback: str = "") -> str:
     """
-    Resolves one .env_bk setting with an optional per-phase override.
+    Resolves one .env setting with an optional per-phase override.
 
     `{prefix}_{key}` wins when `prefix` is given and that variable is set
     and non-empty (e.g. PLANNER_MODEL) — otherwise falls back to the shared
-    `{key}` (e.g. MODEL), then to `fallback`. This is what lets .env_bk give
+    `{key}` (e.g. MODEL), then to `fallback`. This is what lets .env give
     each phase (planner/imp/testing/reviewer/cleanup) its own model and
     endpoint without requiring it: with no per-phase vars set, every phase
     resolves to the same shared default, exactly like before this existed.

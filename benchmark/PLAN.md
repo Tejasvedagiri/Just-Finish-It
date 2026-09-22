@@ -23,7 +23,7 @@ Run output lives in `benchmark/runs/` (inside this repo, gitignored) by default 
 
 This was the root cause of every task failing in an early ad-hoc eval (the old `test/_queue`
 run, not this benchmark) and again in this benchmark's first real run: LM Studio loaded a
-model with a context window smaller than what `../.env_bk`'s `CONTEXT_SIZE` told JFI to assume. JFI
+model with a context window smaller than what `../.env`'s `CONTEXT_SIZE` told JFI to assume. JFI
 compresses history against the ceiling it's *told*, so real requests blew straight through
 the model's actual limit -- a clean 400, or a crashed backend serving an HTML 500 mid-session.
 
@@ -36,7 +36,7 @@ curl -s http://127.0.0.1:1234/api/v0/models | python3 -m json.tool
 ```
 
 Fix in whichever direction is easier: reload the model in LM Studio with an explicit context
-length matching `../.env_bk`'s `CONTEXT_SIZE`, or lower `CONTEXT_SIZE` to match whatever the model
+length matching `../.env`'s `CONTEXT_SIZE`, or lower `CONTEXT_SIZE` to match whatever the model
 is actually loaded with. What matters is that the two agree.
 
 ## 1. Run the benchmark

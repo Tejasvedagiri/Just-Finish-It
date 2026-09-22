@@ -121,7 +121,7 @@ TOOL_MAP = {
 
 PHASES = ["planner", "product_owner", "imp", "testing", "reviewer", "cleanup"]
 
-# .env_bk prefix each phase's model/endpoint override is read from (see
+# .env prefix each phase's model/endpoint override is read from (see
 # JFI.llm.base_llm_stream.phase_env) — e.g. PLANNER_MODEL, PLANNER_OPENAI_URL,
 # PLANNER_OPENAI_API_KEY, PLANNER_TEMPERATURE. Any that are unset fall back to
 # the shared MODEL/OPENAI_URL/OPENAI_API_KEY/TEMPERATURE, so a single model
@@ -693,7 +693,7 @@ _SESSION_MANAGER_CLASSES = {"simple": SimpleSessionManager, "adaptive": Adaptive
 
 
 def _session_manager_class(console: AbstractManager):
-    """SESSION_MANAGER=simple|adaptive in .env_bk selects which SessionManager
+    """SESSION_MANAGER=simple|adaptive in .env selects which SessionManager
     drives a session. Defaults to "adaptive": task-type-specific planning
     rules (python/javascript/story -- see JFI.session.task_rules) instead
     of one generic rule block for every goal, which both cuts context cost
@@ -711,7 +711,7 @@ def _session_manager_class(console: AbstractManager):
     cls = _SESSION_MANAGER_CLASSES.get(raw)
     if cls is None:
         console.display_system(
-            f"⚠️  Unknown SESSION_MANAGER={raw!r} in .env_bk (expected 'simple' or "
+            f"⚠️  Unknown SESSION_MANAGER={raw!r} in .env (expected 'simple' or "
             f"'adaptive') — falling back to 'adaptive'."
         )
         return AdaptiveSessionManager
@@ -881,10 +881,10 @@ def _task_stuck_token_limit() -> int:
 
 
 def _show_stream_prompts() -> bool:
-    """SHOW_STREAM_PROMPTS=1 (or true/yes/on) in .env_bk: dump the exact
+    """SHOW_STREAM_PROMPTS=1 (or true/yes/on) in .env: dump the exact
     messages sent to the LLM every turn — see dump_prompt. Read fresh each
     call rather than cached: it's checked once per turn at most, never in a
-    hot loop, and a live .env_bk edit (e.g. via Ctrl+N into a fresh process)
+    hot loop, and a live .env edit (e.g. via Ctrl+N into a fresh process)
     should still take effect without a restart being required."""
     return os.environ.get("SHOW_STREAM_PROMPTS", "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -926,7 +926,7 @@ def dump_prompt(console: AbstractManager, phase: str, messages: List[Dict[str, A
 
 
 def _log_llm_call_debug() -> bool:
-    """LOG_LLM_CALL_DEBUG=1 (or true/yes/on) in .env_bk: append every LLM
+    """LOG_LLM_CALL_DEBUG=1 (or true/yes/on) in .env: append every LLM
     request/response pair to .jfi/llm_debug.jsonl -- one JSON
     object per line, full request (messages + tools) and full response
     (content + tool_calls), no truncation. Unlike SHOW_STREAM_PROMPTS
@@ -1245,7 +1245,7 @@ def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: Ses
     (user interrupt or LLM failure), True when the phase finished cleanly.
 
     `llms` maps each phase to its own stream (see PHASE_ENV_PREFIX) — every
-    key resolves to the same shared model/endpoint unless .env_bk sets a
+    key resolves to the same shared model/endpoint unless .env sets a
     per-phase override, so this indexing is a no-op in the common case.
 
     "planner" runs as 3 internal stages by default -- Architect (top-level
@@ -1258,7 +1258,7 @@ def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: Ses
     """
     llm = llms[phase]
     # ask_llm delegates to whatever model this phase itself is using — a
-    # phase with its own .env_bk override (PLANNER_MODEL, etc.) gets an ask_llm
+    # phase with its own .env override (PLANNER_MODEL, etc.) gets an ask_llm
     # backed by that same model, not always the shared default.
     TOOL_MAP["ask_llm"] = make_ask_llm(llm, console)
     console.set_status(phase=phase, state="thinking", plan=ssm.plan_progress(),
@@ -1534,15 +1534,15 @@ def main():
         run_web_dashboard(extra_args=[])
         return
 
-    # Load the project's .env_bk from an explicit path (searched upward from the
+    # Load the project's .env from an explicit path (searched upward from the
     # current working directory) BEFORE any console/theme code runs, so a user
-    # setting THEME=... in their .env_bk is honored no matter how JFI was launched.
+    # setting THEME=... in their .env is honored no matter how JFI was launched.
     load_dotenv(find_dotenv())
 
     console = PromptToolkitConsoleManager()
     # One stream per phase (see PHASE_ENV_PREFIX) — each falls back to the
     # shared MODEL/OPENAI_URL/OPENAI_API_KEY/TEMPERATURE/LLM_BACKEND when
-    # that phase has no .env_bk override, so this is one shared connection in
+    # that phase has no .env override, so this is one shared connection in
     # the common case and up to six independent ones (even across
     # different BACKENDS — e.g. REVIEWER_LLM_BACKEND=anthropic while every
     # other phase stays on a local OpenAI-compatible server) when a user

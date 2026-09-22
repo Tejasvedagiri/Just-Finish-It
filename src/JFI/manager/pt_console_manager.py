@@ -272,13 +272,13 @@ SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 # Typing "!something" jumps the queue; a bare "!" promotes the whole queue.
 FORCE_PREFIX = "!"
 
-# Overridable via STREAM_OUTPUT_CAP in .env_bk — print_agent_response aborts a
+# Overridable via STREAM_OUTPUT_CAP in .env — print_agent_response aborts a
 # single streamed response (raising ResponseTooLongError) once its running
 # char/4 estimate crosses this, so a runaway/looping generation can't stream
 # forever burning tokens and context.
 DEFAULT_STREAM_OUTPUT_CAP = 10000
 
-# Overridable via REASONING_OUTPUT_CAP in .env_bk — a tighter, separate cap that
+# Overridable via REASONING_OUTPUT_CAP in .env — a tighter, separate cap that
 # aborts a turn once its reasoning_content alone (i.e. before any real content
 # or tool call has started) crosses this, distinct from STREAM_OUTPUT_CAP's
 # much larger budget for the whole turn. Observed in practice on smaller
@@ -751,7 +751,7 @@ class PromptToolkitConsoleManager(AbstractManager):
                 ("class:header.dim", "  ·  ctx "),
                 (style, f"{self._fmt_tokens(used)}/{self._fmt_tokens(budget)} ({pct}%)"),
             ]
-        # Theme source is persistent info: an explicit THEME from .env_bk must be
+        # Theme source is persistent info: an explicit THEME from .env must be
         # visible so the user can confirm their setting took effect.
         if self.theme_source:
             frags += [
@@ -1602,7 +1602,7 @@ class PromptToolkitConsoleManager(AbstractManager):
 
     @staticmethod
     def _stream_output_cap() -> int:
-        """STREAM_OUTPUT_CAP from .env_bk, falling back to
+        """STREAM_OUTPUT_CAP from .env, falling back to
         DEFAULT_STREAM_OUTPUT_CAP for an unset or non-numeric value — never
         crashes a turn over a typo'd override."""
         try:
@@ -1612,7 +1612,7 @@ class PromptToolkitConsoleManager(AbstractManager):
 
     @staticmethod
     def _reasoning_output_cap() -> int:
-        """REASONING_OUTPUT_CAP from .env_bk, falling back to
+        """REASONING_OUTPUT_CAP from .env, falling back to
         DEFAULT_REASONING_OUTPUT_CAP for an unset or non-numeric value — never
         crashes a turn over a typo'd override."""
         try:
