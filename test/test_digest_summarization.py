@@ -270,6 +270,184 @@ def test_digest_summarization_sees_tool_result_text_past_the_elision_window(make
     assert marker in sent_text
 
 
+class _MultiChunkLLMStream:
+    """Like FakeLLMStream, but replies with several separate streamed
+    chunks instead of one -- needed to actually exercise live,
+    chunk-by-chunk display rather than a single-chunk reply that would
+    look identical whether streamed live or dumped all at once."""
+
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.calls = []
+
+    def send_message(self, messages):
+        self.calls.append(messages)
+        return [FakeChunk(c) for c in self.chunks]
+
+
+class _StreamingConsole:
+    """Fuller console fake than conftest's Console -- separates
+    display_stream (live, chunk-by-chunk) from log_stream_result
+    (persisted once, not re-rendered) and display_system/display_rule (the
+    PROMPT SENT dump), so a test can assert the digest response streams
+    live instead of arriving as one post-hoc block, and is never shown
+    twice."""
+
+    def __init__(self):
+        self.system_messages: list[str] = []
+        self.rule_labels: list[str] = []
+        self.stream_chunks: list[str] = []
+        self.logged: list[tuple[str, str]] = []
+
+    def display_system(self, text):
+        self.system_messages.append(str(text))
+
+    def display_rule(self, label=""):
+        self.rule_labels.append(label)
+
+    def display_stream(self, text):
+        self.stream_chunks.append(text)
+
+    def log_stream_result(self, tag, text):
+        self.logged.append((tag, text))
+
+
+def test_digest_streams_live_under_show_stream_prompts_without_double_printing(monkeypatch):
+    """SHOW_STREAM_PROMPTS=1 must show the digest response as it's
+    generated (display_stream, chunk by chunk -- the same "live" feel as
+    the main turn's own streamed response) rather than only as a single
+    block dumped once the whole call returns, and must persist the
+    assembled text exactly once (log_stream_result) rather than also
+    re-printing it via display_system, which would show it twice on
+    screen."""
+    from JFI.session.simple_session_manager import SimpleSessionManager
+
+    monkeypatch.setenv("SHOW_STREAM_PROMPTS", "1")
+    console = _StreamingConsole()
+    ssm = SimpleSessionManager(console, "digest-live-stream")
+    ssm.add_message("user", "build the thing")
+    _fill_middle(ssm, 12)
+
+    llm = _MultiChunkLLMStream(["Learned ", "X, ", "decided Y."])
+    ssm.set_llm_streams({"imp": llm})
+
+    ssm.compress_history(reserve=ssm.context_budget() - 50, phase="imp")
+
+    # Streamed live, chunk by chunk, in the exact pieces the LLM sent.
+    assert console.stream_chunks == ["Learned ", "X, ", "decided Y."]
+    # Persisted exactly once, as the fully assembled text.
+    assert console.logged == [("DIGEST", "Learned X, decided Y.")]
+    # Never re-printed as a second whole-text dump via display_system.
+    assert not any("Learned X, decided Y." in m for m in console.system_messages)
+
+
+class _ChunkWithReasoning:
+    def __init__(self, content=None, reasoning_content=None):
+        delta = type("Delta", (), {"content": content, "reasoning_content": reasoning_content})()
+        self.choices = [type("Choice", (), {"delta": delta})()]
+
+
+class _ReasoningThenContentLLM:
+    """A reasoning model (e.g. local qwen3) that streams its whole
+    chain-of-thought via reasoning_content chunks before any real content
+    chunk -- the shape that used to show NOTHING on screen for the digest
+    call, looking identical to "stuck" even while LM Studio was actively
+    generating."""
+
+    def __init__(self, reasoning_chunks=(), content_chunks=()):
+        self.reasoning_chunks = list(reasoning_chunks)
+        self.content_chunks = list(content_chunks)
+        self.calls = []
+
+    def send_message(self, messages):
+        self.calls.append(messages)
+        return (
+            [_ChunkWithReasoning(reasoning_content=r) for r in self.reasoning_chunks]
+            + [_ChunkWithReasoning(content=c) for c in self.content_chunks]
+        )
+
+
+def test_digest_default_caps_are_tighter_than_a_normal_turns(monkeypatch):
+    """Deliberately NOT the same defaults as STREAM_OUTPUT_CAP/
+    REASONING_OUTPUT_CAP (10000/3000) -- this call's own system prompt
+    only ever asks for "up to roughly 500 words" of plain summary, so it
+    has no legitimate need for anywhere near a real coding turn's budget.
+    A tighter default means a runaway reasoning pass on a slow local model
+    fails fast into the cheap fallback instead of stalling the whole
+    pipeline for a long time on every single digest."""
+    from JFI.session.simple_session_manager import SimpleSessionManager
+
+    console = _StreamingConsole()
+    ssm = SimpleSessionManager(console, "digest-default-caps")
+    ssm.add_message("user", "build the thing")
+    _fill_middle(ssm, 12)
+
+    # No content ever arrives -- just enough reasoning to cross the DEFAULT
+    # digest reasoning cap (1500 tokens ~= 6000 chars) but nowhere near the
+    # main turn's default (3000 tokens ~= 12000 chars).
+    llm = _ReasoningThenContentLLM(reasoning_chunks=["x" * 6100])
+    ssm.set_llm_streams({"imp": llm})
+
+    view = ssm.compress_history(reserve=ssm.context_budget() - 50, phase="imp")
+
+    digest = next(m for m in view if DIGEST_MARKER in str(m.get("content", "")))
+    assert "Tool calls: execute_command" in digest["content"]  # fell back, didn't hang
+
+
+def test_digest_streams_reasoning_live_before_content(monkeypatch):
+    """A reasoning model's chain-of-thought must stream live too, not just
+    the final content -- otherwise a long "thinking" pass before any real
+    content looks identical to a hung side-channel call."""
+    from JFI.session.simple_session_manager import SimpleSessionManager
+
+    monkeypatch.setenv("SHOW_STREAM_PROMPTS", "1")
+    console = _StreamingConsole()
+    ssm = SimpleSessionManager(console, "digest-reasoning")
+    ssm.add_message("user", "build the thing")
+    _fill_middle(ssm, 12)
+
+    llm = _ReasoningThenContentLLM(
+        reasoning_chunks=["Thinking ", "it over..."],
+        content_chunks=["Learned ", "X."],
+    )
+    ssm.set_llm_streams({"imp": llm})
+
+    ssm.compress_history(reserve=ssm.context_budget() - 50, phase="imp")
+
+    # Reasoning chunks streamed live too, in order, ahead of the content.
+    assert console.stream_chunks == ["Thinking ", "it over...", "Learned ", "X."]
+    assert any("reasoning" in label.lower() for label in console.rule_labels)
+    assert console.logged == [("DIGEST", "Learned X.")]
+
+
+def test_digest_aborts_runaway_reasoning_instead_of_hanging_forever(monkeypatch):
+    """No cap at all on this side-channel call used to mean a runaway local
+    model (e.g. a reasoning model that never stops "thinking") could block
+    compression -- and the whole pipeline -- indefinitely. It must abort
+    and fall back to the cheap metadata note instead, same contract as any
+    other digest failure."""
+    from JFI.session.simple_session_manager import SimpleSessionManager
+
+    monkeypatch.setenv("DIGEST_REASONING_OUTPUT_CAP", "10")  # tiny, to trip quickly
+    console = _StreamingConsole()
+    ssm = SimpleSessionManager(console, "digest-runaway-reasoning")
+    ssm.add_message("user", "build the thing")
+    _fill_middle(ssm, 12)
+
+    # Far more reasoning than the 10-token (40-char) cap allows, and no
+    # content at all -- a runaway "thinking" model that never answers.
+    llm = _ReasoningThenContentLLM(reasoning_chunks=["thinking a very great deal about this "] * 20)
+    ssm.set_llm_streams({"imp": llm})
+
+    view = ssm.compress_history(reserve=ssm.context_budget() - 50, phase="imp")
+
+    # Falls back to the cheap metadata note rather than hanging or crashing.
+    digest = next(m for m in view if DIGEST_MARKER in str(m.get("content", "")))
+    assert "Tool calls: execute_command" in digest["content"]
+    assert not ssm.metadata.get("digest_summary")
+    assert any("Digest summarization failed" in m for m in console.system_messages)
+
+
 def test_keep_recent_blocks_raised_for_less_aggressive_recent_trimming():
     """Raised from 6 -> 10 after live use showed genuinely RECENT turns (not
     just history old enough to digest) getting trimmed/elided more often

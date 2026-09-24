@@ -114,8 +114,14 @@ def test_pandas_goal_no_longer_matches_generic_python():
 
 def test_every_known_type_has_an_addendum_and_formats_cleanly():
     for task_type, addendum in TYPE_ADDENDA.items():
-        combined = CORE_PLAN_RULES.format(plan_path="JFI/demo/plan.md") + addendum
-        assert "JFI/demo/plan.md" in combined
+        combined = CORE_PLAN_RULES.format(plan_path="JFI/demo/plan.md", session_dir="JFI/demo") + addendum
+        assert "JFI/demo" in combined
+        assert "get_leaf" in combined
+        # Never literally "plan.md" anywhere, not even in a "there is no
+        # plan.md" negation -- the word alone used to be enough to send the
+        # model off checking for a nonexistent file (it doesn't exist for a
+        # DB-backed session; see session_dir's own docstring above).
+        assert "plan.md" not in combined
         assert combined.strip()
 
 

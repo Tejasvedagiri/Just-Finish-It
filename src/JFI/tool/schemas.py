@@ -103,7 +103,7 @@ CORE_TOOLS = [
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "The relative path to the file, e.g., 'plan.md'"
+                        "description": "The relative path to the file, e.g., 'notes.txt'"
                     },
                     "content": {
                         "type": "string",
@@ -190,7 +190,7 @@ DEFERRED_TOOLS = [
                         "type": "string",
                         "description": (
                             "Where to save the screenshot — pass your session's .jfi/<session> "
-                            "folder (the same directory your plan file lives in)."
+                            "folder."
                         )
                     }
                 },
@@ -243,7 +243,7 @@ DEFERRED_TOOLS = [
                         "type": "string",
                         "description": (
                             "Where to save downloaded images — pass your session's "
-                            ".jfi/<session> folder (the same directory your plan file lives in)."
+                            ".jfi/<session> folder."
                         )
                     },
                     "max_images": {
@@ -338,7 +338,7 @@ DEFERRED_TOOLS = [
                         "type": "string",
                         "description": (
                             "Where to save the extracted frames -- pass your session's "
-                            ".jfi/<session> folder (the same directory your plan file lives in)."
+                            ".jfi/<session> folder."
                         )
                     },
                     "max_frames": {
@@ -610,10 +610,28 @@ CORE_TOOLS += [
     {
         "type": "function",
         "function": {
+            "name": "get_leaf",
+            "description": (
+                "Shows ONE leaf's own full detail — description, phase, status, parent, "
+                "children, timing — always the complete text, never truncated. Use this to "
+                "focus on a single leaf/node instead of re-reading the whole tree via get_plan."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan."}
+                },
+                "required": ["leaf_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "add_leaf",
             "description": (
-                "Adds one new leaf (or root-level parent) to the plan. Replaces hand-editing "
-                "plan.md's markdown — no numbering to get right, it's computed for display. "
+                "Adds one new leaf (or root-level parent) to the plan. Replaces hand-editing a "
+                "markdown checklist — no numbering to get right, it's computed for display. "
                 "A leaf you plan to add children to later must be split_leaf'd once you do; "
                 "do not call add_leaf with parent_id pointing at a leaf that already has "
                 "status/timing of its own (get_plan shows you which ones do)."
@@ -664,8 +682,8 @@ CORE_TOOLS += [
             "description": (
                 "Marks a leaf complete — sets its status to done and records the end time. "
                 "Only ever call this on a genuine leaf (no children of its own); marking a "
-                "parent bullet done is rejected, same as ticking a plan.md parent checkbox "
-                "was never allowed."
+                "parent bullet done is rejected, same as ticking a markdown checklist's "
+                "parent checkbox was never allowed."
             ),
             "parameters": {
                 "type": "object",
@@ -734,13 +752,59 @@ CORE_TOOLS += [
     {
         "type": "function",
         "function": {
+            "name": "merge_leaf",
+            "description": (
+                "Folds a single child leaf back up into its parent, collapsing pointless "
+                "single-child nesting -- the undo for a split_leaf (or Journeyman/Function-"
+                "Breakdown pass) that left a parent with only one real child. The parent "
+                "absorbs the child's description and becomes a real, actionable leaf itself; "
+                "the child is removed. Only works when the parent has EXACTLY this one child "
+                "and the child itself has no children of its own -- if a single-child parent "
+                "is genuinely the smallest real task, call this instead of fabricating a fake "
+                "second child just to satisfy the 'at least 2 children' rule."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "leaf_id": {
+                        "type": "integer",
+                        "description": "The ONLY CHILD's leaf id (from get_plan) -- it gets folded up into its parent."
+                    }
+                },
+                "required": ["leaf_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_leaf",
+            "description": (
+                "Removes a genuinely wrong or duplicate leaf outright -- e.g. two byte-"
+                "identical leaves created by mistake, or one describing work that turned out "
+                "unnecessary. Refuses on a parent (has children -- merge_leaf/delete_leaf "
+                "those first) and on a leaf already marked done (that's a real completed-work "
+                "record, not a mistake to erase)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan, to remove."}
+                },
+                "required": ["leaf_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ask_llm",
             "description": (
                 "Asks a fresh, single-turn LLM call anything — write a description, brainstorm "
                 "names, clarify an ambiguous requirement, summarize a chunk of text, or handle "
                 "any other one-off text task that doesn't need a dedicated tool. This call is "
-                "STATELESS: it has NO access to your conversation, the plan file, or any files "
-                "on disk — put everything it needs directly in the prompt. Do NOT use this for "
+                "STATELESS: it has NO access to your conversation, the plan, or any files on "
+                "disk — put everything it needs directly in the prompt. Do NOT use this for "
                 "file operations, running commands, or anything another tool already does "
                 "directly."
             ),
@@ -790,12 +854,15 @@ _DEFERRED_TOOL_SUMMARIES = {
     "get_reviewer_notes": "(reviewer) read whatever notes the Implementation agent left this pass",
     "write_review_report": "(reviewer) record real problems found, triggering another full iteration",
     "write_plan_feedback": "(product owner) record a real problem with the plan, sending it back to the planner",
-    "get_plan": "show the current plan tree (leaf ids, numbers, phase, status) -- the DB-backed replacement for reading plan.md",
-    "add_leaf": "add one new leaf/parent to the plan -- the DB-backed replacement for hand-editing plan.md",
+    "get_plan": "show the current plan tree (leaf ids, numbers, phase, status)",
+    "get_leaf": "show ONE leaf's full detail (description, phase, status, parent, children, timing), always complete, never truncated",
+    "add_leaf": "add one new leaf/parent to the plan -- the DB-backed replacement for hand-editing a markdown checklist",
     "start_leaf": "mark a leaf as the one you're currently working on, recording its start time",
     "mark_leaf_done": "mark a leaf complete, recording its end time -- rejected on a parent bullet",
     "split_leaf": "turn a leaf into a parent with new child leaves -- no renumbering needed, unlike plan_renumber.py's old role",
     "reorder_leaf": "move a leaf to sit right after another sibling -- fixes an ordering bug without any manual renumbering",
+    "merge_leaf": "fold a single child back into its parent -- the undo for a split_leaf that left a pointless single-child parent",
+    "delete_leaf": "remove a genuinely wrong/duplicate leaf outright (refused on a parent or an already-done leaf)",
     "ask_llm": "a fresh, single-turn, STATELESS LLM call for a one-off text task (no file/conversation access)",
     "capture_screenshot": "capture the primary monitor to a PNG (headless environments fail cleanly)",
     "view_image": "attach an image file (a screenshot, a project asset, ...) so you can actually see it next turn",

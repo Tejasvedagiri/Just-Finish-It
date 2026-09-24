@@ -60,12 +60,19 @@ class TestGenerateMarkdownRemoved:
 
 class TestLLMUsesTools:
     def test_system_message_instructs_tool_usage(self, manager):
+        """This test's own claim used to be backwards: the plan is produced
+        via the DB-backed tools (get_plan/add_leaf/...), never plan.md --
+        see this file's own module docstring and TestGetSystemMessage's
+        test_returns_nonempty_string_with_plan_reference above, which
+        already asserted the correct thing. "write_file" only appears here
+        as part of the explicit prohibition on using it for plan edits;
+        "plan.md" must never appear at all -- see plan_db_tools.py."""
         from JFI.session.simple_session_manager import get_system_message
 
         msg = get_system_message("planner", manager.plan_path).lower()
-        # The plan is produced via file tools, not by the session manager
-        # emitting markdown: the planner prompt names them explicitly.
-        assert "write_file" in msg and "plan.md" in msg
+        assert "write_file" in msg  # named only in the "never do this" rule
+        assert "plan.md" not in msg
+        assert "get_plan()" in msg and "add_leaf" in msg
 
 
 class TestImplementationWholeProjectBuildGate:

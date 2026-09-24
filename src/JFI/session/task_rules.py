@@ -121,9 +121,8 @@ def detect_task_type(goal_text: str) -> str:
 
 
 CORE_PLAN_RULES = """
-    PLAN TOOLS (mandatory, no exceptions) -- the plan is a DB-backed tree,
-    never a file you write directly. Use these six tools, never write_file/
-    append_to_file/replace_in_file on any plan file:
+    PLAN TOOLS (mandatory, no exceptions) -- the plan is a DB-backed tree.
+    Use these nine tools to read and change it:
     - get_plan() -- shows the current tree: every leaf's id, its display
       number (e.g. "1.1.2", computed for you -- never hand-numbered, never
       something you track or renumber yourself), phase, description, and
@@ -140,16 +139,38 @@ CORE_PLAN_RULES = """
       parent with new child leaves under it. Use this the MOMENT you
       realize a leaf is really more than one piece of work, before
       attempting it as one leaf, not reactively after getting stuck
-      partway through. `into` needs at least 2 descriptions.
+      partway through. `into` needs at least 2 descriptions. For a leaf
+      whose work is writing or changing code, name the actual
+      function/method each new child implements wherever that name is
+      already known/decided -- "implement collect_news(held: list[str]) ->
+      list[dict]: fan out one RSS fetch per held symbol" rather than
+      "write the fetch function" -- not just during a dedicated Function
+      Breakdown pass; this applies to any split_leaf on code-writing work.
     - start_leaf(leaf_id) / mark_leaf_done(leaf_id, tokens=None) -- call
       start_leaf right before beginning a leaf's real work, mark_leaf_done
       the moment it's finished. Only ever on a genuine leaf (no children of
-      its own) -- never on a parent; that's rejected the same way a plan.md
-      parent bullet never got a checkbox.
+      its own) -- never on a parent; that's rejected the same way a
+      markdown checklist's parent bullet never got a checkbox of its own.
     - reorder_leaf(leaf_id, after_leaf_id=0) -- moves a leaf among its own
       siblings, if you catch an ordering bug (something depended on before
       whatever creates it).
-    - {plan_path}'s directory is internal bookkeeping ONLY -- never put
+    - merge_leaf(leaf_id) -- the undo for a split_leaf that left a parent
+      with only ONE real child: pass the child's id and it gets folded back
+      into its parent, which becomes a real, actionable leaf again. Use
+      this whenever you find (or create) a single-child parent -- do NOT
+      fabricate a fake second child just to satisfy the "at least 2
+      children" rule below; that's busywork, and this is the correct fix.
+    - delete_leaf(leaf_id) -- removes a genuinely wrong or duplicate leaf
+      outright (e.g. two byte-identical leaves created by mistake). Refused
+      on a parent (children exist -- resolve those first) or on a leaf
+      already marked done (that's a real record, not a mistake).
+    - get_leaf(leaf_id) -- one leaf's own full detail (description, phase,
+      status, parent, children, timing), always complete, never truncated.
+      Use this to focus on a single leaf/node instead of re-reading the
+      whole tree via get_plan().
+    - get_plan() (whole tree) and get_leaf(leaf_id) (one leaf) always
+      return the complete text, never truncated.
+    - `{session_dir}` itself is internal bookkeeping ONLY -- never put
       deliverables (source, tests, docs) inside it. A project-scaffolding
       command that needs an empty target directory (`npm create vite`,
       `django-admin startproject`, ...) will see this folder already
@@ -157,8 +178,7 @@ CORE_PLAN_RULES = """
       not a real error: scaffold into a throwaway subdirectory instead,
       then move everything generated up into the working directory root
       (`mv temp-app/* . ...; rmdir temp-app` or equivalent), leaving this
-      folder untouched. The plan itself lives entirely in the DB now,
-      nowhere on disk to collide with a scaffolder's own directory needs.
+      folder untouched.
     - The plan is a TREE, not a flat list: break every task into the
       smallest doable pieces, recursing as many levels as it takes (2, 3,
       4+) -- stop nesting a branch only once its leaves are each small
