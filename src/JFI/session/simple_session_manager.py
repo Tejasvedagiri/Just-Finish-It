@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from JFI.llm.base_llm_stream import phase_env
-from JFI.manager.abstract_manager import AbstractManager, phase_display_name
+from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.models import get_engine
+from JFI.text_sanitize import strip_leaked_special_tokens
 from JFI.session.abstract_session_manager import SessionManager
 from JFI.session.history_store import append_history_to_db, has_history, load_history_from_db
 from JFI.session.metadata_store import load_metadata_from_db, save_metadata_to_db
@@ -155,13 +156,16 @@ DIGEST_SUMMARY_MIN_CHARS = 6000
 DIGEST_INPUT_CHAR_CAP = 20000
 
 PLAN_FORMAT_RULES = """
-    PLAN TOOLS (mandatory, no exceptions) — the plan is a DB-backed tree,
-    never a file you write directly. Use these five tools, never write_file/
-    append_to_file/replace_in_file on any plan file:
+    PLAN TOOLS (mandatory, no exceptions) — the plan is a DB-backed tree.
+    Use these nine tools to read and change it:
     - get_plan() — shows the current tree: every leaf's id, its display
       number (e.g. "1.1.2", computed for you — never hand-numbered, never
       something you track or renumber yourself), phase, description, and
       status. Call this first whenever you need to see what already exists.
+    - get_leaf(leaf_id) — one leaf's own full detail (description, phase,
+      status, parent, children, timing), always complete, never truncated.
+      Use this to focus on a single leaf/node instead of re-reading the
+      whole tree via get_plan().
     - add_leaf(phase, description, parent_id=None) — adds one new item.
       `phase` is exactly "planner", "product_owner", "imp", "testing",
       "reviewer", or "cleanup" — almost always "imp" or "testing" for your
@@ -176,11 +180,25 @@ PLAN_FORMAT_RULES = """
       writing a check AND THEN fixing whatever it finds) — split it before
       attempting it as one leaf, not reactively after getting stuck
       partway through. `into` needs at least 2 descriptions.
+    - merge_leaf(leaf_id) — the undo for a split_leaf that left a parent
+      with only ONE real child: pass the child's id and it gets folded back
+      into its parent, which becomes a real, actionable leaf again. Use
+      this whenever you find (or create) a single-child parent — do NOT
+      fabricate a fake second child just to satisfy the "at least 2
+      distinct pieces" rule below; that's busywork, and this is the correct
+      fix.
+    - delete_leaf(leaf_id) — removes a genuinely wrong or duplicate leaf
+      outright (e.g. two byte-identical leaves created by mistake). Refused
+      on a parent (children exist — resolve those first) or on a leaf
+      already marked done (that's a real record, not a mistake).
+    - reorder_leaf(leaf_id, after_leaf_id=0) — moves a leaf among its own
+      siblings, if you catch an ordering bug (something depended on before
+      whatever creates it).
     - start_leaf(leaf_id) / mark_leaf_done(leaf_id, tokens=None) — call
       start_leaf right before beginning a leaf's real work, mark_leaf_done
       the moment it's finished. Only ever on a genuine leaf (no children of
-      its own) — never on a parent; that's rejected the same way a plan.md
-      parent bullet never got a checkbox.
+      its own) — never on a parent; that's rejected the same way a
+      markdown checklist's parent bullet never got a checkbox of its own.
     - A leaf naming more than one distinct deliverable isn't a leaf yet:
       "+", "and", "/", or a semicolon joining separate nouns/verb-phrases
       means split it, one leaf per piece — same rule whether that's several
@@ -196,6 +214,8 @@ PLAN_FORMAT_RULES = """
     - Deliverables (source, tests, docs) go in the normal project layout at
       the working directory root — the plan lives entirely in the DB now,
       nowhere on disk to collide with a scaffolder's own directory needs.
+    - get_plan() (whole tree) and get_leaf(leaf_id) (one leaf) always
+      return the complete text, never truncated.
 """
 
 CONTEXT_CACHE_RULES = """
@@ -362,8 +382,14 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
     """
     from JFI.tool.schemas import deferred_tools_rules
 
+    # session_dir (".jfi", never "plan.md" itself) is what CORE_PLAN_RULES'
+    # own directory-scoping bullet actually means -- passed separately from
+    # plan_path so that bullet can say "this directory" without implying
+    # plan.md is a real, checkable file (it never exists for a DB-backed
+    # session; see plan_path's own docstring/DEFAULT_PLAN_PATH comment).
+    session_dir = str(Path(plan_path).parent)
     rules = (
-        plan_format_rules.format(plan_path=plan_path)
+        plan_format_rules.format(plan_path=plan_path, session_dir=session_dir)
         + CONTEXT_CACHE_RULES
         + VERIFICATION_RULES
         + deferred_tools_rules(unlocked_tools)
@@ -896,7 +922,7 @@ def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_
 
     if phase == "reviewer":
         return (
-            f"Testing is done. Evaluate the finished work against {plan_path}. If it is good, do NOT "
+            f"Testing is done. Call get_plan() and evaluate the finished work against it. If it is good, do NOT "
             f"call write_review_report — just reply with a short 'Review: PASS' summary. Only if "
             f"problems exist, call write_review_report with concrete, actionable issues (file/line "
             f"references where relevant), which triggers another planner → imp → testing → "
@@ -1550,8 +1576,8 @@ class SimpleSessionManager(SessionManager):
             self.console.display_system(
                 f"Warning: {self.plan_path} exists but has no '- [ ]' items to track."
             )
-        else:
-            self.console.display_system(f"No plan file found at {self.plan_path}.")
+        # else: a DB-backed session (the normal case now) never has one --
+        # nothing to warn about, see this method's own docstring.
         return False
 
     # ------------------------------------------------------------- metadata
@@ -2056,8 +2082,8 @@ class SimpleSessionManager(SessionManager):
         lines = [
             DIGEST_MARKER,
             "This is a factual digest of turns that were removed. The files below are on disk; "
-            "use read_file to inspect any of them, and the plan file remains the source of truth "
-            "for what is done and what is left.",
+            "use read_file to inspect any of them. get_plan() remains the source of truth for "
+            "what is done and what is left.",
         ]
         if note:
             lines.append(note)
@@ -2107,7 +2133,14 @@ class SimpleSessionManager(SessionManager):
         never touching self.history) that folds `new_blocks` into an
         updated version of `prior_summary`. Raises on any failure or an
         empty response — callers must catch and fall back to the cheap
-        metadata note; this must never be allowed to crash compression."""
+        metadata note; this must never be allowed to crash compression.
+
+        SHOW_STREAM_PROMPTS=1 also covers this call: it's the one other LLM
+        request besides the main per-turn one (runner.dump_prompt/
+        log_llm_call only wrap that one), and otherwise it's invisible on
+        screen — LM Studio shows tokens generating while the terminal
+        stays blank until this returns."""
+        show = os.environ.get("SHOW_STREAM_PROMPTS", "").strip().lower() in ("1", "true", "yes", "on")
         rendered = self._render_blocks_for_summary(new_blocks)
         system_msg = (
             "You are condensing part of a coding agent's own past work into a factual "
@@ -2134,15 +2167,99 @@ class SimpleSessionManager(SessionManager):
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_msg},
         ]
+        if show:
+            self.console.display_rule(
+                f"PROMPT SENT — CONTEXT DIGEST ({len(messages)} message(s), side-channel)"
+            )
+            for i, msg in enumerate(messages, 1):
+                self.console.display_system(f"[{i}] {msg['role']}")
+                self.console.display_system(msg["content"])
+            self.console.display_rule("END PROMPT")
+            self.console.display_rule("DIGEST RESPONSE (live)")
+        # A reasoning model (e.g. a local qwen3 build) streams its whole
+        # chain-of-thought via reasoning_content BEFORE any real content --
+        # observed in practice: with only `delta.content` handled below,
+        # nothing at all showed on screen for 10,000+ generated tokens
+        # (LM Studio's own log confirmed it was actively streaming), which
+        # looked identical to "stuck" even though this side-channel call
+        # was working exactly as before. Surface reasoning too (same as
+        # print_agent_response does for the main turn) so it's visibly
+        # progressing, and cap both the same char/4-token-estimate way
+        # print_agent_response does -- this side-channel call had NO cap at
+        # all otherwise, unlike the main turn, so a runaway reasoning model
+        # could block compression (and the whole pipeline) indefinitely.
+        #
+        # Deliberately its OWN (much tighter) caps, not the main turn's
+        # STREAM_OUTPUT_CAP/REASONING_OUTPUT_CAP -- a reasoning model can
+        # burn thousands of tokens "thinking" even about a trivial prompt
+        # (measured directly against a live LM Studio instance: ~50-60
+        # reasoning tokens just to answer "what is 2+2?"), and this call's
+        # own system prompt only ever asks for "up to roughly 500 words" of
+        # plain summary -- there's no legitimate reason for it to need
+        # anywhere near the main turn's budget for actual coding/tool-use
+        # reasoning. Tighter defaults mean a runaway digest reasoning pass
+        # aborts and falls back to the cheap metadata note in well under a
+        # minute instead of tying up a slow local backend for tens of
+        # minutes on every single digest across a long session.
+        try:
+            reasoning_cap = int(os.environ.get("DIGEST_REASONING_OUTPUT_CAP", 1500))
+        except ValueError:
+            reasoning_cap = 1500
+        try:
+            stream_cap = int(os.environ.get("DIGEST_STREAM_OUTPUT_CAP", 3000))
+        except ValueError:
+            stream_cap = 3000
+        reasoning_started = False
+        reasoning_chars = 0
+        streamed_chars = 0
         response_stream = llm.send_message(messages)
         summary = ""
         for chunk in response_stream:
-            delta = chunk.choices[0].delta.content
-            if delta is not None:
-                summary += delta
+            delta = chunk.choices[0].delta
+            reasoning_delta = getattr(delta, "reasoning_content", None)
+            if reasoning_delta:
+                reasoning_delta = strip_leaked_special_tokens(reasoning_delta)
+            if reasoning_delta:
+                reasoning_chars += len(reasoning_delta)
+                streamed_chars += len(reasoning_delta)
+                if show:
+                    if not reasoning_started:
+                        self.console.display_rule("💭 digest reasoning")
+                        reasoning_started = True
+                    self.console.display_stream(reasoning_delta)
+            if reasoning_chars // 4 > reasoning_cap and not summary:
+                raise ResponseTooLongError(
+                    f"Digest reasoning exceeded REASONING_OUTPUT_CAP ({reasoning_cap}) "
+                    "with no summary content yet -- aborting this side-channel call."
+                )
+            content_delta = delta.content
+            if content_delta is not None:
+                if reasoning_started and show:
+                    self.console.display_rule("DIGEST RESPONSE (live)")
+                    reasoning_started = False
+                summary += content_delta
+                streamed_chars += len(content_delta)
+                if show:
+                    # Live, chunk-by-chunk as it's generated -- same feel as
+                    # watching the main turn's own response stream in, not a
+                    # dump that only appears once the whole call returns.
+                    self.console.display_stream(content_delta)
+            if streamed_chars // 4 > stream_cap:
+                raise ResponseTooLongError(
+                    f"Digest response exceeded STREAM_OUTPUT_CAP ({stream_cap}) tokens -- "
+                    "aborting this side-channel call."
+                )
         summary = summary.strip()
         if not summary:
             raise ValueError("LLM summarization returned an empty response")
+        if show:
+            # The live stream above is TUI-only (display_stream isn't
+            # logged per-chunk) -- persist the assembled text once here
+            # (without re-rendering it -- it already streamed live) so
+            # .jfi's log/log_tail also has the full digest response, same
+            # as everything else SHOW_STREAM_PROMPTS shows.
+            self.console.log_stream_result("DIGEST", summary)
+            self.console.display_rule("END DIGEST RESPONSE")
         return summary
 
     def _build_digest(self, middle_blocks, phase: str) -> dict:
@@ -2203,7 +2320,7 @@ class SimpleSessionManager(SessionManager):
     def _digest_message(body: str) -> dict:
         header = (
             f"{DIGEST_MARKER}\n"
-            "This replaces turns removed to save context. The plan file remains the source of "
+            "This replaces turns removed to save context. get_plan() remains the source of "
             "truth for what is done and what is left; files mentioned below are on disk and "
             "readable with read_file if you need more than this summary."
         )

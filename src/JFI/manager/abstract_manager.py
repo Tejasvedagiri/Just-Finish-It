@@ -146,6 +146,30 @@ class AbstractManager(ABC):
     def display_tool_result(self, text: str) -> None:
         self.display_system(f"Result: {text}")
 
+    def display_stream(self, text: str) -> None:
+        """Appends `text` to the current live output in place, merging into
+        the same visual block rather than starting a new line/log entry —
+        for showing a response as it's generated (e.g. side-channel LLM
+        calls like _summarize_with_llm's digest, under SHOW_STREAM_PROMPTS)
+        the same way the main turn's own response streams token-by-token.
+        Default fallback for managers with no incremental rendering: whole
+        chunks land as separate display_system lines, which works but won't
+        look "live" — see PromptToolkitConsoleManager's real override."""
+        self.display_system(text)
+
+    def log_stream_result(self, tag: str, text: str) -> None:
+        """Persists `text` to whatever durable log this manager keeps (see
+        PromptToolkitConsoleManager._log's LogEvent table / log_tail)
+        WITHOUT re-rendering it to the live view — for closing out a
+        display_stream(...) burst once it's fully assembled, same as
+        print_agent_response's own live streaming logs the complete
+        response exactly once at the end rather than per chunk. Calling
+        this after a display_stream burst avoids showing the same text
+        twice. Default fallback for managers with no separate durable log
+        (nothing would otherwise record the streamed text at all): show it
+        via display_system."""
+        self.display_system(text)
+
     # ------------------------------------------------------- queued input
 
     def drain_forced_input(self) -> List[str]:

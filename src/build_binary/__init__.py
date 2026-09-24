@@ -85,7 +85,21 @@ def main() -> None:
     ]
     PyInstaller.__main__.run(args)
 
-    print(f"\nBuilt {PROJECT_ROOT / 'dist' / BINARY_NAME}")
+    output_path = PROJECT_ROOT / "dist" / BINARY_NAME
+    if sys.platform == "darwin":
+        # PyInstaller's own re-sign step (see its "Re-signing the EXE" log
+        # line above) leaves arm64 builds with a signature the OS's launch
+        # policy rejects outright -- observed in practice as an instant
+        # SIGKILL (exit 137) on the very first run, before Python even
+        # starts, with no error output at all (`spctl -a -vvv` reports
+        # "rejected"). Apple Silicon requires a VALID signature just to
+        # load a Mach-O binary, ad-hoc is fine -- re-sign here so a fresh
+        # build/copy always runs immediately rather than needing this
+        # tracked down again after every build.
+        import subprocess
+        subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(output_path)], check=True)
+
+    print(f"\nBuilt {output_path}")
 
 
 if __name__ == "__main__":

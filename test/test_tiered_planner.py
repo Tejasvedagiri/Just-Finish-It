@@ -328,6 +328,45 @@ def test_run_phase_planner_stops_early_if_a_stage_never_completes(make_manager):
     assert console.done_phases == []
 
 
+def test_run_phase_planner_resumes_after_the_last_completed_stage(make_manager):
+    # A resumed session whose history already has Architect's and Team
+    # Lead's own stage markers (from a run that was stopped mid-Journeyman)
+    # must pick up at Journeyman, not re-run Architect/Team Lead from
+    # scratch — self._planner_stage is in-memory only, so this has to come
+    # from scanning history the same way get_remaining_phases does.
+    ssm = make_manager("resumed-tiered-planner")
+    ssm.history.extend([
+        {"role": "user", "content": "start"},
+        {"role": "assistant", "content": "ARCHITECT_STAGE_COMPLETE", "tool_calls": None},
+        {"role": "assistant", "content": "TEAM_LEAD_STAGE_COMPLETE", "tool_calls": None},
+    ])
+
+    stages_seen: list[str | None] = []
+    original_set_stage = ssm.set_planner_stage
+
+    def _tracking(stage):
+        stages_seen.append(stage)
+        return original_set_stage(stage)
+
+    ssm.set_planner_stage = _tracking
+
+    console = _RecordingConsole([
+        {"content": "JOURNEYMAN_STAGE_COMPLETE", "tool_calls": None},
+        {"content": "PLANNER_COMPLETE", "tool_calls": None},
+    ])
+
+    result = run_phase(console, {"planner": _FakeLLM()}, ssm, "planner")
+
+    assert result is True
+    assert stages_seen == ["journeyman", "function_breakdown"]
+    assert console.done_phases == ["planner"]
+    # No transition rule for Architect or Team Lead this run — they were
+    # never (re-)entered.
+    assert not any("ARCHITECT" in label for label in console.rule_labels)
+    assert not any("TEAM LEAD" in label for label in console.rule_labels)
+    assert any("FUNCTION BREAKDOWN" in label for label in console.rule_labels)
+
+
 # ---------------------------------------------------------------------------
 # PLANNER_SINGLE_PASS=1 escape hatch
 # ---------------------------------------------------------------------------

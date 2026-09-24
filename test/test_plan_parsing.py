@@ -165,9 +165,13 @@ def test_ensure_plan_file_true_for_existing_tracked_plan(console, manager):
 
 
 def test_ensure_plan_file_false_for_missing_plan(console, manager):
+    """A DB-backed session (the normal case now) never has a plan.md at
+    all -- ensure_plan_file() must say so False silently, not announce a
+    "No plan file found" warning on every planner completion for what is
+    now the universal case."""
     assert not manager.plan_file.exists()
     assert manager.ensure_plan_file() is False
-    assert any("No plan file found" in msg for msg in console.system_messages)
+    assert not console.system_messages
     # Nothing tracked, nothing counted.
     assert manager.metadata["implemented_files"] == []
     assert manager.plan_progress() == (0, 0)

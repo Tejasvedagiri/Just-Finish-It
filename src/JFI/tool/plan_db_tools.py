@@ -5,15 +5,23 @@ for why (the renumbering bug that needed JFI.tool.plan_renumber as a
 bolt-on repair pass, and frontend/src/main.js's own independently-hand-
 rolled regex parser hitting its own bug).
 
-Six tools instead of raw file edits: get_plan (read the tree), add_leaf
-(create a leaf/parent), start_leaf/mark_leaf_done (timing + status on a
+Nine tools instead of raw file edits: get_plan (read the whole tree),
+get_leaf (one leaf's own full, never-truncated detail -- the single-node
+counterpart to get_plan), add_leaf (create a leaf/parent), start_leaf/mark_leaf_done (timing + status on a
 real leaf only -- see Leaf's own docstring on why a parent never carries
 these), split_leaf (turn an existing leaf into a parent with new children,
 the exact operation plan_renumber.py existed to make safe under the old
 dot-string scheme -- here it just needs one INSERT per new child and zero
-renumbering, since sort_key is already gap-numbered), and reorder_leaf
-(move a leaf among its own siblings -- the other half of what
-plan_renumber.py used to do by hand-deriving every descendant's number).
+renumbering, since sort_key is already gap-numbered), reorder_leaf (move a
+leaf among its own siblings -- the other half of what plan_renumber.py
+used to do by hand-deriving every descendant's number), merge_leaf (the
+undo for a single-child split_leaf: folds an only child back into its
+parent, collapsing the pointless nesting split_leaf can't itself avoid
+creating when a leaf turns out to have just one real sub-piece after all),
+and delete_leaf (removes a genuinely wrong/duplicate leaf outright --
+added after a real session hit exactly this gap: no delete/merge tool
+existed, so it fell back to direct SQL against the live WAL-mode DB to fix
+a mis-split rather than a proper, guarded tool call).
 
 What runner.py wires into TOOL_MAP per session, the same way
 make_context_tools/make_load_tool are -- see make_plan_db_tools at the
@@ -395,6 +403,53 @@ def get_plan(engine, session_id: str) -> str:
     return _render_plan(engine, session_id)
 
 
+def get_leaf(engine, session_id: str, leaf_id: int) -> str:
+    """One leaf's own full detail -- description, phase, status, parent,
+    children, timing -- always complete, never truncated (there is no
+    file anywhere for a "fuller" version; this and get_plan() ARE the
+    complete text). The single-node counterpart to get_plan()'s whole-tree
+    view, for focusing on one leaf/node without re-reading everything."""
+    leaves = _load_leaves(engine, session_id)
+    by_id, siblings_by_parent = build_indexes(leaves)
+    leaf = by_id.get(leaf_id)
+    if leaf is None:
+        return f"Error: no leaf with id={leaf_id}."
+
+    number = display_number(leaf, by_id, siblings_by_parent)
+    children = siblings_by_parent.get((leaf.id, leaf.phase), [])
+
+    lines = [f"[id={leaf.id}] {number} {leaf.description}", f"phase: {leaf.phase.value}"]
+    if children:
+        lines.append(f"status: (parent -- {len(children)} children, no status/timing of its own)")
+    else:
+        mark = {"done": "[x] done", "skipped": "[o] skipped"}.get(leaf.status.value, "[ ] todo")
+        lines.append(f"status: {mark}")
+
+    if leaf.parent_id is None:
+        lines.append("parent: none (top-level)")
+    else:
+        parent = by_id.get(leaf.parent_id)
+        if parent is None:
+            lines.append(f"parent: id={leaf.parent_id} (not found -- data integrity issue)")
+        else:
+            parent_number = display_number(parent, by_id, siblings_by_parent)
+            lines.append(f"parent: [id={parent.id}] {parent_number} {parent.description}")
+
+    if children:
+        child_summaries = ", ".join(
+            f"[id={child.id}] {display_number(child, by_id, siblings_by_parent)}" for child in children
+        )
+        lines.append(f"children: {child_summaries}")
+    else:
+        lines.append("children: none (genuine leaf)")
+
+    lines.append(f"started_at: {leaf.started_at or '-'}")
+    lines.append(f"ended_at: {leaf.ended_at or '-'}")
+    lines.append(f"tokens: {leaf.tokens if leaf.tokens is not None else '-'}")
+
+    return "\n".join(lines)
+
+
 def add_leaf(engine, session_id: str, phase: str, description: str, parent_id: int = 0) -> str:
     try:
         phase_enum = Phase(phase)
@@ -510,16 +565,109 @@ def split_leaf(engine, session_id: str, leaf_id: int, into: list[str]) -> str:
     return f"Split leaf id={leaf_id} into {len(into)} children: {new_ids}."
 
 
+def merge_leaf(engine, session_id: str, leaf_id: int) -> str:
+    """The undo for split_leaf when it (or a Journeyman/Function-Breakdown
+    pass) leaves a parent with exactly one child -- pointless nesting per
+    CORE_PLAN_RULES' own "at least 2 children" rule, but with no way to fix
+    it before this existed (observed live: a session correctly identified
+    the single-child parent, correctly ruled out fabricating a fake second
+    child as busywork, and was left stuck rationalizing around a rule it
+    had no tool to satisfy). Folds `leaf_id` (the only child) up into its
+    parent: the parent absorbs the child's description and becomes a real,
+    actionable leaf itself; the child row is removed. One level per call,
+    same as split_leaf is one level -- call again on the result if merging
+    cascades further up."""
+    with get_session(engine) as db:
+        leaf = db.get(Leaf, leaf_id)
+        if leaf is None:
+            return f"Error: no leaf with id={leaf_id}."
+        if leaf.parent_id is None:
+            return f"Error: leaf {leaf_id} is already top-level -- nothing to merge it into."
+
+        parent = db.get(Leaf, leaf.parent_id)
+        if parent is None:
+            return f"Error: leaf {leaf_id}'s parent_id={leaf.parent_id} does not exist (data integrity issue)."
+
+        siblings = list(db.exec(select(Leaf).where(Leaf.parent_id == leaf.parent_id)))
+        if len(siblings) != 1:
+            return (
+                f"Error: parent {parent.id} has {len(siblings)} children, not 1 -- merge_leaf only "
+                f"folds a SINGLE child into its parent (merging one of several would silently orphan "
+                f"the rest). Reduce it to exactly this leaf first, e.g. by merging/deleting the others."
+            )
+
+        has_grandchildren = db.exec(select(Leaf).where(Leaf.parent_id == leaf_id)).first() is not None
+        if has_grandchildren:
+            return (
+                f"Error: leaf {leaf_id} itself has children -- merge_leaf only folds a genuine leaf "
+                "(no children of its own) into its parent, never a whole subtree. Resolve/merge its "
+                "own children first."
+            )
+
+        # Captured as plain values before commit -- ORM attributes on `leaf`/
+        # `parent` become unreadable once this `with` block exits and
+        # expires them (see mark_leaf_done/split_leaf's own returns, which
+        # avoid the same trap by only ever using ids/plain values below).
+        parent_id = parent.id
+        child_description = leaf.description
+
+        parent.description = child_description
+        db.add(parent)
+        db.delete(leaf)
+        # No SessionRecord.current_task update needed: the parent now
+        # carries the exact same description text the leaf had, so a
+        # current_task pointing at the leaf's description already matches
+        # the (now real) parent leaf -- nothing actually changed to fix up.
+        db.commit()
+
+    return f"Merged leaf id={leaf_id} into parent id={parent_id}, which is now a real leaf: {child_description!r}."
+
+
+def delete_leaf(engine, session_id: str, leaf_id: int) -> str:
+    """Removes a genuinely wrong or duplicate leaf outright -- e.g. two
+    byte-identical leaves created by mistake, or one that turned out to
+    describe work that doesn't need doing. Refuses on a parent (has
+    children -- delete/merge those first so nothing gets silently
+    orphaned) or on a leaf already marked DONE (that's a real completed-
+    work record, not a mistake to erase; if it genuinely needs undoing
+    that's a call for a human, not this tool)."""
+    with get_session(engine) as db:
+        leaf = db.get(Leaf, leaf_id)
+        if leaf is None:
+            return f"Error: no leaf with id={leaf_id}."
+        has_children = db.exec(select(Leaf).where(Leaf.parent_id == leaf_id)).first() is not None
+        if has_children:
+            return f"Error: leaf {leaf_id} has children -- delete/merge those first, never delete a parent outright."
+        if leaf.status == LeafStatus.DONE:
+            return f"Error: leaf {leaf_id} is already marked done -- delete_leaf refuses to erase completed work."
+
+        description = leaf.description
+        db.delete(leaf)
+
+        record = db.get(SessionRecord, session_id)
+        if record is not None and record.current_task == description:
+            record.current_task = None
+            record.current_task_started_at = None
+            db.add(record)
+        db.commit()
+
+    return f"Deleted leaf id={leaf_id} ({description!r})."
+
+
 def make_plan_db_tools(engine, session_id: str) -> Dict[str, Callable]:
-    """{"get_plan": ..., "add_leaf": ..., "start_leaf": ..., "mark_leaf_done": ...,
-    "split_leaf": ..., "reorder_leaf": ...} bound to one session's DB engine --
-    what runner.py wires into TOOL_MAP, the same way execute_command/
+    """{"get_plan": ..., "get_leaf": ..., "add_leaf": ..., "start_leaf": ...,
+    "mark_leaf_done": ..., "split_leaf": ..., "reorder_leaf": ...,
+    "merge_leaf": ..., "delete_leaf": ...} bound to one session's DB engine
+    -- what runner.py wires into TOOL_MAP, the same way execute_command/
     context_save are rebound per session in _run_session."""
     return {
         "get_plan": lambda: get_plan(engine, session_id),
+        "get_leaf": lambda leaf_id: get_leaf(engine, session_id, leaf_id),
         "add_leaf": lambda phase, description, parent_id=0: add_leaf(engine, session_id, phase, description, parent_id),
         "start_leaf": lambda leaf_id: start_leaf(engine, session_id, leaf_id),
         "mark_leaf_done": lambda leaf_id, tokens=0: mark_leaf_done(engine, session_id, leaf_id, tokens),
         "split_leaf": lambda leaf_id, into: split_leaf(engine, session_id, leaf_id, into),
         "reorder_leaf": lambda leaf_id, after_leaf_id=0: reorder_leaf(engine, session_id, leaf_id, after_leaf_id),
+        "merge_leaf": lambda leaf_id: merge_leaf(engine, session_id, leaf_id),
+        "delete_leaf": lambda leaf_id: delete_leaf(engine, session_id, leaf_id),
     }

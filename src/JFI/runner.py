@@ -1272,7 +1272,23 @@ def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: Ses
     )
 
     if tiered_planner:
+        # A resumed session may already have completed some prefix of
+        # PLANNER_STAGES in an earlier run of this same (still-open)
+        # "planner" phase -- self._planner_stage is in-memory only (reset
+        # on every fresh process), so nothing else remembers that. Scan
+        # history the same way get_remaining_phases does for the outer
+        # PHASES list, so e.g. Arc+Lead already done means this run starts
+        # at Journeyman instead of re-running Arc from scratch.
+        start_index = 0
+        for i, (_, keyword, _, _) in enumerate(PLANNER_STAGES):
+            if any(m.get("role") == "assistant" and _marker_present(m.get("content") or "", keyword)
+                   for m in ssm.history):
+                start_index = i + 1
+            else:
+                break
         for i, (stage, keyword, label, tag) in enumerate(PLANNER_STAGES):
+            if i < start_index:
+                continue
             ssm.set_planner_stage(stage)
             console.set_status(stage=tag)
             if i > 0:

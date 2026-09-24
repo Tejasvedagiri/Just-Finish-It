@@ -958,6 +958,19 @@ class PromptToolkitConsoleManager(AbstractManager):
             self._line("class:out.system", f" ⚙  {line}")
         self._log("SYSTEM", text)
 
+    def display_stream(self, text: str) -> None:
+        """Real live streaming, same primitive print_agent_response uses for
+        the main turn's own response (`_write` merges into the current
+        block instead of starting a new timestamped line) -- deliberately
+        NOT logged per-chunk (no `_log` call here, unlike display_system):
+        callers stream chunk-by-chunk as they arrive, then log the
+        complete text once via a separate display_system/display_rule call
+        once it's fully assembled (see _summarize_with_llm)."""
+        self._write("class:out.assistant", text)
+
+    def log_stream_result(self, tag: str, text: str) -> None:
+        self._log(tag, text)
+
     def display_error(self, text: str) -> None:
         self._line("class:out.error", f" ✗  {text}")
         self._log("ERROR", text)
