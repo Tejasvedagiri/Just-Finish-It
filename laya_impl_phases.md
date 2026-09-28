@@ -31,16 +31,18 @@ should:
 
 ## Progress
 
-**Current phase:** phase 2 (runbook + design tables and tools), on `feature/v2`.
-**Next step:** `runbook_set` / `runbook_get(name=None)`, `design_set` /
-`design_get(kind=None, key=None)` with size-capped results, and the one-line
-index renderer briefs will carry. Not wired into v1 prompts.
+**Current phase:** phase 3 (the episode engine), on `feature/v2`.
+**Next step:** `src/JFI/episode/`: the brief (a never-trimmed scope anchor +
+role prompt + node + runbook/design index lines), per-role core tool sets,
+the token budget (server usage first), the turn cap, the `finish` tool,
+`Episode` rows and history rows tagged with `episode_id`, directive delivery,
+and per-role model prefixes. See the phase 3 section below.
 
 | Phase | Status | Branch / PR | Notes |
 |---|---|---|---|
 | 0 Groundwork | **done** | `feature/v2` | re-plan bug (planning rounds), server token usage, DB-era wording |
 | 1 Database schema | **done** | `feature/v2` | §13: new columns + 6 tables, portable column upgrade, export-db |
-| 2 Runbook + design | not started | | |
+| 2 Runbook + design | **done** | `feature/v2` | tools + index lines + result cap; schemas kept out of v1's tool list |
 | 3 Episode engine | not started | | |
 | 4 Code tools | not started | | |
 | 5 Planner v2 (fallback judge) | not started | | |
@@ -57,6 +59,18 @@ Status values: `not started` / `in progress` / `in review` / `done`.
 ### Progress log
 
 Newest first. One entry per working session.
+
+- **2026-09-29 (cont.):** **Phase 2 done.**
+  - `tool/runbook_tools.py` and `tool/design_tools.py`: set/get (upsert;
+    a changed command resets `verified`), one-line index renderers for
+    briefs, and `Error…` refusals.
+  - `tool/result_cap.py`: the shared `TOOL_RESULT_MAX_TOKENS` cap with a
+    "read more" hint, reused by phase 4's read tools.
+  - Their schemas live beside the tools (`RUNBOOK_TOOL_SCHEMAS`,
+    `DESIGN_TOOL_SCHEMAS`), **not** in `schemas.py`, so v1's
+    deferred-tool list and prompts are unchanged.
+  - **Tests:** `test/test_runbook_design_tools.py` (11). Suite = Windows
+    baseline, 952 passed.
 
 - **2026-09-29 (cont.):** **Phase 1 done** (schema, no behaviour change):
   - **Columns:** `Leaf` gets the v2 fields, `SessionRecord.pipeline_version`
