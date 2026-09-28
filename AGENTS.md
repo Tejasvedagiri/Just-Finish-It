@@ -5,6 +5,23 @@ changes in this repo. This is about *how* to work here — see `README.md`
 for what JFI is and how to run it (but see "Docs that have drifted" below
 before trusting README's file/path details).
 
+## Read first: how the pipeline works
+
+Before you change `runner.py`, any phase prompt, or the plan tools, read
+[`docs/pipeline.md`](docs/pipeline.md) (call chain, turn loop, resume,
+iterations, known gaps). Then read the doc for the phase you're touching:
+
+- [`docs/phase-planner.md`](docs/phase-planner.md) (Arc → Lead → Dev → Task Planner)
+- [`docs/phase-product-owner.md`](docs/phase-product-owner.md)
+- [`docs/phase-imp.md`](docs/phase-imp.md)
+- [`docs/phase-testing.md`](docs/phase-testing.md)
+- [`docs/phase-reviewer.md`](docs/phase-reviewer.md)
+- [`docs/phase-cleanup.md`](docs/phase-cleanup.md)
+- [`docs/plan-tree.md`](docs/plan-tree.md) (the `Leaf` model and plan tools)
+
+If you change behavior those docs describe, update them in the same
+change. If a doc disagrees with the code, the code wins; fix the doc.
+
 ## Repo shape
 
 This repo is the Python agent (`src/JFI/`, `uv`-managed,
