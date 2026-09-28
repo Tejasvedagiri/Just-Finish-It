@@ -31,15 +31,15 @@ should:
 
 ## Progress
 
-**Current phase:** phase 1 (database schema), on branch `feature/v2`.
-**Next step:** implement laya_plan.md §13 (new `Leaf` / `SessionRecord` /
-`HistoryMessage` columns, the six new tables, `_ensure_columns` for
-MySQL/Postgres too, `export-db`), with no behaviour change.
+**Current phase:** phase 2 (runbook + design tables and tools), on `feature/v2`.
+**Next step:** `runbook_set` / `runbook_get(name=None)`, `design_set` /
+`design_get(kind=None, key=None)` with size-capped results, and the one-line
+index renderer briefs will carry. Not wired into v1 prompts.
 
 | Phase | Status | Branch / PR | Notes |
 |---|---|---|---|
 | 0 Groundwork | **done** | `feature/v2` | re-plan bug (planning rounds), server token usage, DB-era wording |
-| 1 Database schema | not started | | |
+| 1 Database schema | **done** | `feature/v2` | §13: new columns + 6 tables, portable column upgrade, export-db |
 | 2 Runbook + design | not started | | |
 | 3 Episode engine | not started | | |
 | 4 Code tools | not started | | |
@@ -57,6 +57,23 @@ Status values: `not started` / `in progress` / `in review` / `done`.
 ### Progress log
 
 Newest first. One entry per working session.
+
+- **2026-09-29 (cont.):** **Phase 1 done** (schema, no behaviour change):
+  - **Columns:** `Leaf` gets the v2 fields, `SessionRecord.pipeline_version`
+    (default `v1`), `HistoryMessage.episode_id`.
+  - **Tables:** `JFI.models.v2` has `Episode`, `PlannerVerdict`, `PlanEvent`,
+    `RunbookEntry`, `DesignEntry` and `Directive`.
+  - **Column upgrade:** `_ensure_columns` now works on every backend
+    (SQLAlchemy inspector + portable ADD COLUMN); it used to be SQLite-only,
+    so MySQL/Postgres never got new columns. The columns live in one
+    `ADDED_COLUMNS` map.
+  - **export-db:** shows the pipeline version, the v2 fields on plan lines,
+    and runbook / design / episodes / verdicts / events / directives
+    sections.
+  - **Tests:** `test/test_v2_schema.py` (fresh DB, a real old-schema SQLite
+    DB upgraded in place with its rows intact, idempotence, the
+    Postgres/MySQL statements, uniqueness, export). Suite = Windows
+    baseline (940 passed); `uv run build` OK.
 
 - **2026-09-29:** Started implementing, on branch `feature/v2` (off
   `feature/laya`). **Phase 0 done:**

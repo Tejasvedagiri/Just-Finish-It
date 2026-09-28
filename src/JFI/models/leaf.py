@@ -22,6 +22,7 @@ children").
 from datetime import datetime
 from typing import Optional
 
+from sqlalchemy import JSON, Column
 from sqlmodel import Field, SQLModel
 
 from JFI.models._util import utcnow
@@ -69,6 +70,39 @@ class Leaf(SQLModel, table=True):
     # to its description in between -- see review_leaf's own circuit-
     # breaker check. Reset to 0 on approval or on any description change.
     rejection_count: int = Field(default=0)
+    # (v2 reuses review_status for the reviewer's per-leaf verdict,
+    # "passed"/"failed"; the v1 values above stay readable -- laya_plan.md §13.)
+
+    # --- v2 planner (laya_plan.md §6, §13) -- unused by v1 sessions ---------
+    # Which role created the node: "architect" / "lead" / "task". Decides who
+    # breaks it down (next layer) and who redoes it (the same role).
+    level: Optional[str] = Field(default=None, index=True)
+    # component: "component"/"project"; file: "code"/"artifact"/"section";
+    # leaf: "implement"/"modify"/"delete"/"fill"/"passage".
+    kind: Optional[str] = None
+    # The planning status Laya (or its fallback) sets: NULL = unjudged,
+    # "GOOD" / "BREAKDOWN" / "REDO". Separate from `status` (Dev's progress).
+    plan_status: Optional[str] = Field(default=None, index=True)
+    redo_count: int = Field(default=0)
+    # Last judge reason: "operational" / "vague" / "duplicate" / "design" / "too_big".
+    redo_reason: Optional[str] = None
+    escalation_count: int = Field(default=0)
+    # True while an escalation has sent this node's parent back for a redo:
+    # nothing under it is judged, broken down or implemented meanwhile.
+    paused: bool = Field(default=False)
+    # Observable finish condition; on implement/modify leaves it's the unit test case.
+    done_when: Optional[str] = None
+    # Files the node creates or changes, plus its test file.
+    files: Optional[list[str]] = Field(default=None, sa_column=Column(JSON))
+    # Leaf ids that must be done first (validated acyclic on write).
+    depends_on: Optional[list[int]] = Field(default=None, sa_column=Column(JSON))
+    # Optional tools Laya picked for this node's episodes (G1.3); only adds.
+    tools: Optional[list[str]] = Field(default=None, sa_column=Column(JSON))
+    # Dev episodes started on this leaf (restart cap, G13).
+    attempt_count: int = Field(default=0)
+    # The reviewer's failure text when a done leaf is re-opened (G8).
+    fix_note: Optional[str] = None
+    reopened_count: int = Field(default=0)
 
     created_at: datetime = Field(default_factory=utcnow)
 

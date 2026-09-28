@@ -40,6 +40,9 @@ class SessionRecord(SQLModel, table=True):
     state: Optional[str] = None  # "streaming"/"thinking"/"running tools"/"idle · queue empty"/...
 
     iteration: int = 1
+    # "v1" = the original pipeline, "v2" = laya_plan.md's. Sessions created
+    # before v2 existed read as v1 and keep the old code path (G16a).
+    pipeline_version: str = "v1"
     queue_size: int = 0
     is_paused: bool = False
 

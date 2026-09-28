@@ -20,6 +20,9 @@ section for the full design and open decisions):
     review.md / NotesForReviewer.md /
       feedback_to_plan.md                -> SessionNote (one row per kind)
 
+v2 pipeline tables (laya_plan.md §13.2), in JFI.models.v2: Episode,
+PlannerVerdict, PlanEvent, RunbookEntry, DesignEntry, Directive.
+
 Public surface: every table, their enums (Phase, LeafStatus), and the
 engine/session factory (get_engine, get_session, database_url) that reads
 DB_BACKEND/DATABASE_URL from env.
@@ -39,19 +42,26 @@ from JFI.models.queue import QueuedItem
 from JFI.models.session import SessionRecord
 from JFI.models.session_note import SessionNote
 from JFI.models.tools import UnlockedTool
+from JFI.models.v2 import DesignEntry, Directive, Episode, PlanEvent, PlannerVerdict, RunbookEntry
 
 __all__ = [
     "ActivityEvent",
     "BackgroundProcess",
     "ContextEntry",
+    "DesignEntry",
+    "Directive",
     "DonePhase",
+    "Episode",
     "HistoryMessage",
     "ImplementedFile",
     "Leaf",
     "LeafStatus",
     "LogEvent",
     "Phase",
+    "PlanEvent",
+    "PlannerVerdict",
     "QueuedItem",
+    "RunbookEntry",
     "SessionRecord",
     "SessionNote",
     "UnlockedTool",

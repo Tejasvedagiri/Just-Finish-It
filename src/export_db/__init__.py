@@ -51,10 +51,16 @@ def _render_plan_export(session_id: str, engine) -> str:
     from JFI.models import (
         BackgroundProcess,
         ContextEntry,
+        DesignEntry,
+        Directive,
         DonePhase,
+        Episode,
         ImplementedFile,
         Leaf,
+        PlanEvent,
+        PlannerVerdict,
         QueuedItem,
+        RunbookEntry,
         SessionNote,
         SessionRecord,
         UnlockedTool,
@@ -80,6 +86,14 @@ def _render_plan_export(session_id: str, engine) -> str:
             note.kind: note.text
             for note in db.exec(select(SessionNote).where(SessionNote.session_id == session_id))
         }
+        # v2 pipeline tables (laya_plan.md §13.2) -- empty for v1 sessions.
+        runbook = list(db.exec(select(RunbookEntry).where(RunbookEntry.session_id == session_id)))
+        design = list(db.exec(select(DesignEntry).where(DesignEntry.session_id == session_id)))
+        episodes = list(db.exec(select(Episode).where(Episode.session_id == session_id).order_by(Episode.id)))
+        verdicts = list(db.exec(
+            select(PlannerVerdict).where(PlannerVerdict.session_id == session_id).order_by(PlannerVerdict.id)))
+        events = list(db.exec(select(PlanEvent).where(PlanEvent.session_id == session_id).order_by(PlanEvent.id)))
+        directives = list(db.exec(select(Directive).where(Directive.session_id == session_id)))
 
     lines = [
         f"# {session_id} — DB export ({datetime.now(timezone.utc).isoformat(timespec='seconds')})",
@@ -98,6 +112,7 @@ def _render_plan_export(session_id: str, engine) -> str:
             f"- phase: {record.phase.value if record.phase else '—'}"
             f" / stage: {record.stage or '—'} / state: {record.state or '—'}",
             f"- iteration: {record.iteration}, queue_size: {record.queue_size}, paused: {record.is_paused}",
+            f"- pipeline: {record.pipeline_version}",
         ]
         if record.tokens_used is not None:
             lines.append(f"- tokens: {record.tokens_used}/{record.tokens_budget}")
@@ -125,15 +140,23 @@ def _render_plan_export(session_id: str, engine) -> str:
             children = siblings_by_parent.get((leaf.id, phase), [])
             number = display_number(leaf, by_id, siblings_by_parent)
             indent = "  " * depth
+            v2 = ""
+            if leaf.level:
+                bits = [leaf.level, leaf.kind, leaf.plan_status or "unjudged"]
+                if leaf.done_when:
+                    bits.append(f"done when: {leaf.done_when}")
+                if leaf.depends_on:
+                    bits.append(f"depends on {leaf.depends_on}")
+                v2 = " · " + " · ".join(b for b in bits if b)
             if children:
-                lines.append(f"{indent}- {number}. {leaf.description}")
+                lines.append(f"{indent}- {number}. {leaf.description}{v2}")
             else:
                 mark = {"done": "x", "skipped": "○"}.get(leaf.status.value, " ")
                 timing = ""
                 if leaf.started_at and leaf.ended_at:
                     seconds = (leaf.ended_at - leaf.started_at).total_seconds()
                     timing = f" ({seconds:.0f}s)"
-                lines.append(f"{indent}- [{mark}] {number} {leaf.description}{timing}")
+                lines.append(f"{indent}- [{mark}] {number} {leaf.description}{timing}{v2}")
             render_subtree(leaf.id, phase, depth + 1)
 
     phases_in_order = []
@@ -196,6 +219,40 @@ def _render_plan_export(session_id: str, engine) -> str:
     if not background_processes:
         lines.append("_none_")
     lines.append("")
+
+    if runbook:
+        lines.append("## Runbook")
+        for r in runbook:
+            mark = "verified" if r.verified else "unverified"
+            lines.append(f"- **{r.name}** ({mark}): `{r.command}`" + (f" — {r.notes}" if r.notes else ""))
+        lines.append("")
+    if design:
+        lines.append("## Design")
+        for d in sorted(design, key=lambda d: (d.kind, d.key)):
+            lines.append(f"- {d.kind} / **{d.key}**: {d.text}")
+        lines.append("")
+    if episodes:
+        lines.append(f"## Episodes ({len(episodes)})")
+        for e in episodes:
+            lines.append(f"- #{e.id} {e.role}/{e.mode} node {e.node_id}: {e.turns} turns, {e.tokens} tokens, "
+                         f"ended: {e.end_reason or 'running'}")
+        lines.append("")
+    if verdicts:
+        lines.append(f"## Planner verdicts ({len(verdicts)})")
+        for v in verdicts:
+            conf = f"{v.answer_confidence:.2f}" if v.answer_confidence is not None else "—"
+            lines.append(f"- node {v.node_id} ({v.level}): laya {v.laya_verdict or '—'} @ {conf}, "
+                         f"fallback {v.fallback} -> **{v.final_status}**")
+        lines.append("")
+    if events:
+        lines.append(f"## Plan events ({len(events)})")
+        lines += [f"- {e.type} node {e.node_id}: {e.detail}" for e in events]
+        lines.append("")
+    if directives:
+        lines.append("## Directives")
+        lines += [f"- node {d.node_id}: {d.text} ({'delivered' if d.consumed_episode_id else 'pending'})"
+                  for d in directives]
+        lines.append("")
 
     return "\n".join(lines) + "\n"
 

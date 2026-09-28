@@ -44,6 +44,9 @@ from JFI.models.queue import QueuedItem  # noqa: F401
 from JFI.models.session import SessionRecord  # noqa: F401
 from JFI.models.session_note import SessionNote  # noqa: F401
 from JFI.models.tools import UnlockedTool  # noqa: F401
+from JFI.models.v2 import (  # noqa: F401
+    DesignEntry, Directive, Episode, PlanEvent, PlannerVerdict, RunbookEntry,
+)
 
 
 def database_url(project_root: Path) -> str:
@@ -92,33 +95,74 @@ def get_engine(project_root: Path):
             conn.exec_driver_sql("PRAGMA journal_mode=WAL")
             conn.exec_driver_sql("PRAGMA busy_timeout=5000")
     SQLModel.metadata.create_all(engine)
-    _ensure_columns(engine, "leaf", {
-        "review_status": "TEXT",
-        "review_note": "TEXT",
-        "rejection_count": "INTEGER DEFAULT 0",
-    })
+    for table, columns in ADDED_COLUMNS.items():
+        _ensure_columns(engine, table, columns)
     return engine
 
 
+#: Columns added to tables that older project DBs already have. create_all()
+#: never alters an existing table, so each one is added here as well (see
+#: AGENTS.md). Every clause is nullable or has a default, so a plain ADD
+#: COLUMN works on SQLite, MySQL and Postgres alike. Old rows read back
+#: unchanged.
+ADDED_COLUMNS = {
+    "leaf": {
+        # Program Manager's per-leaf review (v1)
+        "review_status": "TEXT",
+        "review_note": "TEXT",
+        "rejection_count": "INTEGER DEFAULT 0",
+        # v2 planner (laya_plan.md §13.1)
+        "level": "TEXT",
+        "kind": "TEXT",
+        "plan_status": "TEXT",
+        "redo_count": "INTEGER DEFAULT 0",
+        "redo_reason": "TEXT",
+        "escalation_count": "INTEGER DEFAULT 0",
+        "paused": "BOOLEAN DEFAULT FALSE",
+        "done_when": "TEXT",
+        "files": "JSON",
+        "depends_on": "JSON",
+        "tools": "JSON",
+        "attempt_count": "INTEGER DEFAULT 0",
+        "fix_note": "TEXT",
+        "reopened_count": "INTEGER DEFAULT 0",
+    },
+    "sessionrecord": {
+        "pipeline_version": "VARCHAR(8) DEFAULT 'v1'",
+    },
+    "historymessage": {
+        "episode_id": "INTEGER",
+    },
+}
+
+
 def _ensure_columns(engine, table: str, columns: dict) -> None:
-    """Adds any of `columns` (name -> SQLite type/default clause) missing
-    from an already-existing table -- create_all() above only ever creates
-    NEW tables, it never alters one that's already there, so a schema
-    change to an existing table (e.g. Leaf gaining review_status/
-    review_note/rejection_count for Program Manager's per-ticket review)
-    needs this idempotent ALTER TABLE bootstrap to reach a session DB that
-    predates the change, the same "cheap and idempotent to reassert every
-    time" tradeoff already made for the WAL pragma above. SQLite-only
-    (ALTER TABLE ADD COLUMN syntax differs elsewhere) -- mysql/postgres
-    backends need a real migration tool if this ever needs to reach them,
-    not covered here."""
-    if not engine.url.get_backend_name().startswith("sqlite"):
+    """Adds any of `columns` (name -> type/default clause) missing from an
+    already-existing table -- create_all() above only ever creates NEW
+    tables, it never alters one that's already there, so a schema change to
+    an existing table needs this idempotent ALTER TABLE bootstrap to reach a
+    project DB that predates it (the same "cheap and idempotent to reassert
+    every time" tradeoff as the WAL pragma above).
+
+    Works on every DB_BACKEND: existing columns come from SQLAlchemy's
+    inspector rather than SQLite's PRAGMA, and `ALTER TABLE t ADD COLUMN c
+    <clause>` is the same statement on SQLite, MySQL and Postgres for the
+    nullable / defaulted columns used here. It used to return early on
+    anything but SQLite, so a MySQL/Postgres project with an existing DB
+    silently never got new columns."""
+    from sqlalchemy import inspect
+
+    inspector = inspect(engine)
+    if not inspector.has_table(table):
         return
+    existing = {col["name"] for col in inspector.get_columns(table)}
+    missing = [(name, clause) for name, clause in columns.items() if name not in existing]
+    if not missing:
+        return
+    quote = engine.dialect.identifier_preparer.quote
     with engine.connect() as conn:
-        existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
-        for name, clause in columns.items():
-            if name not in existing:
-                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {clause}")
+        for name, clause in missing:
+            conn.exec_driver_sql(f"ALTER TABLE {quote(table)} ADD COLUMN {quote(name)} {clause}")
         conn.commit()
 
 

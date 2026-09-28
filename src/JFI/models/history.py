@@ -42,5 +42,8 @@ class HistoryMessage(SQLModel, table=True):
     # looking up the matching tool_calls entry in an earlier row, which
     # would be fragile if history ever gets edited or partially loaded.
     name: Optional[str] = None
+    # v2: the Episode this message belongs to. An episode's conversation is
+    # rebuilt from exactly its own rows (laya_plan.md §13). NULL for v1.
+    episode_id: Optional[int] = Field(default=None, index=True)
 
     created_at: datetime = Field(default_factory=utcnow, index=True)
