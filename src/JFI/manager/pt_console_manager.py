@@ -1095,8 +1095,9 @@ class PromptToolkitConsoleManager(AbstractManager):
         this request's messages (plus tool schemas) cost — used for the
         read/written header counters only when the server never reports real
         ``usage`` (most OpenAI-compatible servers omit it in streaming mode
-        unless ``stream_options.include_usage`` was requested, which isn't
-        universally supported, so we don't require it).
+        unless ``stream_options.include_usage`` was requested -- which
+        OpenAICompatableStream now does, falling back to no request on
+        servers that reject the option).
 
         Raises :class:`ResponseTooLongError` if the running char/4 estimate
         of what's streamed so far crosses ``STREAM_OUTPUT_CAP`` (default
@@ -1113,6 +1114,7 @@ class PromptToolkitConsoleManager(AbstractManager):
         reasoning_started = False
         tool_calls_dict: Dict[int, Dict[str, Any]] = {}
         usage_seen = False
+        reported_usage = None
         streamed_chars = 0
         reasoning_chars = 0
         cap = self._stream_output_cap()
@@ -1128,6 +1130,8 @@ class PromptToolkitConsoleManager(AbstractManager):
             usage = getattr(chunk, "usage", None)
             if usage is not None:
                 usage_seen = True
+                reported_usage = {"prompt_tokens": usage.prompt_tokens or 0,
+                                  "completion_tokens": usage.completion_tokens or 0}
                 with self._lock:
                     self._tokens_read += usage.prompt_tokens or 0
                     self._tokens_written += usage.completion_tokens or 0
@@ -1259,6 +1263,11 @@ class PromptToolkitConsoleManager(AbstractManager):
             # reasoning near-verbatim turn after turn. Surfacing this lets
             # runner.py give a pointed nudge instead of the generic one.
             "had_reasoning": reasoning_started,
+            # The server's own token counts for this request when it sent them
+            # (OpenAICompatableStream asks via stream_options.include_usage);
+            # None when it didn't. The v2 episode budget prefers these over
+            # the chars/4 estimate, which can be 20-30% off on code.
+            "usage": reported_usage,
         }
 
     # ------------------------------------------------------- queue & status

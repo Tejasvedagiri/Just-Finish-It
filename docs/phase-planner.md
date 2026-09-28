@@ -148,33 +148,19 @@ There are no per-stage model overrides.
 
 ## Known gaps
 
-**1. Re-planning is a no-op in tiered mode.** This is the important one.
+**1. (Fixed) Re-planning used to be a no-op in tiered mode.** Every later
+planner run found round one's `ARCHITECT_STAGE_COMPLETE` and `*_NODE_<id>`
+markers in history and skipped every stage (0 LLM calls), so Program
+Manager rework, failed reviews and queued follow-ups were never planned.
+Stage markers are now scoped to a **planning round**:
+- `run_phase` appends a synthetic `PLANNER_ROUND_START` when the previous
+  round already finished (`PLANNER_COMPLETE` after its start);
+- it only looks for stage markers after the latest round start
+  (`_planning_round_start`);
+- an interrupted round resumes instead of restarting;
+- pre-fix sessions behave as before.
 
-Every later planner run happens in the same session history, so it finds
-`ARCHITECT_STAGE_COMPLETE` and every `*_NODE_<id>` marker already there. It
-skips every stage without an LLM call, and `PLANNER_COMPLETE` is already
-present. Confirmed with a throwaway test against a real SQLite session: the
-first run took 7 LLM turns, the second took **0**.
-
-Consequences:
-
-- **Program Manager rework:** feedback and the "update the plan" trigger
-  are added to history, but no planner turn acts on them. Program Manager
-  re-reviews the unchanged plan. Its rejected leaves can't be rejected
-  again (circuit breaker), so it either approves them as-is or sends
-  feedback again until `MAX_PRODUCT_OWNER_ITERATIONS` stops the run.
-- **Failed review / queued follow-ups:** no new leaves get planned. `imp`
-  and `testing` then run with nothing pending, and the reviewer judges the
-  same work again.
-- **Arc's "extend an existing plan" rule never runs,** because Arc is
-  skipped. New work also can't get a new top-level branch.
-
-Any fix needs markers (or some other record) scoped to the *planning
-round*, not the session. Arc should re-run, or a dedicated "rework" stage
-should run, whenever the planner is re-entered with feedback.
-`PLANNER_SINGLE_PASS=1` doesn't have this bug. Its loop always runs and
-stops only when *new* content says `PLANNER_COMPLETE`, as every other phase
-does.
+Pinned by the "Planning rounds" tests in `test/test_tiered_planner.py`.
 
 **2. The planner prompts don't mention `update_leaf`.** Program Manager's
 rework loop expects `update_leaf` (it clears the circuit breaker), but
@@ -184,7 +170,8 @@ rework loop expects `update_leaf` (it clears the circuit breaker), but
 **3. Walk order ignores `reorder_leaf`.** `top_level_leaf_ids` sorts by
 `created_at`, not `sort_key`.
 
-**4. Feedback wording is from the markdown era.**
-`product_owner_feedback_outcome` / `review_outcome` ask for "new '- [ ]'
-items (continuing the existing numbering)" when the planner should be
-calling `add_leaf` / `update_leaf`.
+**4. (Fixed) Feedback wording was from the markdown era.**
+`product_owner_feedback_outcome`, `review_outcome`, the iteration message,
+`_stuck_task_directive` and the AUTO-RECTIFY give-up message now point at
+`add_leaf` / `update_leaf` / `split_leaf` / `add_reviewer_note`, not
+"`- [ ]` items in the plan file".

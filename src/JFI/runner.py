@@ -237,8 +237,8 @@ def _repair_directive(func_name: str, args: Dict[str, Any], result: str, attempt
         return (
             f"AUTO-RECTIFY: this identical {func_name} call has now failed {attempt} times. "
             "Stop repeating it. Either solve the step a different way, or if it genuinely "
-            "cannot be done, leave its checkbox unticked, note the blocker in the plan file, "
-            "and move on to the next unchecked item."
+            "cannot be done, leave the leaf not done, record the blocker with add_reviewer_note, "
+            "and move on to the next pending leaf."
         )
 
     lowered = str(result).lower()
@@ -603,9 +603,10 @@ def product_owner_feedback_outcome(engine, session_id: str) -> Optional[str]:
         f"PRODUCT OWNER FEEDBACK: the plan was reviewed against the real repo state before "
         f"implementation and found wanting. Its feedback:\n\n"
         f"{report}\n\n"
-        f"Update the plan with new '- [ ]' items (continuing the existing numbering), or adjust "
-        f"existing un-ticked items, to address every point raised above — nothing is ticked yet "
-        f"at this stage, so there is no '- [x]' line to preserve a distinction against."
+        f"Update the plan to address every point raised above: add_leaf for missing work, "
+        f"update_leaf to fix a leaf in place (it keeps its id and clears its rejection), "
+        f"split_leaf for a leaf that is really several pieces. Nothing is done yet at this "
+        f"stage, so every leaf may still change."
     )
 
 
@@ -625,9 +626,9 @@ def review_outcome(engine, session_id: str) -> Optional[str]:
     return (
         f"REVIEW FAILED: the reviewer found issues in the finished work. Its report:\n\n"
         f"{report}\n\n"
-        f"Update the plan with new '- [ ]' items (continuing the existing numbering) to fix "
-        f"every issue listed above — do NOT touch any already-ticked '- [x]' lines. Then "
-        f"implement and test those fixes."
+        f"Update the plan to fix every issue listed above: add_leaf one new leaf per issue "
+        f"(get_plan() numbers them for you). Never change or delete a leaf that is already "
+        f"done. Then implement and test those fixes."
     )
 
 
@@ -975,12 +976,11 @@ def _stuck_task_directive(task_title: str, elapsed_seconds: float, tokens_spent:
         f"That is a strong sign this leaf was never actually small enough — it hid more work "
         f"than one focused step (a diagnose-then-fix, several distinct checks bundled together, "
         f"a fix plus its own verification, ...). Stop whatever you were about to do next and "
-        f"instead, right now: edit the plan file to turn this ONE leaf into a parent with 2 or "
-        f"more numbered sub-leaves — e.g. a leaf numbered 3.1 becomes parent '- 3.1 <original "
-        f"description>' with children '- [ ] 3.1.1 ...', '- [ ] 3.1.2 ...', '- [ ] 3.1.3 ...' and "
-        f"so on (same nesting rule as everywhere else in this plan), each one small enough to "
-        f"finish and verify in a single focused step. The split itself is the required action "
-        f"this turn, before any further tool calls toward actually finishing the work."
+        f"instead, right now: call split_leaf on this ONE leaf with 2 or more child "
+        f"descriptions, each small enough to finish and verify in a single focused step. "
+        f"get_plan() then numbers them for you -- e.g. a leaf numbered 3.1 becomes a parent with "
+        f"children 3.1.1, 3.1.2, 3.1.3 and so on. The split itself is the required action this "
+        f"turn, before any further tool calls toward actually finishing the work."
     )
 
 
@@ -1018,6 +1018,31 @@ PLANNER_NODE_STAGES = [
 #: keeps working unchanged even though no single turn ever says this
 #: phrase anymore.
 PLANNER_PHASE_COMPLETE_MARKER = "PLANNER_COMPLETE"
+
+#: Synthetic marker opening a new planning round. Stage markers are only
+#: looked up after the latest one: observed before this existed, a second
+#: tiered-planner run (Program Manager feedback, a failed review, a queued
+#: request) found round one's ARCHITECT/…_NODE_<id> markers still in history
+#: and skipped every stage -- zero LLM calls, so the feedback was never acted
+#: on (docs/phase-planner.md, Known gaps).
+PLANNER_ROUND_START_MARKER = "PLANNER_ROUND_START"
+
+
+def _planning_round_start(history: List[Dict[str, Any]]) -> Optional[int]:
+    """Index in `history` where the current planning round's markers begin,
+    or None if a new round has to be opened first.
+
+    A round is finished once PLANNER_COMPLETE follows its start. Sessions
+    from before round markers existed have none: a finished plan there means
+    "open a new round", an unfinished one resumes from the beginning, exactly
+    as before."""
+    def is_marker(m, keyword):
+        return m.get("role") == "assistant" and _marker_present(m.get("content") or "", keyword)
+
+    starts = [i for i, m in enumerate(history) if is_marker(m, PLANNER_ROUND_START_MARKER)]
+    start = starts[-1] if starts else 0
+    finished = any(is_marker(m, PLANNER_PHASE_COMPLETE_MARKER) for m in history[start:])
+    return None if finished else start
 
 
 def _node_scoped_marker(base_keyword: str, node_id: int) -> str:
@@ -1303,10 +1328,15 @@ def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: Ses
     )
 
     if tiered_planner:
+        round_start = _planning_round_start(ssm.history)
+        if round_start is None:
+            round_start = len(ssm.history)
+            ssm.append_raw({"role": "assistant", "content": PLANNER_ROUND_START_MARKER})
+
         def _marker_already_in_history(keyword: str) -> bool:
             return any(
                 m.get("role") == "assistant" and _marker_present(m.get("content") or "", keyword)
-                for m in ssm.history
+                for m in ssm.history[round_start:]
             )
 
         # Architect: one pass, whole tree, unscoped -- same bare-marker
@@ -1517,8 +1547,8 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
                 "user",
                 f"USER FEEDBACK FOR ITERATION:\n{feedback}\n\n"
                 f"{ssm.get_project_state_summary()}\n\n"
-                f"The plan file is {ssm.plan_path}. Keep its completed '- [x]' items, add new "
-                f"'- [ ]' items for this request, then implement and test them."
+                f"Call get_plan(), leave every done leaf as it is, add_leaf new leaves for this "
+                f"request, then implement and test them."
             )
             # Fresh pass: the header rewinds to planner and counts the loop.
             iteration += 1

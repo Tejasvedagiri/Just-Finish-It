@@ -31,13 +31,14 @@ should:
 
 ## Progress
 
-**Current phase:** phase 8's standalone judge module is done early (see log); phases 0–7 not started.
-**Next step:** commit the judge module; then start **phase 0** on a new
-branch off `main`. Phase 5 wires `LayaJudge` into the planner loop.
+**Current phase:** phase 1 (database schema), on branch `feature/v2`.
+**Next step:** implement laya_plan.md §13 (new `Leaf` / `SessionRecord` /
+`HistoryMessage` columns, the six new tables, `_ensure_columns` for
+MySQL/Postgres too, `export-db`), with no behaviour change.
 
 | Phase | Status | Branch / PR | Notes |
 |---|---|---|---|
-| 0 Groundwork | not started | | |
+| 0 Groundwork | **done** | `feature/v2` | re-plan bug (planning rounds), server token usage, DB-era wording |
 | 1 Database schema | not started | | |
 | 2 Runbook + design | not started | | |
 | 3 Episode engine | not started | | |
@@ -56,6 +57,23 @@ Status values: `not started` / `in progress` / `in review` / `done`.
 ### Progress log
 
 Newest first. One entry per working session.
+
+- **2026-09-29:** Started implementing, on branch `feature/v2` (off
+  `feature/laya`). **Phase 0 done:**
+  - **Re-plan bug fixed:** stage markers are scoped to a planning round
+    (`PLANNER_ROUND_START`, `_planning_round_start`); interrupted rounds
+    resume, and pre-fix sessions behave as before (3 new tests in
+    `test_tiered_planner.py`).
+  - **Real token counts:** `OpenAICompatableStream` requests
+    `stream_options.include_usage` and permanently drops it after a
+    server's 400 about it. The console returns the server's `usage` on
+    the parsed turn (`test_openai_stream_usage.py`).
+  - **DB-era wording:** the feedback, iteration, stuck-leaf and
+    AUTO-RECTIFY messages now name the plan tools.
+  - **Checks:** suite = Windows baseline (6 known failures, 933 passed);
+    ruff clean apart from pre-existing noise.
+  - `laya-finetuning` data work (LM Studio rewrite of goals/nodes) is
+    separate and still pending on `feature/laya`'s data.
 
 - **2026-09-28 (night):** Fine-tuned the Laya judge; **target met.**
   - **Held-out 101-node test:** base `english` 44% → **full fine-tune 90%

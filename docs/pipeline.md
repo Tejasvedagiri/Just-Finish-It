@@ -155,17 +155,13 @@ approval.
 
 ## Known gaps (verify before relying on these)
 
-- **Re-planning doesn't run under the tiered planner.** This affects
-  Program Manager rework, failed-review iterations, and queued follow-ups.
-  See [phase-planner.md](phase-planner.md#known-gaps). Confirmed with a
-  throwaway test: a second `run_phase("planner")` makes zero LLM calls.
+- **(Fixed) Re-planning didn't run under the tiered planner.** Stage
+  markers are now scoped to a planning round; see
+  [phase-planner.md](phase-planner.md#known-gaps).
 - **Resume can misjudge a later iteration.** `get_remaining_phases` scans
   *all* history for markers. Once iteration 1 has finished, every
   `<PHASE>_COMPLETE` marker is present, so a crash midway through iteration
   2+ likely resumes as "All phases have already been completed". This is
   from reading the code; there's no test for it.
-- **Some runtime messages still speak markdown-plan.**
-  `review_outcome`, `product_owner_feedback_outcome`, the `USER FEEDBACK FOR
-  ITERATION` message and `_stuck_task_directive` still say "`- [ ]` items",
-  "the plan file", "continuing the existing numbering". The plan is DB-only
-  now, and the right actions are `add_leaf` / `split_leaf`.
+- **(Fixed) Runtime messages spoke markdown-plan.** They now name the
+  plan tools (`add_leaf`, `update_leaf`, `split_leaf`).

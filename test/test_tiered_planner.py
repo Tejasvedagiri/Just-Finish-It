@@ -478,3 +478,61 @@ def test_planner_arc_and_node_stage_constants_are_consistent():
     assert stage_names == ["team_lead", "journeyman", "function_breakdown"]
     tags = [tag for _stage, _kw, _label, tag in PLANNER_NODE_STAGES]
     assert tags == ["Lead", "Dev", "Tickets"]
+
+
+# ---------------------------------------------------------------------------
+# Planning rounds (the re-plan bug)
+# ---------------------------------------------------------------------------
+
+def _full_round_responses(node_ids):
+    responses = [{"content": "ARCHITECT_STAGE_COMPLETE", "tool_calls": None}]
+    for n in node_ids:
+        for base in ("LEAD_STAGE_COMPLETE", "DEV_STAGE_COMPLETE", "TICKETS_STAGE_COMPLETE"):
+            responses.append({"content": _node_marker(base, n), "tool_calls": None})
+    return responses
+
+
+def test_second_planning_round_actually_runs(make_manager):
+    """Observed before planning rounds existed: after one full tiered pass, a
+    second run_phase("planner") -- Program Manager feedback, a failed review,
+    a queued request -- found round one's markers in history and made ZERO
+    LLM calls, so the feedback was never acted on."""
+    ssm = make_manager("replan")
+    add_leaf(ssm.db_engine, ssm.session_id, "imp", "First top-level")
+    first = _RecordingConsole(_full_round_responses([1]))
+    assert run_phase(first, {"planner": _FakeLLM()}, ssm, "planner") is True
+
+    ssm.add_message("user", "PRODUCT OWNER FEEDBACK: leaf 1 is wrong")
+    second = _RecordingConsole(_full_round_responses([1]))
+    assert run_phase(second, {"planner": _FakeLLM()}, ssm, "planner") is True
+    assert second._turns == 4, "Arc plus Lead/Dev/Task for the one node, all run again"
+
+
+def test_interrupted_round_resumes_instead_of_restarting(make_manager):
+    ssm = make_manager("replan-resume")
+    add_leaf(ssm.db_engine, ssm.session_id, "imp", "First top-level")
+    assert run_phase(_RecordingConsole(_full_round_responses([1])), {"planner": _FakeLLM()}, ssm, "planner")
+
+    # Round two stops after Arc (should_stop trips).
+    stopped = _RecordingConsole([{"content": "ARCHITECT_STAGE_COMPLETE", "tool_calls": None}], max_turns=2)
+    assert run_phase(stopped, {"planner": _FakeLLM()}, ssm, "planner") is False
+    # Resuming round two continues at node 1's Lead -- no new round, no second Arc.
+    resumed = _RecordingConsole([{"content": _node_marker(b, 1), "tool_calls": None}
+                                 for b in ("LEAD_STAGE_COMPLETE", "DEV_STAGE_COMPLETE", "TICKETS_STAGE_COMPLETE")])
+    assert run_phase(resumed, {"planner": _FakeLLM()}, ssm, "planner") is True
+    assert resumed._turns == 3
+    starts = [m for m in ssm.history if m.get("content") == "PLANNER_ROUND_START"]
+    assert len(starts) == 1, "exactly one new round was opened"
+
+
+def test_session_from_before_round_markers_resumes_unfinished_plan(make_manager):
+    """A pre-fix session mid-plan has stage markers but no round marker and no
+    PLANNER_COMPLETE: it must resume, not restart from Arc."""
+    ssm = make_manager("legacy-resume")
+    add_leaf(ssm.db_engine, ssm.session_id, "imp", "First top-level")
+    ssm.history.append({"role": "assistant", "content": "ARCHITECT_STAGE_COMPLETE", "tool_calls": None})
+    console = _RecordingConsole([{"content": _node_marker(b, 1), "tool_calls": None}
+                                 for b in ("LEAD_STAGE_COMPLETE", "DEV_STAGE_COMPLETE", "TICKETS_STAGE_COMPLETE")])
+    assert run_phase(console, {"planner": _FakeLLM()}, ssm, "planner") is True
+    assert console._turns == 3
+    assert not any(m.get("content") == "PLANNER_ROUND_START" for m in ssm.history)
