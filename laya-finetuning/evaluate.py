@@ -71,12 +71,16 @@ def main():
         results = router.predict_batch(reqs)
         raw_ok = judge_ok = reason_ok = redo_hits = 0
         matrix = Counter()
+        by_case, case_total = Counter(), Counter()
         per_level, errors = Counter(), Counter()
         for r, res in zip(rows, results):
             v = res["answers"]["verdict"]
             raw = _STATUS_BY_KEY[v["choice"]]
             judged = raw if v["answer_confidence"] >= args.min_confidence else fallback_status(r["level"])
             matrix[(r["label"], raw)] += 1
+            if r.get("case"):
+                case_total[r["case"]] += 1
+                by_case[r["case"]] += raw == r["label"]
             raw_ok += raw == r["label"]
             judge_ok += judged == r["label"]
             per_level[r["level"]] += raw == r["label"]
@@ -91,6 +95,8 @@ def main():
               + " ".join(f"{lvl}={per_level[lvl] / levels[lvl]:.0%}" for lvl in ("architect", "lead", "task"))
               + f" | redo reason {reason_ok}/{redo_hits} | errors (want->got) {dict(errors)}")
         print_matrix(matrix)
+        if case_total:
+            print("    by case: " + ", ".join(f"{c} {by_case[c]}/{case_total[c]}" for c in sorted(case_total)))
         router.unload()
 
 

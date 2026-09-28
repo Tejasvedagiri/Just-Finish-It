@@ -98,18 +98,27 @@ def augment(rows):
 
 
 def split(rows, val_frac, seed):
-    """Stratified by (level, label) so the validation slice sees every case."""
+    """Holds out whole apps, not single rows, so a row and its paraphrases
+    (data/paraphrase.py) always land on the same side -- a row-level split
+    would put a rewrite of a validation row into training and inflate the
+    score."""
     rng = random.Random(seed)
-    groups = {}
-    for r in rows:
-        groups.setdefault((r["level"], r["label"]), []).append(r)
-    train, val = [], []
-    for g in groups.values():
-        rng.shuffle(g)
-        n_val = max(1, round(len(g) * val_frac)) if len(g) > 2 else 0
-        val += g[:n_val]
-        train += g[n_val:]
-    return train, val
+
+    def app(r):
+        # app_id is set by paraphrase.py from the ORIGINAL goal, before goals
+        # are rewritten row by row; older rows fall back to the goal itself.
+        return r.get("app_id") or r["goal"]
+
+    apps = sorted({app(r) for r in rows})
+    rng.shuffle(apps)
+    val_apps, n_val_rows = set(), 0
+    for a in apps:
+        if n_val_rows >= val_frac * len(rows):
+            break
+        val_apps.add(a)
+        n_val_rows += sum(1 for r in rows if app(r) == a)
+    return ([r for r in rows if app(r) not in val_apps],
+            [r for r in rows if app(r) in val_apps])
 
 
 class CachedEncoder(torch.nn.Module):
@@ -245,7 +254,8 @@ def save_checkpoint(model, src, out, temperature):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", choices=sorted(SUBFOLDER), default="english")
-    ap.add_argument("--data", default=str(HERE / "data" / "train.jsonl"))
+    ap.add_argument("--data", action="append", default=None,
+                    help="training JSONL, repeatable (default: train.jsonl + train_para.jsonl if it exists)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--epochs", type=int, default=150)
     ap.add_argument("--lr", type=float, default=5e-4)
@@ -272,7 +282,10 @@ def main():
     print(f"loaded {args.base} in {time.perf_counter() - t0:.1f}s on {DEVICE}"
           + (f" ({torch.cuda.get_device_name(0)})" if DEVICE.type == "cuda" else ""))
 
-    rows = load_rows(args.data)
+    data_files = args.data or [str(p) for p in (HERE / "data" / "train.jsonl", HERE / "data" / "train_para.jsonl")
+                               if p.exists()]
+    rows = [r for path in data_files for r in load_rows(path)]
+    print(f"data: {', '.join(Path(p).name for p in data_files)}")
     train_rows, val_rows = split(rows, args.val_frac, args.seed)
     train = [it for r in augment(train_rows) for it in items_for(r, agent, args.smoothing)]
     val = [it for r in val_rows for it in items_for(r, agent, 0.0)]

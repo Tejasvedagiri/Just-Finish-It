@@ -44,6 +44,9 @@ mysql = ["pymysql>=1.1"]
 postgres = ["psycopg[binary]>=3.2"]
 laya = [
     "laya>=0.3.21",
+    # Listed directly (laya already needs it) so [tool.uv.sources] below can
+    # point it at PyTorch's CUDA index -- uv sources only apply to direct deps.
+    "torch>=2.14",
 ]
 
 [project.scripts]
@@ -53,9 +56,10 @@ jfi-web = "JFI.web.launcher:main"
 build = "build_binary:main"
 create-env = "JFI.create_env:main"
 export-db = "export_db:main"
+laya-finetune = "laya_finetune:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/JFI", "src/build_binary", "src/export_db"]
+packages = ["src/JFI", "src/build_binary", "src/export_db", "src/laya_finetune"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -81,3 +85,17 @@ dev = [
     "pyinstaller>=6.11.0",
     "ruff>=0.16.6",
 ]
+
+# torch (pulled in only by the optional `laya` extra) comes from PyTorch's CUDA
+# 13.0 index on Windows/Linux, so `uv run laya-finetune` trains on the GPU --
+# the PyPI Windows wheel is CPU-only, and a plain `uv run` re-syncs to the lock,
+# which used to swap a hand-installed CUDA build back to CPU. cu130 is what an
+# RTX 50-series (Blackwell, sm_120) needs; the same wheel runs on CPU-only
+# machines too. macOS keeps PyPI's build (no CUDA there).
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]

@@ -197,7 +197,10 @@ def write(path, new_rows):
     existing = []
     if path.exists():
         existing = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    kept = [r for r in existing if not str(r.get("source", "")).startswith("benchmark:")]
+    # Only this generator's own rows are replaced -- not their paraphrases
+    # (source "benchmark:<id>+para", written by paraphrase.py).
+    kept = [r for r in existing
+            if not (str(r.get("source", "")).startswith("benchmark:") and "+para" not in str(r.get("source", "")))]
     with path.open("w", encoding="utf-8") as f:
         for r in kept + list(new_rows):
             f.write(json.dumps(r, ensure_ascii=False) + "\n")

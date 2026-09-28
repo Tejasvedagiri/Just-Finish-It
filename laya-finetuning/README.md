@@ -61,20 +61,20 @@ retraining.**
 
 ## Run it
 
-GPU (recommended; ~2 minutes on an RTX 5090). The project lock pins the CPU
-build of torch, so install the CUDA build into the venv and run with
-`--no-sync` so uv doesn't swap it back:
-
 ```bash
-uv sync --extra laya --extra anthropic --group dev
-uv pip install "torch==2.14.0" --index-url https://download.pytorch.org/whl/cu130 --reinstall-package torch
-uv run --no-sync python laya-finetuning/finetune.py --base english --train-encoder --epochs 40 --patience 10 \
-    --out laya-finetuning/checkpoints/jfi-judge-english-full
-uv run --no-sync python laya-finetuning/evaluate.py --checkpoint english=laya-finetuning/checkpoints/jfi-judge-english-full
+uv sync --extra laya --group dev      # once; torch comes from PyTorch's CUDA 13.0 index on Windows/Linux
+uv run laya-finetune                  # full fine-tune on CUDA -> checkpoints/jfi-judge-english-full-v2 (~3 min on an RTX 5090)
+uv run python laya-finetuning/evaluate.py --checkpoint english=laya-finetuning/checkpoints/jfi-judge-english-full-v2
 ```
 
-- **Without `--train-encoder`:** head-only, with the encoder frozen and its
-  outputs cached. It works on CPU (~30 min) and on GPU (~2 min).
+- **Overrides:** `uv run laya-finetune` passes any extra arguments through
+  and they override its defaults, e.g. `uv run laya-finetune --epochs 5
+  --out /tmp/try`, or `--device cpu` without `--train-encoder` for a CPU
+  head-only run.
+- **Why CUDA works:** `pyproject.toml` points torch (a direct dependency of
+  the `laya` extra) at PyTorch's cu130 index on Windows and Linux, so a
+  plain `uv run` keeps the CUDA build. cu130 is what RTX 50-series GPUs
+  need. macOS uses PyPI's build.
 - **Checkpoints** land in `checkpoints/` (git-ignored, ~1.7 GB each).
 
 ## Use it in JFI
