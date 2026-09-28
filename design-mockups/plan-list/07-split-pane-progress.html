@@ -1,0 +1,177 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>7 — Split Pane + Progress</title>
+<script src="_shared.js"></script>
+<style id="css"></style>
+</head>
+<body>
+<div id="app" style="max-width:1180px">
+  <a class="back-link" href="index.html">← all 6 mockups</a>
+  <div class="mockup-head">
+    <div class="tag">★ Selected direction — Option 2 + Option 5's progress rings</div>
+    <h1>Split pane, with progress rings worked in</h1>
+    <p>Same split-pane skeleton as #2 (always-visible tree sidebar, one line per node, detail panel on the right) — the two changes are: sidebar branch badges are now proportional ring meters instead of plain "d/t" text, and the detail panel leads with #5's ancestor trail (a connected chain of rings down to whatever's selected) instead of a plain text breadcrumb, so you get 1 → 1.2 → 1.2.2's progress at a glance without leaving the split-pane's information density.</p>
+  </div>
+  <div class="panel" style="display:flex; min-height:520px">
+    <div id="sidebar"></div>
+    <div id="detail"></div>
+  </div>
+</div>
+<script>
+document.getElementById("css").textContent = SHARED_CSS + `
+  #sidebar { width: 300px; flex-shrink: 0; border-right: 1px solid var(--line); overflow-y: auto; max-height: 640px; }
+  #detail { flex: 1; padding: 20px 22px; min-width: 0; }
+  .phase-title { padding: 9px 12px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-faint); font-weight: 700; background: var(--bg-raised); border-bottom: 1px solid var(--line-soft); display:flex; justify-content: space-between; align-items: center; }
+  .sb-row { display: flex; align-items: center; gap: 7px; padding: 5px 12px; white-space: nowrap; overflow: hidden; cursor: pointer; border-left: 2px solid transparent; }
+  .sb-row:hover { background: rgba(0,175,175,0.06); }
+  .sb-row.selected { background: rgba(0,175,175,0.1); border-left-color: var(--accent); }
+  .sb-row.is-current { border-left-color: var(--amber); }
+  .sb-num { font-weight: 700; color: var(--ink-faint); flex-shrink: 0; font-size: 11.5px; }
+  .sb-row.is-branch .sb-num { color: var(--accent); }
+  .sb-row.selected .sb-num { color: var(--ink); }
+  .sb-desc { color: var(--ink-faint); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; }
+  .sb-row.selected .sb-desc { color: var(--ink-dim); }
+  .sb-badge { margin-left: auto; flex-shrink: 0; color: var(--ink-faint); font-size: 9.5px; font-variant-numeric: tabular-nums; }
+
+  /* mini proportional progress ring, one per branch row in the sidebar */
+  .sb-ring { --pct: 0; width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; position: relative;
+             background: conic-gradient(var(--accent) calc(var(--pct) * 3.6deg), var(--line-soft) 0deg); }
+  .sb-ring::after { content: ""; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--bg-panel); }
+  .sb-row.selected .sb-ring::after { background: #202c3c; }
+  .sb-ring.full { background: var(--accent); }
+  .sb-ring.full::after { display: none; }
+
+  .d-num { color: var(--accent); font-size: 22px; font-weight: 800; }
+  .d-status { display: inline-block; margin-left: 10px; padding: 3px 9px; border: 1px solid var(--line); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; vertical-align: middle; }
+  .d-status.s-done { color: var(--accent); border-color: var(--accent-dim); }
+  .d-status.s-current { color: var(--amber); border-color: #4a3a1a; }
+  .d-status.s-todo { color: var(--ink-faint); }
+  .d-desc { margin-top: 16px; color: var(--ink); font-size: 13.5px; line-height: 1.7; max-width: 560px; }
+  .d-children { margin-top: 22px; }
+  .d-children .lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-faint); margin-bottom: 8px; }
+  .d-child-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid var(--line); margin: 0 6px 6px 0; cursor: pointer; font-size: 11.5px; }
+  .d-child-chip:hover { border-color: var(--accent); }
+
+  /* ancestor trail: #5's connected-ring stepper, laid out horizontally so it
+     fits the detail panel's header instead of taking a full vertical column */
+  .d-trail { display: flex; align-items: center; flex-wrap: wrap; gap: 0; margin-bottom: 18px; }
+  .t-step { display: flex; align-items: center; }
+  .t-ring { --pct: 0; width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; cursor: pointer; position: relative;
+            background: conic-gradient(var(--accent) calc(var(--pct) * 3.6deg), var(--line) 0deg); }
+  .t-ring::after { content: attr(data-label); position: absolute; inset: 3px; border-radius: 50%; background: var(--bg-panel);
+                   display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: var(--ink-dim); }
+  .t-ring.at-current::after { color: var(--amber); }
+  .t-ring.selected { box-shadow: 0 0 0 2px var(--bg-panel), 0 0 0 4px var(--accent); }
+  .t-leaf { width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+            font-size: 13px; border: 2px solid var(--line); background: var(--bg-raised); }
+  .t-leaf.s-done { border-color: var(--accent); }
+  .t-leaf.s-current { border-color: var(--amber); }
+  .t-leaf.selected { box-shadow: 0 0 0 2px var(--bg-panel), 0 0 0 4px var(--accent); }
+  .t-line { width: 20px; height: 2px; background: var(--line); margin: 0 3px; flex-shrink: 0; }
+  .t-tip { font-size: 9.5px; color: var(--ink-faint); text-align: center; margin-top: 3px; }
+  .t-step-wrap { display: flex; flex-direction: column; align-items: center; }
+`;
+
+function esc(s) { return s.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+const byId = {};
+function index(node, phaseKey, parentPath) {
+  const path = parentPath.concat(node.number);
+  byId[phaseKey + ":" + node.number] = { node, phaseKey, path };
+  if (node.children) for (const c of node.children) index(c, phaseKey, path);
+}
+for (const [key, phase] of Object.entries(MOCK_TREE)) for (const n of phase.nodes) index(n, key, []);
+
+function pct(d, t) { return t === 0 ? 0 : Math.round((d / t) * 100); }
+
+function sidebarRow(node, depth, phaseKey, selectedKey) {
+  const hasChildren = !!node.children;
+  const glyph = hasChildren ? null : statusGlyph(node.status);
+  const key = phaseKey + ":" + node.number;
+  const [d, t] = hasChildren ? subtreeCounts({children: node.children}) : [0, 0];
+  const p = pct(d, t);
+  let html = `<div class="sb-row ${hasChildren ? "is-branch" : "is-leaf"} ${key === selectedKey ? "selected" : ""} ${node.status === "current" ? "is-current" : ""}"
+                    style="padding-left:${12 + depth * 14}px" onclick="select('${key}')">`;
+  if (hasChildren) {
+    html += `<span class="sb-ring ${p === 100 ? "full" : ""}" style="--pct:${p}" title="${d}/${t} done (${p}%)"></span>`;
+  } else {
+    html += `<span class="${glyph.cls}">${glyph.char}</span>`;
+  }
+  html += `<span class="sb-num">${node.number}</span>
+    <span class="sb-desc">${esc(node.desc.split(":")[0].split(",")[0].slice(0, 30))}</span>
+    ${hasChildren ? `<span class="sb-badge">${d}/${t}</span>` : ""}
+  </div>`;
+  if (hasChildren) for (const c of node.children) html += sidebarRow(c, depth + 1, phaseKey, selectedKey);
+  return html;
+}
+
+function renderSidebar(selectedKey) {
+  let html = "";
+  for (const [key, phase] of Object.entries(MOCK_TREE)) {
+    let pd = 0, pt = 0;
+    for (const n of phase.nodes) { const [d, t] = subtreeCounts(n); pd += d; pt += t; }
+    const pp = pct(pd, pt);
+    html += `<div class="phase-title"><span>${phase.label}</span><span class="sb-ring ${pp === 100 ? "full" : ""}" style="--pct:${pp}" title="${pd}/${pt} done"></span></div>`;
+    for (const n of phase.nodes) html += sidebarRow(n, 0, key, selectedKey);
+  }
+  document.getElementById("sidebar").innerHTML = html;
+}
+
+// Ancestor trail: every number in `path` up to (not including) the selected
+// node itself is a branch already present in byId (numbers are absolute,
+// e.g. "1.2" is its own entry) -- walk it and render one ring per ancestor,
+// ending in either the selected branch's own ring or, if it's a leaf, a
+// small status dot so a leaf's trail reads differently from a branch's.
+function renderTrail(key) {
+  const { node, phaseKey, path } = byId[key];
+  let html = `<div class="d-trail">`;
+  html += `<div class="t-step-wrap"><div class="t-leaf" style="border-color:var(--line);color:var(--ink-faint);font-size:9px">${esc(MOCK_TREE[phaseKey].label.slice(0,3))}</div></div>`;
+  for (let i = 0; i < path.length; i++) {
+    const anc = byId[phaseKey + ":" + path[i]].node;
+    const isSelected = path[i] === node.number;
+    html += `<div class="t-line"></div>`;
+    if (anc.children) {
+      const [d, t] = subtreeCounts({children: anc.children});
+      const p = pct(d, t);
+      const atCurrent = anc.status === "current" || (d < t && d > 0) || anc.children.some(c => c.status === "current");
+      html += `<div class="t-step-wrap">
+        <div class="t-ring ${atCurrent ? "at-current" : ""} ${isSelected ? "selected" : ""}" style="--pct:${p}" data-label="${d}/${t}" onclick="select('${phaseKey}:${anc.number}')"></div>
+        <div class="t-tip">${anc.number}</div>
+      </div>`;
+    } else {
+      const g = statusGlyph(anc.status);
+      html += `<div class="t-step-wrap">
+        <div class="t-leaf ${g.cls} ${isSelected ? "selected" : ""}" onclick="select('${phaseKey}:${anc.number}')"><span class="${g.cls}">${g.char}</span></div>
+        <div class="t-tip">${anc.number}</div>
+      </div>`;
+    }
+  }
+  html += `</div>`;
+  return html;
+}
+
+function renderDetail(key) {
+  const { node, phaseKey } = byId[key];
+  const hasChildren = !!node.children;
+  const glyph = hasChildren ? null : statusGlyph(node.status);
+  let html = renderTrail(key);
+  html += `<div><span class="d-num">${node.number}</span>${glyph ? `<span class="d-status ${glyph.cls}">${node.status}</span>` : `<span class="d-status">parent</span>`}</div>
+    <div class="d-desc">${esc(node.desc)}</div>`;
+  if (hasChildren) {
+    html += `<div class="d-children"><div class="lbl">Children</div>`;
+    for (const c of node.children) {
+      const g = c.children ? null : statusGlyph(c.status);
+      html += `<span class="d-child-chip" onclick="select('${phaseKey}:${c.number}')">${g ? `<span class="${g.cls}">${g.char}</span>` : ""} ${c.number} ${esc(c.desc.split(":")[0].slice(0,24))}…</span>`;
+    }
+    html += `</div>`;
+  }
+  document.getElementById("detail").innerHTML = html;
+}
+
+let currentKey = "imp:1.2.2"; // start on the "current" leaf, like a real dashboard would
+function select(key) { currentKey = key; renderSidebar(currentKey); renderDetail(currentKey); }
+select(currentKey);
+</script>
+</body>
+</html>

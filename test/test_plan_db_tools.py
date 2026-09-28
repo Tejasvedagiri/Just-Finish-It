@@ -12,6 +12,7 @@ from sqlmodel import select
 
 from JFI.models import Leaf, LeafStatus, SessionRecord, get_engine, get_session
 from JFI.tool.plan_db_tools import (
+    REVIEW_REJECTION_CIRCUIT_BREAKER,
     add_leaf,
     delete_leaf,
     get_leaf,
@@ -21,8 +22,11 @@ from JFI.tool.plan_db_tools import (
     merge_leaf,
     render_plan_markdown,
     reorder_leaf,
+    review_leaf,
     split_leaf,
     start_leaf,
+    top_level_leaf_ids,
+    update_leaf,
 )
 
 
@@ -354,7 +358,7 @@ class TestDepthGuardrails:
 class TestRenderPlanMarkdown:
     """render_plan_markdown must match plan.md's OLD bullet syntax
     byte-for-byte (no [id=N] tags) -- it's consumed by two things that
-    already parse that exact format unchanged: frontend/src/main.js's
+    already parse that exact format unchanged: Just-Finish-It-Fleet's src/main.js's
     parsePlanLines/buildPlanTree (the fleet dashboard checklist) and the
     Streamlit dashboard's st.markdown render. A regression here breaks
     both UIs silently, not just this module's own callers."""
@@ -617,6 +621,191 @@ class TestDeleteLeaf:
         assert "Error" in delete_leaf(engine, session_id, 999)
 
 
+class TestUpdateLeaf:
+    def test_edits_description_and_clears_review_state(self, engine_and_session):
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Wrong text")
+        [leaf] = _leaves(engine, session_id)
+        review_leaf(engine, session_id, leaf.id, "rejected", "Say what it actually does")
+
+        result = update_leaf(engine, session_id, leaf.id, "Correct text")
+
+        assert "Updated" in result
+        [leaf_after] = _leaves(engine, session_id)
+        assert leaf_after.description == "Correct text"
+        assert leaf_after.review_status is None
+        assert leaf_after.review_note is None
+        assert leaf_after.rejection_count == 0
+
+    def test_rejects_a_parent(self, engine_and_session):
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Core arithmetic")
+        [root] = _leaves(engine, session_id)
+        add_leaf(engine, session_id, "imp", "child", parent_id=root.id)
+
+        result = update_leaf(engine, session_id, root.id, "New text")
+        assert "Error" in result
+
+    def test_rejects_an_already_done_leaf(self, engine_and_session):
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Finished work")
+        [leaf] = _leaves(engine, session_id)
+        mark_leaf_done(engine, session_id, leaf.id)
+
+        result = update_leaf(engine, session_id, leaf.id, "New text")
+        assert "Error" in result
+
+    def test_rejects_a_nonexistent_leaf(self, engine_and_session):
+        engine, session_id = engine_and_session
+        assert "Error" in update_leaf(engine, session_id, 999, "text")
+
+
+class TestReviewLeaf:
+    def test_approves_a_leaf(self, engine_and_session):
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Core arithmetic")
+        [leaf] = _leaves(engine, session_id)
+
+        result = review_leaf(engine, session_id, leaf.id, "approved")
+
+        assert "Approved" in result
+        [leaf_after] = _leaves(engine, session_id)
+        assert leaf_after.review_status == "approved"
+        assert leaf_after.review_note is None
+        assert leaf_after.rejection_count == 0
+
+    def test_rejects_a_leaf_with_expected_changes(self, engine_and_session):
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Core arithmetic")
+        [leaf] = _leaves(engine, session_id)
+
+        result = review_leaf(engine, session_id, leaf.id, "rejected", "Name the actual function")
+
+        assert "Rejected" in result
+        [leaf_after] = _leaves(engine, session_id)
+        assert leaf_after.review_status == "rejected"
+        assert leaf_after.review_note == "Name the actual function"
+        assert leaf_after.rejection_count == 1
+
+    def test_rejection_requires_expected_changes(self, engine_and_session):
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Core arithmetic")
+        [leaf] = _leaves(engine, session_id)
+
+        result = review_leaf(engine, session_id, leaf.id, "rejected", "")
+        assert "Error" in result
+        [leaf_after] = _leaves(engine, session_id)
+        assert leaf_after.review_status is None  # nothing recorded
+
+    def test_rejects_an_invalid_verdict(self, engine_and_session):
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Core arithmetic")
+        [leaf] = _leaves(engine, session_id)
+
+        result = review_leaf(engine, session_id, leaf.id, "maybe", "x")
+        assert "Error" in result
+
+    def test_refuses_a_parent(self, engine_and_session):
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Core arithmetic")
+        [root] = _leaves(engine, session_id)
+        add_leaf(engine, session_id, "imp", "child", parent_id=root.id)
+
+        result = review_leaf(engine, session_id, root.id, "approved")
+        assert "Error" in result
+
+    def test_circuit_breaker_trips_on_the_one_rejection_it_allows(self, engine_and_session):
+        """Same failure mode observed live: a whole-plan version of this
+        loop once burned ~2 hours re-reviewing a byte-identical, unfixed
+        plan (see todo_v1.md's "Why"). One call, one answer -- the SINGLE
+        rejection this tool allows already carries the circuit-breaker
+        warning; there is no multi-rejection "streak" to build up to it."""
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Core arithmetic")
+        [leaf] = _leaves(engine, session_id)
+
+        result = review_leaf(engine, session_id, leaf.id, "rejected", "still wrong")
+
+        assert "CIRCUIT BREAKER" in result
+        [leaf_after] = _leaves(engine, session_id)
+        assert leaf_after.rejection_count == REVIEW_REJECTION_CIRCUIT_BREAKER == 1
+
+    def test_circuit_breaker_refuses_a_second_rejection_in_a_row(self, engine_and_session):
+        """A mere warning wasn't enough to stop the real ~2-hour loop this
+        exists to prevent -- a SECOND rejection attempt on the same
+        still-unfixed leaf must be refused outright (an Error, nothing
+        recorded), not just warned about and allowed through."""
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Core arithmetic")
+        [leaf] = _leaves(engine, session_id)
+        review_leaf(engine, session_id, leaf.id, "rejected", "still wrong")
+
+        result = review_leaf(engine, session_id, leaf.id, "rejected", "yet another issue")
+
+        assert "Error" in result
+        assert "CIRCUIT BREAKER" in result
+        [leaf_after] = _leaves(engine, session_id)
+        # Nothing changed -- the refused call left count/note untouched.
+        assert leaf_after.rejection_count == 1
+        assert leaf_after.review_note == "still wrong"
+
+    def test_circuit_breaker_still_allows_approval_once_tripped(self, engine_and_session):
+        """The hard stop only refuses another REJECTION -- approving a
+        leaf that's already been rejected once must still work (that's
+        the escape hatch, not a dead end)."""
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Core arithmetic")
+        [leaf] = _leaves(engine, session_id)
+        review_leaf(engine, session_id, leaf.id, "rejected", "still wrong")
+
+        result = review_leaf(engine, session_id, leaf.id, "approved")
+
+        assert "Approved" in result
+        [leaf_after] = _leaves(engine, session_id)
+        assert leaf_after.review_status == "approved"
+        assert leaf_after.rejection_count == 0
+
+    def test_editing_the_leaf_resets_the_rejection_streak(self, engine_and_session):
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Core arithmetic")
+        [leaf] = _leaves(engine, session_id)
+        review_leaf(engine, session_id, leaf.id, "rejected", "fix it")
+
+        update_leaf(engine, session_id, leaf.id, "Fixed description")
+        result = review_leaf(engine, session_id, leaf.id, "rejected", "one more issue")
+
+        # Recorded (not refused) -- the edit reset the one-rejection streak,
+        # even though this rejection ALSO carries its own circuit-breaker
+        # warning (every rejection does, by design -- see review_leaf).
+        assert "Error" not in result
+        assert "Rejected" in result
+        [leaf_after] = _leaves(engine, session_id)
+        assert leaf_after.rejection_count == 1
+
+    def test_rejects_a_nonexistent_leaf(self, engine_and_session):
+        engine, session_id = engine_and_session
+        assert "Error" in review_leaf(engine, session_id, 999, "approved")
+
+
+class TestTopLevelLeafIds:
+    def test_returns_only_top_level_ids_in_creation_order(self, engine_and_session):
+        engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "First")
+        [first] = _leaves(engine, session_id)
+        add_leaf(engine, session_id, "imp", "child", parent_id=first.id)
+        add_leaf(engine, session_id, "testing", "Second top-level")
+
+        ids = top_level_leaf_ids(engine, session_id)
+
+        top_level = [leaf for leaf in _leaves(engine, session_id) if leaf.parent_id is None]
+        assert ids == [leaf.id for leaf in sorted(top_level, key=lambda leaf: leaf.id)]
+        assert len(ids) == 2  # the child is excluded
+
+    def test_empty_plan_returns_empty_list(self, engine_and_session):
+        engine, session_id = engine_and_session
+        assert top_level_leaf_ids(engine, session_id) == []
+
+
 class TestMakePlanDbTools:
     def test_returns_bound_callables_for_every_tool(self, engine_and_session):
         engine, session_id = engine_and_session
@@ -624,7 +813,7 @@ class TestMakePlanDbTools:
 
         assert set(tools) == {
             "get_plan", "get_leaf", "add_leaf", "start_leaf", "mark_leaf_done", "split_leaf",
-            "reorder_leaf", "merge_leaf", "delete_leaf",
+            "reorder_leaf", "merge_leaf", "delete_leaf", "update_leaf", "review_leaf",
         }
         assert "Added leaf" in tools["add_leaf"](phase="imp", description="Core arithmetic")
         assert "Core arithmetic" in tools["get_plan"]()

@@ -767,8 +767,9 @@ class PromptToolkitConsoleManager(AbstractManager):
         (no phase set), matching the look this line had before it did
         anything — planner/reviewer show just the phase, since they have no
         per-item task concept -- except planner's own internal stage tag
-        (Arc/Lead/Journy/Func/Task, see runner.PLANNER_STAGES), which rides the
-        phase label itself rather than the task slot.
+        (Arc/Lead/Dev/Tickets/Task, see runner.PLANNER_ARC_STAGE/
+        PLANNER_NODE_STAGES), which rides the phase label itself rather
+        than the task slot.
         """
         with self._lock:
             phase, task, stage = self._phase, self._task, self._stage

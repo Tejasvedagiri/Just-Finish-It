@@ -1,0 +1,97 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>1 — Indented Tree</title>
+<script src="_shared.js"></script>
+<style id="css"></style>
+</head>
+<body>
+<div id="app">
+  <a class="back-link" href="index.html">← all 6 mockups</a>
+  <div class="mockup-head">
+    <div class="tag">Option 1 of 6</div>
+    <h1>Full indented tree</h1>
+    <p>The whole hierarchy is on screen at once, always — 1, 1.2, and 1.2.1 all visible simultaneously via indentation, exactly like a file explorer. Click a branch's ▸ to collapse it; deep branches start collapsed so the list stays scannable. No drill-down, no breadcrumb needed — you never lose the tree.</p>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><span>Plan checklist</span><span class="n" id="overall"></span></div>
+    <div id="tree"></div>
+  </div>
+</div>
+<script>
+document.getElementById("css").textContent = SHARED_CSS + `
+  #tree { padding: 6px 0; }
+  .phase-group { border-bottom: 1px solid var(--line-soft); }
+  .phase-group:last-child { border-bottom: none; }
+  .phase-title { display: flex; align-items: center; gap: 8px; padding: 9px 14px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-faint); font-weight: 700; background: var(--bg-raised); }
+  .phase-title .n { margin-left: auto; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+  .node-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 14px 6px 0; cursor: default; border-left: 2px solid transparent; }
+  .node-row.is-branch { cursor: pointer; }
+  .node-row.is-branch:hover { background: rgba(0,175,175,0.05); }
+  .node-row.is-current { border-left-color: var(--amber); background: rgba(224,175,104,0.06); }
+  .twisty { width: 14px; flex-shrink: 0; text-align: center; color: var(--ink-faint); user-select: none; font-size: 10px; margin-top: 3px; }
+  .node-row.is-leaf .twisty { visibility: hidden; }
+  .status { flex-shrink: 0; width: 14px; text-align: center; margin-top: 1px; }
+  .node-main { flex: 1; min-width: 0; }
+  .node-num { font-weight: 700; color: var(--ink); margin-right: 6px; }
+  .node-row.is-branch .node-num { color: var(--accent); }
+  .node-desc { color: var(--ink-dim); }
+  .node-row.is-leaf .node-desc { color: var(--ink); }
+  .branch-badge { color: var(--ink-faint); font-size: 11px; margin-left: 6px; font-variant-numeric: tabular-nums; }
+  .children { display: none; }
+  .children.open { display: block; }
+  .children .children { position: relative; }
+`;
+
+function renderNode(node, depth, phaseKey, path) {
+  const hasChildren = !!node.children;
+  const glyph = hasChildren ? null : statusGlyph(node.status);
+  const id = phaseKey + "-" + node.number;
+  const [d, t] = hasChildren ? subtreeCounts({children: node.children}) : [0, 0];
+  let html = `<div class="node-row ${hasChildren ? "is-branch" : "is-leaf"} ${node.status === "current" ? "is-current" : ""}"
+                    style="padding-left:${14 + depth * 18}px"
+                    ${hasChildren ? `onclick="toggle('${id}')"` : ""}>
+    <span class="twisty" id="tw-${id}">${hasChildren ? "▾" : ""}</span>
+    <span class="status ${glyph ? glyph.cls : ""}">${glyph ? glyph.char : ""}</span>
+    <span class="node-main">
+      <span class="node-num">${node.number}</span><span class="node-desc">${esc(node.desc)}</span>${hasChildren ? `<span class="branch-badge">${d}/${t}</span>` : ""}
+    </span>
+  </div>`;
+  if (hasChildren) {
+    html += `<div class="children open" id="ch-${id}">`;
+    for (const c of node.children) html += renderNode(c, depth + 1, phaseKey, path);
+    html += `</div>`;
+  }
+  return html;
+}
+
+function esc(s) { return s.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function toggle(id) {
+  const el = document.getElementById("ch-" + id);
+  const tw = document.getElementById("tw-" + id);
+  el.classList.toggle("open");
+  tw.textContent = el.classList.contains("open") ? "▾" : "▸";
+}
+
+let out = "";
+let overallD = 0, overallT = 0;
+for (const [key, phase] of Object.entries(MOCK_TREE)) {
+  let pd = 0, pt = 0;
+  for (const n of phase.nodes) { const [d, t] = subtreeCounts(n); pd += d; pt += t; }
+  overallD += pd; overallT += pt;
+  out += `<div class="phase-group"><div class="phase-title">${phase.label}<span class="n">${pd}/${pt}</span></div>`;
+  for (const n of phase.nodes) out += renderNode(n, 0, key, []);
+  out += `</div>`;
+}
+document.getElementById("tree").innerHTML = out;
+document.getElementById("overall").textContent = overallD + "/" + overallT + " done";
+// Everything starts expanded -- the whole point of this layout is that
+// nothing is ever hidden by default. A much larger (100+ leaf) plan would
+// want DONE branches auto-collapsed on load (never the current/in-progress
+// path), which is a one-line change here: check node.status distribution
+// before deciding a branch's default `open` class.
+</script>
+</body>
+</html>

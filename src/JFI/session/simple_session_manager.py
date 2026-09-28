@@ -249,7 +249,7 @@ CONTEXT_CACHE_RULES = """
       required env vars; the right working directory), immediately
       context_save it under the key "run_commands", one line per command
       with a short label, e.g. "server: cd app && .venv/bin/python main.py |
-      build: npm run build (from frontend/) | tests: uv run pytest". Observed
+      build: npm run build (from the standalone Just-Finish-It-Fleet repo) | tests: uv run pytest". Observed
       failure this prevents: discovering the interpreter the hard way (plain
       `python3` fails with ModuleNotFoundError, THEN trying `.venv/bin/
       python` or `uv run`), then re-discovering it the same way again later
@@ -350,7 +350,8 @@ _PHASE_BY_SECTION = {section: phase for phase, section in PHASE_SECTION.items()}
 
 def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                        plan_format_rules: str = PLAN_FORMAT_RULES,
-                       unlocked_tools=(), planner_stage: Optional[str] = None) -> str:
+                       unlocked_tools=(), planner_stage: Optional[str] = None,
+                       planner_node_id: Optional[int] = None) -> str:
     """`plan_format_rules` defaults to the generic, task-agnostic
     PLAN_FORMAT_RULES block; a caller that already knows something about
     the goal (see AdaptiveSessionManager) can pass a smaller/more targeted
@@ -364,21 +365,30 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
 
     `planner_stage` (only meaningful when `phase == "planner"`) selects one
     of four narrower role-prompts -- "architect" (top-level shape only, no
-    checkboxes), "team_lead" (level-1 -> level-2/3 feature breakdown, still
-    mostly no checkboxes), "journeyman" (walk every branch down to
-    genuinely atomic checkbox leaves), or "function_breakdown" (for every
-    atomic leaf that writes code, break IT down further into one child leaf
-    per function/method it implements) -- run in sequence by
-    runner.run_phase instead of one combined pass, because a single pass
-    was observed letting compound leaves through (see task_rules.py-style
-    module docstrings elsewhere in this file for the "observed in practice"
-    convention: two real cases from one session, a bundled 4-scenario test
-    leaf and a bundled kill/start/request/inspect-DB leaf, are named
-    directly in the journeyman prompt below as the standard this pass
-    exists to catch). Left as ``None`` (the default), this returns EXACTLY
-    today's original single combined planner prompt unchanged -- the
-    PLANNER_SINGLE_PASS=1 escape hatch (see runner._planner_single_pass)
-    and any caller that predates tiering both get this unmodified path.
+    checkboxes, one pass over the WHOLE tree), "team_lead" (Lead: break ONE
+    top-level branch into feature-level children), "journeyman" (Dev: walk
+    that SAME branch down to genuinely atomic leaves, named by file and
+    function), or "function_breakdown" (Task Planner: reduce every atomic
+    leaf under that branch -- code-writing or not -- to one mechanically-
+    executable ticket) -- run depth-first, one top-level branch fully
+    resolved through all three before the next branch starts (see
+    runner.PLANNER_NODE_STAGES/todo_v1.md §1), instead of one combined pass
+    or a breadth-first sweep of the whole tree per stage, because both were
+    observed producing compound leaves and/or an unmanageably large
+    per-stage context (see task_rules.py-style module docstrings elsewhere
+    in this file for the "observed in practice" convention: two real cases
+    from one session, a bundled 4-scenario test leaf and a bundled
+    kill/start/request/inspect-DB leaf, are named directly in the
+    journeyman prompt below as the standard this pass exists to catch).
+    Left as ``None`` (the default), this returns EXACTLY today's original
+    single combined planner prompt unchanged -- the PLANNER_SINGLE_PASS=1
+    escape hatch (see runner._planner_single_pass) and any caller that
+    predates tiering both get this unmodified path.
+
+    `planner_node_id` (only meaningful for "team_lead"/"journeyman"/
+    "function_breakdown" -- Architect and the single-pass fallback are
+    never node-scoped) is the one top-level branch (leaf id) this turn is
+    allowed to touch; every other branch is off-limits until its own turn.
     """
     from JFI.tool.schemas import deferred_tools_rules
 
@@ -397,11 +407,14 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
 
     if phase == "planner" and planner_stage == "architect":
         return f"""
-            You are acting as the ARCHITECT for this plan — the first of four passes that
-            build it (Architect → Team Lead → Journeyman → Function Breakdown). Your ONLY job right now is the
-            plan's TOP-LEVEL SHAPE. Do NOT add leaf-level items yet — that is a later pass's
-            job, not yours, and doing it now just duplicates work the later passes are about
-            to do anyway.
+            You are acting as ARC for this plan — the first of four passes that build it
+            (Arc → Lead → Dev → Task Planner). Your ONLY job right now is the plan's TOP-LEVEL
+            SHAPE. Do NOT add leaf-level items yet — that is a later pass's job, not yours, and
+            doing it now just duplicates work the later passes are about to do anyway. The
+            passes after you walk depth-first, one of your top-level items' ENTIRE branch fully
+            resolved before the next one starts — so the top-level items you add here ARE the
+            walk order everything downstream follows; add them in the order that makes sense to
+            tackle first.
             {rules}
 
             Your job:
@@ -426,48 +439,67 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
         """
 
     if phase == "planner" and planner_stage == "team_lead":
+        node_marker = f"LEAD_STAGE_COMPLETE_NODE_{planner_node_id}"
         return f"""
-            You are acting as the TEAM LEAD for this plan — the second of four passes
-            (Architect → Team Lead → Journeyman → Function Breakdown). The Architect already added the plan's
-            top-level items; your ONLY job is breaking EVERY one of them into feature-sized
-            subtasks. Do not invent new top-level items, and do not treat a subtask as finished
-            work (no start_leaf/mark_leaf_done) unless it's ALREADY unambiguously a single
-            atomic action — when in doubt, leave it as a parent for the Journeyman pass to
-            finish breaking down.
+            You are acting as LEAD for this plan — the second of four passes (Arc → Lead → Dev
+            → Task Planner), walked depth-first: ONE top-level branch fully resolved through
+            every remaining pass before the next branch starts (see runner.PLANNER_NODE_STAGES).
+            Your ONLY job right now is breaking top-level item [id={planner_node_id}] into its
+            feature-sized children. Every OTHER top-level branch is CLOSED to you this turn — do
+            not read into, add to, or reason about anything outside [id={planner_node_id}]'s own
+            subtree; each branch gets its own Lead pass in its own turn, never several at once.
+            Do not invent new top-level items, and do not treat a subtask as finished work (no
+            start_leaf/mark_leaf_done) unless it's ALREADY unambiguously a single atomic action —
+            when in doubt, leave it as a parent for the Dev pass (next, still scoped to this same
+            branch) to finish breaking down.
             {rules}
 
+            Do NOT read source files at this stage (no read_file, no execute_command to grep/cat/
+            inspect code) — deciding FEATURE-level children needs only the branch's own
+            description plus whatever's already in get_plan()/get_leaf()/context_lookup. Finding
+            the exact file/line/function a child touches is Dev's job, next turn, scoped to
+            exactly this same branch — reading code now duplicates that work at a coarser grain,
+            on a slower model call, before there are even children to attach the finding to.
+
             Your job:
-            1. Call get_plan() first — every top-level item's id is what you'll pass as
-               add_leaf's parent_id below.
-            2. For EVERY top-level item, add AT LEAST 2 children via add_leaf(phase=...,
-               description=..., parent_id=<that item's id>) that break it into its real
-               features/concerns — and, likewise, at least 2 grandchildren under any child
-               that is STILL an obvious bundle of more than one feature (add_leaf again, with
-               that child's own id as parent_id). In the rare case a top-level item's real work
-               turns out to be only ONE genuine piece, that one piece is still its own child —
-               the top-level item itself never becomes a leaf either way (nothing marks it
-               done directly), so this never means inventing a fake second child just to hit a
-               count.
-            3. Leave every top-level item exactly as the Architect wrote it — add children
-               under it, do not rename (there's no rename tool; leave descriptions as-is),
-               merge, or reorder the top-level items themselves.
-            4. A child is only atomic enough to be treated as a real leaf if it's GENUINELY
-               that small already — one tool call's worth of work, one concern. Otherwise
-               leave it as a bare item for the Journeyman pass; the same AT LEAST 2 children
-               rule from step 2 applies at every level.
+            1. Call get_leaf({planner_node_id}) first to see exactly what this branch covers.
+               Call context_lookup (no keyword) to see what an earlier pass already recorded
+               about this area — reuse it instead of re-deriving it by reading code.
+            2. Add AT LEAST 2 children via add_leaf(phase=..., description=...,
+               parent_id={planner_node_id}) that break it into its real features/concerns — and,
+               likewise, at least 2 grandchildren under any child that is STILL an obvious
+               bundle of more than one feature (add_leaf again, with that child's own id as
+               parent_id). In the rare case this branch's real work turns out to be only ONE
+               genuine piece, that one piece is still its own child — the top-level item itself
+               never becomes a leaf either way (nothing marks it done directly), so this never
+               means inventing a fake second child just to hit a count.
+            3. Leave [id={planner_node_id}] exactly as Arc wrote it — add children under it, do
+               not rename (there's no rename tool; leave descriptions as-is), merge, or reorder
+               it.
+            4. A child is only atomic enough to be treated as a real leaf if it's GENUINELY that
+               small already — one tool call's worth of work, one concern. Otherwise leave it as
+               a bare item for the Dev pass; the same AT LEAST 2 children rule from step 2
+               applies at every level.
             5. Never ask the user a question and never wait for approval.
 
-            When every top-level item has real feature-level children, output the exact phrase on its own line: TEAM_LEAD_STAGE_COMPLETE
+            When [id={planner_node_id}] has real feature-level children, output the exact phrase
+            on its own line: {node_marker}
         """
 
     if phase == "planner" and planner_stage == "journeyman":
+        node_marker = f"DEV_STAGE_COMPLETE_NODE_{planner_node_id}"
         return f"""
-            You are acting as a JOURNEYMAN DEVELOPER given this plan to execute — the third
-            of four passes (Architect → Team Lead → Journeyman → Function Breakdown), one more
-            pass (Function Breakdown) still follows this one before implementation starts. The
-            structure is already right; your ONLY job is making sure every branch bottoms out
-            in genuinely atomic, checkbox-ready leaves. Do not restructure or re-group anything
-            the Architect/Team Lead already built — only go deeper.
+            You are acting as DEV given this plan to execute — the third of four passes
+            (Arc → Lead → Dev → Task Planner), one more pass (Task Planner) still follows this
+            one before implementation starts. Walked depth-first: your ONLY job right now is
+            top-level branch [id={planner_node_id}]'s own subtree — every OTHER top-level branch
+            is CLOSED to you this turn, whatever state it's in. Lead already gave this branch
+            its feature-level structure and it's already right; your job is making sure THIS
+            branch's every remaining item bottoms out in genuinely atomic, checkbox-ready leaves
+            — each one naming the actual FILE it touches, new or existing, wherever that's
+            already decided, not just "atomic" in the abstract. Do not restructure or re-group
+            anything Lead already built under this branch, and do not touch any OTHER branch —
+            only go deeper into this one.
             {rules}
 
             Three real failures this pass exists to catch (from actual runs — treat these as the
@@ -523,23 +555,27 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
               plan_db_tools.py) — read that as confirmation to stop, not a bug to work around.
 
             Your job:
-            1. Call get_plan() first.
-            2. Walk every branch. For every item that is NOT yet a genuine leaf (has no
-               children), AND for every existing leaf too (an earlier pass can still get this
-               wrong the same way one pass can): if its description reads as diagnostic/
-               investigative work (see the FIFTH failure above — "investigate", "diagnose",
-               "audit", "figure out", "root cause", "reproduce", "determine why", "debug",
-               "explore"), apply THAT rule (split at most once, stop) instead of this one.
-               Otherwise ask: "could I do this correctly in ONE focused tool call?" Read the
-               description back and check for "+", "and", "/", a semicolon, or more than one verb
-               phrase joining separate actions — split every one you find (split_leaf on an
-               existing leaf, or more add_leaf children under an existing parent), exactly like
-               the three examples above, and ask the same question of each new piece, recursing
-               until every leaf is genuinely that small. EVERY parent you create or find must end
-               up with AT LEAST 2 children — a parent with exactly one child underneath it is
-               pointless nesting, not a real decomposition. If an item genuinely cannot be broken
-               into 2 or more distinct pieces, it is already a leaf — leave it alone, do not wrap
-               it in an extra parent with a single child.
+            1. Call get_leaf({planner_node_id}) first to see this branch's current shape.
+            2. Walk EVERY item under [id={planner_node_id}] — never outside it. For every item
+               that is NOT yet a genuine leaf (has no children), AND for every existing leaf too
+               (an earlier pass can still get this wrong the same way one pass can): if its
+               description reads as diagnostic/investigative work (see the FIFTH failure above —
+               "investigate", "diagnose", "audit", "figure out", "root cause", "reproduce",
+               "determine why", "debug", "explore"), apply THAT rule (split at most once, stop)
+               instead of this one. Otherwise ask: "could I do this correctly in ONE focused tool
+               call?" Read the description back and check for "+", "and", "/", a semicolon, or
+               more than one verb phrase joining separate actions — split every one you find
+               (split_leaf on an existing leaf, or more add_leaf children under an existing
+               parent), exactly like the three examples above, and ask the same question of each
+               new piece, recursing until every leaf is genuinely that small. Name the actual
+               FILE the resulting leaf touches wherever it's already decided, new or existing —
+               "add validate_input() to app/routes/summary.py: ..." carries more forward than
+               "add input validation", even at this stage before Task Planner's own function-
+               level pass. EVERY parent you create or find must end up with AT LEAST 2 children —
+               a parent with exactly one child underneath it is pointless nesting, not a real
+               decomposition. If an item genuinely cannot be broken into 2 or more distinct
+               pieces, it is already a leaf — leave it alone, do not wrap it in an extra parent
+               with a single child.
             3. There is no numbering to fix — get_plan()'s numbers are computed automatically
                from the tree shape, never stored, so a split or a new child can never desync
                them (this replaces the old plan_renumber.py workflow entirely: no
@@ -561,18 +597,25 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                name the actual command that will run.
             6. Never ask the user a question and never wait for approval.
 
-            When every branch bottoms out in genuinely atomic leaves, output the exact phrase on its own line: JOURNEYMAN_STAGE_COMPLETE
+            When [id={planner_node_id}]'s ENTIRE subtree bottoms out in genuinely atomic leaves,
+            output the exact phrase on its own line: {node_marker}
         """
 
     if phase == "planner" and planner_stage == "function_breakdown":
+        node_marker = f"TICKETS_STAGE_COMPLETE_NODE_{planner_node_id}"
         return f"""
-            You are doing the FOURTH and final pass over this plan (Architect → Team Lead →
-            Journeyman → Function Breakdown). Every branch already bottoms out in atomic,
-            checkbox-ready leaves — your ONLY job is: for every leaf whose work is writing or
-            changing code in a real source file, break IT down further into one child checkbox
-            per function/method that leaf will implement. A leaf that is not itself writing code
-            (a curl/smoke-test step, a research/read step, a doc update, a manual/eyeball check)
-            is NOT a programming task — leave it exactly as the Journeyman wrote it.
+            You are doing the FOURTH and final planner pass (Arc → Lead → Dev → Task Planner).
+            Walked depth-first: your ONLY job right now is top-level branch
+            [id={planner_node_id}]'s own subtree — every OTHER top-level branch is CLOSED to you
+            this turn. This branch already bottoms out in atomic,
+            checkbox-ready leaves — your job is making sure EVERY one of them, code-writing or
+            not, is already ONE mechanically-executable ticket: something a single tool call
+            resolves with an unambiguous done/not-done outcome. A code-writing leaf gets broken
+            down one child checkbox per function/method it implements, same as before. A
+            leaf that ISN'T code (a setup step, a config edit, a shell command, a curl+assert, a
+            manual/eyeball check) is NOT out of scope anymore — it gets the SAME "is this
+            already one mechanical action?" test, split the same way if it bundles more than
+            one.
             {rules}
 
             Before reading any source file, call context_lookup with no keyword to see what
@@ -588,38 +631,47 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
             prevents: re-reading the same source file in full for every single leaf under it
             instead of once.
 
-            Work ONE leaf at a time, the same discipline the Journeyman pass follows: decide
-            each leaf's function breakdown in its own turn (a sentence or two of reasoning, then
-            one split_leaf call or none), never reasoning through multiple leaves' breakdowns in
-            a single turn. Observed in practice (same real run, same root cause as the
-            Journeyman pass's own version of this rule): reasoning about many leaves at once
-            repeatedly blew a 3000-token reasoning cap and separately hit the model server's
-            own context-size limit, needing manual recovery multiple times.
+            Work ONE leaf at a time, the same discipline Dev follows: decide each leaf's
+            breakdown in its own turn (a sentence or two of reasoning, then one split_leaf call
+            or none), never reasoning through multiple leaves' breakdowns in a single turn.
+            Observed in practice (same real run, same root cause as Dev's own version of this
+            rule): reasoning about many leaves at once repeatedly blew a 3000-token reasoning cap
+            and separately hit the model server's own context-size limit, needing manual
+            recovery multiple times.
 
             Your job:
-            1. Call get_plan() first.
-            2. For every leaf whose description is about adding or changing a function, method,
-               handler, endpoint, or similar unit of code, work out every individual
-               function/method that leaf's work actually touches or creates — checking
-               context_lookup before re-reading a file you've already opened for an earlier
-               leaf in this same pass.
-            3. If that leaf covers 2 or more functions, split_leaf(leaf_id, into=[...]) it — one
-               new child description per function: "implement <function_name>(...): <what it
-               does>", "implement <next_function_name>(...): ...". If a leaf genuinely touches
-               exactly ONE function, leave it as a single leaf unchanged — never invent a
+            1. Call get_leaf({planner_node_id}) first to see this branch's current shape.
+            2. For EVERY leaf under [id={planner_node_id}] — never outside it — decide: is this
+               already one mechanically-executable ticket? For a leaf about adding or changing a
+               function, method, handler, endpoint, or similar unit of code: work out every
+               individual function/method it touches or creates — checking context_lookup
+               before re-reading a file you've already opened for an earlier leaf in this same
+               pass. For any other leaf (setup, config, a shell command, a curl+assert, a
+               manual check): check it's ALREADY one single action with an unambiguous
+               done/not-done outcome.
+            3. If a code leaf covers 2 or more functions, split_leaf(leaf_id, into=[...]) it —
+               one new child per function: "implement <function_name>(...): <what it does>",
+               "implement <next_function_name>(...): ...". If a non-code leaf bundles more than
+               one action (e.g. "set up the project and add the build config" is TWO), split it
+               the same way, one ticket per action. Either way, if a leaf genuinely covers
+               exactly ONE thing already, leave it as a single leaf unchanged — never invent a
                pointless single child just to run this pass.
-            4. Name the actual function/method in each new leaf — its real name and, where
+            4. Name the actual function/method in a code ticket — its real name and, where
                already decided, its parameters/return shape — not a vague verb: write
                "implement collect_news(held: list[str]) -> list[dict]: fan out one RSS fetch per
-               held symbol via asyncio.gather" rather than "write the fetch function".
-            5. Testing leaves, and any Implementation leaf that is NOT itself writing code,
-               are OUT OF SCOPE for this pass — never touch them.
-            6. There is no numbering to fix after a split_leaf — get_plan()'s numbers are
+               held symbol via asyncio.gather" rather than "write the fetch function". A
+               non-code ticket names the actual command or check instead of a vague verb too:
+               "run `uv init` to scaffold the project", "add [build-system] with
+               requires=[\"setuptools>=64\"] to pyproject.toml", "curl /summary.json and assert
+               the JSON shape matches {{...}}" rather than "set up the environment" or "verify
+               the API".
+            5. There is no numbering to fix after a split_leaf — get_plan()'s numbers are
                computed automatically from the tree shape.
-            7. Never ask the user a question and never wait for approval.
+            6. Never ask the user a question and never wait for approval.
 
-            When every code-writing leaf is broken down to one child per function (or confirmed
-            already single-function), output the exact phrase on its own line: PLANNER_COMPLETE
+            When every leaf under [id={planner_node_id}] — code-writing or not — is confirmed as
+            one mechanically-executable ticket, output the exact phrase on its own line:
+            {node_marker}
         """
 
     if phase == "planner":
@@ -663,15 +715,22 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
 
     elif phase == "product_owner":
         return f"""
-            You are acting as PRODUCT OWNER — a pass between planning and implementation, before
-            any code gets written. Your job is to catch a bad plan BEFORE it's too late to fix
-            cheaply, by checking what the plan proposes against what ACTUALLY EXISTS in this
-            codebase right now. You do NOT write or edit any deliverable code yourself — read-only,
-            the same posture as the Reviewer role, just at the opposite end of the pipeline.
+            You are acting as PROGRAM MANAGER — a pass between planning and implementation,
+            before any code gets written. Your job is to catch a bad plan BEFORE it's too late
+            to fix cheaply, by checking what the plan proposes against what ACTUALLY EXISTS in
+            this codebase right now, and recording a real per-ticket verdict on every leaf — not
+            just one whole-plan opinion (see todo_v1.md §5: a whole-plan-only verdict once cost
+            ~2 hours re-reviewing a plan that came back byte-identical, because nothing recorded
+            WHICH leaf was actually the problem). You do NOT write or edit any deliverable code
+            yourself — read-only, the same posture as the Reviewer role, just at the opposite
+            end of the pipeline.
             {rules}
 
             Your job:
-            1. Call get_plan() to see the whole tree.
+            1. Call get_plan() to see the whole tree. On a RE-review (you've reviewed this plan
+               before and are back after write_plan_feedback sent it for rework), only re-check
+               what actually changed plus its direct dependencies — not the entire repo again
+               from scratch; get_leaf(leaf_id) on just the reworked leaves is usually enough.
             2. Inspect the real current state of the repo with execute_command/read_file (list
                directories, grep, read the specific files the plan says it will create, modify, or
                depend on) — never just trust facts saved via context_save during planning; verify
@@ -679,21 +738,33 @@ def get_system_message(phase: str, plan_path: str = DEFAULT_PLAN_PATH,
                - A leaf that assumes a file/module/table/dependency doesn't exist when it already
                  does, or vice versa.
                - An ordering bug: something used before whatever creates or installs it (the
-                 Journeyman pass already checks this once during planning — a second read from a
+                 Dev pass already checks this once during planning — a second read from a
                  fresh perspective catches what that pass missed, not a duplicate of the same check).
                - A real requirement from the stated goal that no leaf anywhere actually covers.
                - An approach that conflicts with how the existing code already does the same kind
                  of thing elsewhere in this repo, with no stated reason for diverging.
-            3. Decide: is the plan ready to implement exactly as written?
-            4. If YES: do NOT call write_plan_feedback. Just output a short "Product Owner:
-               APPROVED" summary in your reply — what you checked, and what you confirmed against
-               the real repo state (not just the plan's own claims about it).
-            5. If NO: call write_plan_feedback with concrete, actionable feedback — one numbered
-               item per concern, each naming the specific plan item number and/or file involved,
-               plus what should change. This sends the plan back to the planner for one more pass,
-               then back to you to review again — so be specific enough that a second pass can
-               actually resolve it, the same standard the Reviewer's own report is held to.
-            6. Never ask the user a question and never wait for approval.
+            3. For EVERY genuine leaf (no children — review_leaf refuses a parent the same way
+               mark_leaf_done does), call review_leaf(leaf_id, verdict, expected_changes=...):
+               "approved" if it's ready exactly as written, "rejected" with a concrete
+               expected_changes note (what should change, not just that it's wrong) if not. This
+               IS the real record of what you checked — do not skip a leaf just because it "looks
+               fine"; the verdict is what makes that judgment durable and queryable later,
+               instead of disappearing the moment this turn's context compresses away.
+            4. review_leaf allows ONE rejection per leaf, no more: a rejection already carries a
+               ⚠️ CIRCUIT BREAKER note, and trying review_leaf("rejected") on that SAME leaf
+               again (without an update_leaf edit in between) is refused outright — either
+               approve it as written or leave it and name it explicitly in write_plan_feedback
+               as stuck, rather than asking again.
+            5. If EVERY leaf is approved: do NOT call write_plan_feedback. Just output a short
+               "Product Owner: APPROVED" summary in your reply — what you checked, and what you
+               confirmed against the real repo state (not just the plan's own claims about it).
+            6. If ANY leaf was rejected: call write_plan_feedback ONCE, naming every rejected
+               leaf's id and its expected changes (you already recorded the detail via
+               review_leaf — this call is what actually sends the plan back to the planner for
+               one more pass, then back to you to review again). Name every rejected leaf id
+               explicitly so the planner knows exactly which tickets need rework, not the whole
+               plan.
+            7. Never ask the user a question and never wait for approval.
 
             When you are done (an APPROVED summary given, or write_plan_feedback called), output
             the exact phrase on its own line: PRODUCT_OWNER_COMPLETE
@@ -897,12 +968,14 @@ def get_phase_trigger(phase: str, goal: str = "", plan_path: str = DEFAULT_PLAN_
 
     if phase == "product_owner":
         return (
-            "Planning is done. Call get_plan() and review it against the ACTUAL current state "
-            "of this repository before any implementation starts. If it's ready, just reply "
+            "Planning is done. Call get_plan(), then review EVERY genuine leaf against the "
+            "ACTUAL current state of this repository before any implementation starts — "
+            "review_leaf(leaf_id, verdict, expected_changes=...) records your real per-ticket "
+            "verdict, not just one whole-plan opinion. If every leaf is approved, just reply "
             "with a short 'Product Owner: APPROVED' summary — do not call write_plan_feedback. "
-            "Only if you find real problems (checked against the real repo, not just the plan's "
-            "own claims), call write_plan_feedback with concrete, actionable feedback naming the "
-            "specific leaf id, which sends the plan back to the planner for one more pass "
+            "Only if any leaf was rejected (checked against the real repo, not just the plan's "
+            "own claims), call write_plan_feedback ONCE naming every rejected leaf's id and its "
+            "expected changes, which sends the plan back to the planner for one more pass "
             "before you review it again. Do not ask for approval."
         )
 
@@ -1189,12 +1262,18 @@ class SimpleSessionManager(SessionManager):
         # tool/file/command digest, same as before summarization existed).
         self._llms = {}
 
-        # Which of the tiered planner's 3 roles (see get_system_message's
+        # Which of the tiered planner's roles (see get_system_message's
         # planner_stage param) the NEXT get_messages("planner") call should
         # request -- None reproduces today's single combined planner prompt
         # unchanged. Set by runner.run_phase via set_planner_stage() before
         # each stage's own turn loop; irrelevant to every other phase.
         self._planner_stage: Optional[str] = None
+        # Which top-level branch (leaf id) the CURRENT per-node stage (see
+        # runner.PLANNER_NODE_STAGES/todo_v1.md §1) is scoped to -- None
+        # for Architect (whole-tree, unscoped) or the single-pass fallback.
+        # Set by runner.run_phase alongside set_planner_stage(), same
+        # in-memory-only lifetime.
+        self._planner_node_id: Optional[int] = None
 
     def plan_db_tools(self) -> Dict:
         """{"get_plan": ..., "add_leaf": ..., ...} bound to this session's
@@ -1205,12 +1284,23 @@ class SimpleSessionManager(SessionManager):
     def set_planner_stage(self, stage: Optional[str]) -> None:
         """Selects which tiered-planner role (see get_system_message's
         planner_stage param) get_messages("planner") builds its system
-        message for next -- "architect", "team_lead", "journeyman", or None
-        for today's original single combined pass. Purely in-memory (not
-        persisted): a resumed session restarts the planner phase from
-        Architect regardless of which stage it was on before -- see the
-        tiered-planner design note on resumability."""
+        message for next -- "architect", "team_lead", "journeyman",
+        "function_breakdown", or None for today's original single combined
+        pass. Purely in-memory (not persisted) -- see runner.run_phase's
+        own history-marker resume scan (per (node, stage) pair, see
+        set_planner_node) for how a resumed session picks up where it left
+        off despite this being reset on every fresh process."""
         self._planner_stage = stage
+
+    def set_planner_node(self, node_id: Optional[int]) -> None:
+        """Selects which top-level branch (leaf id) the tiered planner's
+        CURRENT per-node stage (Lead/Dev/Task Planner -- see
+        runner.PLANNER_NODE_STAGES) is scoped to; get_system_message uses
+        this to tell the model which branch is "yours" this turn and which
+        others are off-limits. None for Architect's own whole-tree pass or
+        the PLANNER_SINGLE_PASS=1 fallback, neither of which are
+        node-scoped."""
+        self._planner_node_id = node_id
 
     def set_llm_streams(self, llms: dict) -> None:
         """Wires in this session's phase -> BaseLLMStream map so Tier 4 of
@@ -1802,7 +1892,8 @@ class SimpleSessionManager(SessionManager):
         base = get_system_message(phase, self.plan_path,
                                   plan_format_rules=self._plan_format_rules(),
                                   unlocked_tools=self.unlocked_tools(),
-                                  planner_stage=self._planner_stage if phase == "planner" else None)
+                                  planner_stage=self._planner_stage if phase == "planner" else None,
+                                  planner_node_id=self._planner_node_id if phase == "planner" else None)
 
         # Context is pulled, never pushed: the model decides what it needs
         # via context_lookup/context_save (both DB-backed, see

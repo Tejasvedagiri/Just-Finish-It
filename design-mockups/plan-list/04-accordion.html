@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>4 — Nested Accordion</title>
+<script src="_shared.js"></script>
+<style id="css"></style>
+</head>
+<body>
+<div id="app">
+  <a class="back-link" href="index.html">← all 6 mockups</a>
+  <div class="mockup-head">
+    <div class="tag">Option 4 of 6</div>
+    <h1>Nested accordion</h1>
+    <p>Every branch is its own collapsible section (native &lt;details&gt;, no custom JS needed for the expand/collapse itself). Unlike the breadcrumb drill-down, you can have MULTIPLE branches open at once — expand 1.2 and 11 side by side to compare them, without losing either. Collapsed by default past 2 levels deep to stay compact on a big plan.</p>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><span>Plan checklist</span><span class="n" id="overall"></span></div>
+    <div id="tree"></div>
+  </div>
+</div>
+<script>
+document.getElementById("css").textContent = SHARED_CSS + `
+  #tree { padding: 4px 0; }
+  .phase-title { padding: 9px 14px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-faint); font-weight: 700; background: var(--bg-raised); border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); display:flex; justify-content:space-between; }
+  .phase-title:first-child { border-top: none; }
+  details { border-bottom: 1px solid var(--line-soft); }
+  details[open] > summary { color: var(--accent); }
+  summary { list-style: none; cursor: pointer; padding: 8px 14px; display: flex; align-items: center; gap: 8px; }
+  summary::-webkit-details-marker { display: none; }
+  summary .arrow { display: inline-block; transition: transform .12s; color: var(--ink-faint); font-size: 10px; }
+  details[open] > summary .arrow { transform: rotate(90deg); }
+  summary .num { font-weight: 700; }
+  summary .desc { color: var(--ink-dim); font-size: 12px; flex: 1; }
+  summary .badge { color: var(--ink-faint); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  .leaf-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 14px; }
+  .leaf-row.is-current { background: rgba(224,175,104,0.06); border-left: 2px solid var(--amber); }
+  .leaf-row .num { font-weight: 700; flex-shrink: 0; }
+  .leaf-row .desc { color: var(--ink); font-size: 12.5px; }
+  .nest-1 { padding-left: 14px; border-left: 1px solid var(--line-soft); margin-left: 20px; }
+  .nest-2 { padding-left: 14px; border-left: 1px solid var(--line-soft); margin-left: 20px; }
+`;
+
+function esc(s) { return s.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function renderNode(node, depth, defaultOpen) {
+  const hasChildren = !!node.children;
+  if (!hasChildren) {
+    const g = statusGlyph(node.status);
+    return `<div class="leaf-row ${node.status === "current" ? "is-current" : ""}">
+      <span class="${g.cls} num">${g.char}</span>
+      <span><span class="num">${node.number}</span> <span class="desc">${esc(node.desc)}</span></span>
+    </div>`;
+  }
+  const [d, t] = subtreeCounts({children: node.children});
+  const open = defaultOpen ? "open" : "";
+  let inner = `<div class="nest-${Math.min(depth + 1, 2)}">`;
+  for (const c of node.children) inner += renderNode(c, depth + 1, defaultOpen && depth < 1);
+  inner += `</div>`;
+  return `<details ${open}>
+    <summary><span class="arrow">▸</span><span class="num">${node.number}</span><span class="desc">${esc(node.desc)}</span><span class="badge">${d}/${t}</span></summary>
+    ${inner}
+  </details>`;
+}
+
+let out = "";
+let overallD = 0, overallT = 0;
+for (const [key, phase] of Object.entries(MOCK_TREE)) {
+  let pd = 0, pt = 0;
+  for (const n of phase.nodes) { const [d, t] = subtreeCounts(n); pd += d; pt += t; }
+  overallD += pd; overallT += pt;
+  out += `<div class="phase-title">${phase.label}<span>${pd}/${pt}</span></div>`;
+  for (const n of phase.nodes) out += renderNode(n, 0, true);
+}
+document.getElementById("tree").innerHTML = out;
+document.getElementById("overall").textContent = overallD + "/" + overallT + " done";
+</script>
+</body>
+</html>

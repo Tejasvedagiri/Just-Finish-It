@@ -3,7 +3,7 @@
 Replaces two independently-fragile things at once: (1) dot-numbered strings
 ("1.1.2") hand-edited via replace_in_file, whose renumbering after a split
 needed a bolt-on repair tool (JFI.tool.plan_renumber) because a stale read
-between two edits could desync; (2) frontend/src/main.js's own separate
+between two edits could desync; (2) Just-Finish-It-Fleet's src/main.js's own separate
 regex tree-parser (parsePlanLines/buildPlanTree) over that same markdown,
 which had its own documented bug (a trailing-period parent number once
 flattened the whole tree into bogus top-level roots). One schema, no
@@ -49,10 +49,26 @@ class Leaf(SQLModel, table=True):
     started_at: Optional[datetime] = None
     ended_at: Optional[datetime] = None
     # Folds in what task_history tracked as a second, separately-joined
-    # list in the old status snapshot (see frontend/src/main.js's
+    # list in the old status snapshot (see Just-Finish-It-Fleet's src/main.js's
     # historyByKey) -- one row now carries its own cost instead of two
     # parallel structures keyed by "phase:number" strings.
     tokens: Optional[int] = None
+
+    # Program Manager's per-leaf verdict (see JFI.tool.plan_db_tools.
+    # review_leaf) -- "approved"/"rejected"/None (not yet reviewed).
+    # Deliberately separate from `status` above: `status` tracks
+    # IMPLEMENTATION progress (TODO/DONE/SKIPPED), this tracks REVIEW
+    # progress -- a leaf can be `status=TODO, review_status=approved`
+    # (ready for imp) just as easily as `status=TODO, review_status=None`
+    # (never reviewed) or `review_status=rejected` (sent back for rework).
+    review_status: Optional[str] = Field(default=None, index=True)
+    # The expected-changes note from the most recent rejection -- what
+    # Program Manager wants fixed before re-review. Cleared on approval.
+    review_note: Optional[str] = None
+    # How many times in a row THIS leaf has been rejected with no change
+    # to its description in between -- see review_leaf's own circuit-
+    # breaker check. Reset to 0 on approval or on any description change.
+    rejection_count: int = Field(default=0)
 
     created_at: datetime = Field(default_factory=utcnow)
 

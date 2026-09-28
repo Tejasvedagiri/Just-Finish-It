@@ -1,0 +1,99 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>5 — Vertical Stepper</title>
+<script src="_shared.js"></script>
+<style id="css"></style>
+</head>
+<body>
+<div id="app">
+  <a class="back-link" href="index.html">← all 6 mockups</a>
+  <div class="mockup-head">
+    <div class="tag">Option 5 of 6</div>
+    <h1>Vertical stepper / active path</h1>
+    <p>The active path (1 → 1.2 → 1.2.1) runs down the page as a connected vertical trail, each step showing its own progress ring and its siblings as small swappable chips beside it. Reads more like "where am I in this journey" than a spreadsheet — good fit if the dashboard leans toward a guided, narrative feel rather than dense data review.</p>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><span>Plan checklist</span><span class="n" id="overall"></span></div>
+    <div id="phasepick"></div>
+    <div id="stepper"></div>
+  </div>
+</div>
+<script>
+document.getElementById("css").textContent = SHARED_CSS + `
+  #phasepick { display: flex; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--line-soft); }
+  .phase-btn { background: var(--bg-raised); border: 1px solid var(--line); color: var(--ink-dim); font-size: 11px; padding: 5px 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .phase-btn.active { border-color: var(--accent); color: var(--accent); }
+  #stepper { padding: 22px 24px 10px; }
+  .step { display: flex; gap: 16px; position: relative; padding-bottom: 26px; }
+  .step:last-child { padding-bottom: 6px; }
+  .step::before { content: ""; position: absolute; left: 17px; top: 36px; bottom: 0; width: 1px; background: var(--line); }
+  .step:last-child::before { display: none; }
+  .step-ring { flex-shrink: 0; width: 36px; height: 36px; border-radius: 50%; border: 2px solid var(--line); display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; background: var(--bg-panel); z-index: 1; }
+  .step-ring.done { border-color: var(--accent); color: var(--accent); }
+  .step-ring.current { border-color: var(--amber); color: var(--amber); }
+  .step-body { flex: 1; padding-top: 4px; }
+  .step-num { font-weight: 700; font-size: 14px; }
+  .step-desc { color: var(--ink-dim); font-size: 12.5px; margin: 3px 0 10px; max-width: 520px; }
+  .sibling-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .sib-chip { border: 1px solid var(--line); padding: 4px 10px; font-size: 11px; cursor: pointer; color: var(--ink-faint); }
+  .sib-chip:hover { border-color: var(--accent); }
+  .sib-chip.on-path { border-color: var(--accent); color: var(--accent); background: rgba(0,175,175,0.06); }
+  .leaf-end { margin-top: 6px; padding: 10px 14px; border: 1px dashed var(--line); font-size: 12px; color: var(--ink-faint); }
+`;
+
+function esc(s) { return s.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+let phaseKey = "imp";
+let path = ["1", "1.2", "1.2.1"];
+
+function render() {
+  let picks = "";
+  for (const [key, phase] of Object.entries(MOCK_TREE)) {
+    picks += `<button class="phase-btn ${key === phaseKey ? "active" : ""}" onclick="setPhase('${key}')">${phase.label}</button>`;
+  }
+  document.getElementById("phasepick").innerHTML = picks;
+
+  let nodes = MOCK_TREE[phaseKey].nodes;
+  let html = "";
+  let reachedLeaf = null;
+  for (let i = 0; i < path.length; i++) {
+    const num = path[i];
+    const selected = nodes.find((n) => n.number === num);
+    if (!selected) break;
+    if (!selected.children) { reachedLeaf = selected; break; }
+    const [d, t] = subtreeCounts({children: selected.children});
+    const ringCls = d === t ? "done" : "current";
+    html += `<div class="step">
+      <div class="step-ring ${ringCls}">${d}/${t}</div>
+      <div class="step-body">
+        <div class="step-num">${selected.number}</div>
+        <div class="step-desc">${esc(selected.desc)}</div>
+        <div class="sibling-chips">`;
+    for (const c of selected.children) {
+      const onPath = path[i + 1] === c.number;
+      const g = c.children ? null : statusGlyph(c.status);
+      html += `<span class="sib-chip ${onPath ? "on-path" : ""}" onclick="setPath(${i + 1}, '${c.number}')">${g ? `<span class="${g.cls}">${g.char}</span> ` : ""}${c.number}</span>`;
+    }
+    html += `</div></div></div>`;
+    nodes = selected.children;
+  }
+  if (reachedLeaf) {
+    const g = statusGlyph(reachedLeaf.status);
+    html += `<div class="leaf-end"><span class="${g.cls}">${g.char}</span> <strong>${reachedLeaf.number}</strong> — ${esc(reachedLeaf.desc)}</div>`;
+  }
+  document.getElementById("stepper").innerHTML = html;
+
+  let overallD = 0, overallT = 0;
+  for (const phase of Object.values(MOCK_TREE)) for (const n of phase.nodes) { const [d,t] = subtreeCounts(n); overallD += d; overallT += t; }
+  document.getElementById("overall").textContent = overallD + "/" + overallT + " done";
+}
+
+function setPhase(key) { phaseKey = key; path = [MOCK_TREE[key].nodes[0].number]; render(); }
+function setPath(depth, num) { path = path.slice(0, depth).concat(num); render(); }
+
+render();
+</script>
+</body>
+</html>

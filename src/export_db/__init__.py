@@ -7,7 +7,7 @@ read, one pair per session.
 reads these files back. The entire point of the DB rewrite (see /todo.md)
 was retiring markdown as a SOURCE OF TRUTH because two independent parsers
 over plan.md (this project's own Python planner-phase scanner and
-frontend/src/main.js's regex tree-parser) had each hit their own real bugs.
+Just-Finish-It-Fleet's src/main.js's regex tree-parser) had each hit their own real bugs.
 Reintroducing a markdown file that anything parses back in would just grow
 a third one.
 

@@ -67,11 +67,52 @@ class TestProductOwnerSystemMessage:
         msg = get_system_message("imp", "JFI/demo/plan.md")
         assert "call write_plan_feedback with concrete" not in msg
 
+    def test_instructs_a_per_ticket_verdict_via_review_leaf(self):
+        """todo_v1.md §5: a whole-plan-only accept/reject used to send the
+        ENTIRE plan back through every planner stage to fix ONE flagged
+        leaf, and once cost ~2 hours re-reviewing a plan that came back
+        byte-identical. Program Manager must record a real verdict on
+        every genuine leaf via review_leaf, not just one overall opinion."""
+        msg = get_system_message("product_owner", "JFI/demo/plan.md")
+        assert "review_leaf" in msg
+        assert "PROGRAM MANAGER" in msg
+        assert "expected_changes" in msg
+        # Never on a parent -- same guard mark_leaf_done itself enforces.
+        assert "genuine leaf" in msg
+
+    def test_names_the_circuit_breaker_escape_hatch(self):
+        """The model must know NOT to keep calling review_leaf("rejected")
+        on the same leaf once review_leaf's own hard stop trips -- approve
+        or escalate instead of retrying the refused call."""
+        msg = get_system_message("product_owner", "JFI/demo/plan.md")
+        assert "CIRCUIT BREAKER" in msg
+
+    def test_write_plan_feedback_names_every_rejected_leaf_id(self):
+        """write_plan_feedback is still the ESCALATION signal that sends
+        the plan back to the planner -- but now it must name which
+        specific leaves were rejected, not just "the plan has problems",
+        so the planner reworks the right tickets instead of everything."""
+        msg = " ".join(get_system_message("product_owner", "JFI/demo/plan.md").split())
+        assert "naming every rejected leaf's id" in msg or "name every rejected leaf id" in msg
+
+    def test_incremental_re_review_guidance_present(self):
+        """todo_v1.md §4: a re-review after a targeted fix should only
+        re-check what changed, not the entire repo from scratch again --
+        the old prompt had no such guidance and re-derived everything
+        every single pass."""
+        msg = " ".join(get_system_message("product_owner", "JFI/demo/plan.md").split())
+        assert "RE-review" in msg
+        assert "not the entire repo again from scratch" in msg
+
 
 class TestProductOwnerTrigger:
     def test_trigger_mentions_feedback_tool(self):
         msg = get_phase_trigger("product_owner", "goal", "JFI/demo/plan.md")
         assert "write_plan_feedback" in msg
+
+    def test_trigger_mentions_review_leaf(self):
+        msg = get_phase_trigger("product_owner", "goal", "JFI/demo/plan.md")
+        assert "review_leaf" in msg
 
     def test_planner_trigger_mentions_po_feedback_when_given(self):
         msg = get_phase_trigger(

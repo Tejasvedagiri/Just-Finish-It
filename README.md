@@ -235,14 +235,15 @@ The dashboard also shows `plan.md`'s checklist progress and the latest `review.m
 
 ---
 
-## Fleet dashboard (`frontend/` — Node master)
+## Fleet dashboard ([`Just-Finish-It-Fleet`](https://github.com/Tejasvedagiri/Just-Finish-It-Fleet) — standalone Node master)
 
-`jfi-web` needs a shared filesystem between the session and the dashboard. The fleet dashboard doesn't: its master is a small Node WebSocket server meant to run on its own machine (or just a different terminal) and watch *multiple* sessions, anywhere, over the network — a session and the master only ever talk over one socket, never files. The master is deliberately a separate Node project (`frontend/`), not Python — JFI (Python) sessions are pure WebSocket clients of it, so the wire protocol (plain WebSocket + JSON) is all that connects the two; nothing on the Python side cares what language the master is written in.
+`jfi-web` needs a shared filesystem between the session and the dashboard. The fleet dashboard doesn't: its master is a small Node WebSocket server meant to run on its own machine (or just a different terminal) and watch *multiple* sessions, anywhere, over the network — a session and the master only ever talk over one socket, never files. The master lives in its own standalone repo, `Just-Finish-It-Fleet`, not this one and not Python — JFI (Python) sessions are pure WebSocket clients of it, so the wire protocol (plain WebSocket + JSON) is all that connects the two; nothing on the Python side cares what language the master is written in, or where its code lives.
 
 ```bash
-uv sync --extra master                    # pulls in websockets, for the Python client side
-cd frontend && npm install && npm run build   # build the fleet UI once
-npm run master                            # serves it on :8765 (MASTER_PORT to change)
+uv sync --extra master                              # pulls in websockets, for the Python client side
+git clone https://github.com/Tejasvedagiri/Just-Finish-It-Fleet.git ../Just-Finish-It-Fleet
+cd ../Just-Finish-It-Fleet && npm install && npm run build   # build the fleet UI once
+npm run master                                      # serves it on :8765 (MASTER_PORT to change)
 ```
 
 Then, on each session you want it to watch (any machine that can reach the master's port):
@@ -308,7 +309,7 @@ Just-Finish-It/
 │   │   │                        #   always-live input line (queue/force/answer), scroll lock, theme presets, live run.log mirroring
 │   │   ├── key_bindings.py      # teaches the terminal Shift+Enter/Ctrl+Enter encodings so multiline input works everywhere
 │   │   ├── web_bridge.py        # WebBridge: mirrors live status + relays answers/new-request text to/from jfi-web, see "Web dashboard" below
-│   │   └── socket_reporter.py   # SocketReporter: a WebSocket CLIENT mirroring live status to the fleet master (frontend/server/master.js), see "Fleet dashboard" below
+│   │   └── socket_reporter.py   # SocketReporter: a WebSocket CLIENT mirroring live status to the fleet master (server/master.js in the standalone Just-Finish-It-Fleet repo), see "Fleet dashboard" below
 │   ├── orchestrator/
 │   │   └── basic_orchestrator.py# legacy single-turn orchestrator (kept for reference/testing; runner.py is what JFI actually runs)
 │   ├── web/                     # jfi-web: an optional Streamlit dashboard, see "Web dashboard" below
@@ -329,17 +330,9 @@ Just-Finish-It/
 ├── src/build_binary/             # `uv run build` — PyInstaller onefile packaging of src/JFI/runner.py
 │   └── __init__.py
 │
-├── frontend/                     # the fleet dashboard, END TO END — a separate Node project, deliberately kept out of src/
-│   ├── package.json              #   so the Python package and the JS build never mix; `npm run master` runs the server, `npm run build` -> dist/ it serves
-│   ├── vite.config.js            # dev-only: `npm run dev` + hot reload, proxying /view + /report to the master (MASTER_DEV_PROXY_TARGET)
-│   ├── index.html
-│   ├── server/
-│   │   ├── master.js             # `npm run master` — the fleet WebSocket server (Node, not Python) + static file host for ../dist/
-│   │   └── session-registry.js   # SessionRegistry/deriveEvents: master.js's in-memory fleet state, no dependency on ws/http (unit-testable alone)
-│   └── src/
-│       ├── main.js               # WebSocket client, all rendering, tab switching, theme dropdown — no framework
-│       ├── themes.js             # the SAME 20 THEME presets JFI's own terminal supports, expanded into this app's full CSS token set
-│       └── style.css             # component styles + a static-fallback token set (themes.js overrides these live via main.js)
+│   (the fleet dashboard used to live here as frontend/ — it's now its own
+│   standalone repo, github.com/Tejasvedagiri/Just-Finish-It-Fleet, a sibling
+│   checkout, not a subdirectory; see "Fleet dashboard" below)
 │
 ├── test/                        # pytest suite (see "Tests" below) — unit tests per module plus the plan-file protocol
 ├── utils/                       # dev-only scripts, not part of the shipped package

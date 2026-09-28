@@ -1,0 +1,113 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>3 — Enhanced Breadcrumb</title>
+<script src="_shared.js"></script>
+<style id="css"></style>
+</head>
+<body>
+<div id="app">
+  <a class="back-link" href="index.html">← all 6 mockups</a>
+  <div class="mockup-head">
+    <div class="tag">Option 3 of 6</div>
+    <h1>Enhanced breadcrumb drill-down</h1>
+    <p>Keeps today's drill-down interaction (click a tab, go deeper) but fixes the actual complaint: a persistent "path outline" strip above the tabs always shows the full ancestor chain — 1 → 1.2 → 1.2.1 — with each ancestor's OWN sibling count visible, so you never lose track of where you are. Lowest-risk option: same click handlers as today, just a new always-visible strip.</p>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><span>Plan checklist</span><span class="n" id="overall"></span></div>
+    <div id="outline"></div>
+    <div id="tabrow"></div>
+    <div id="cards"></div>
+  </div>
+</div>
+<script>
+document.getElementById("css").textContent = SHARED_CSS + `
+  #outline { padding: 12px 14px; border-bottom: 1px solid var(--line-soft); background: var(--bg-raised); }
+  .outline-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; font-size: 11.5px; }
+  .outline-step { display: flex; align-items: center; gap: 4px; }
+  .outline-step .num { color: var(--accent); font-weight: 700; cursor: pointer; padding: 2px 6px; }
+  .outline-step .num:hover { background: rgba(0,175,175,0.1); }
+  .outline-step:last-child .num { background: var(--accent-dim); color: #eafffe; }
+  .outline-sep { color: var(--ink-faint); }
+  .outline-siblings { color: var(--ink-faint); font-size: 10px; }
+  #tabrow { padding: 10px 14px; border-bottom: 1px solid var(--line-soft); display: flex; flex-wrap: wrap; gap: 6px; }
+  .pc-tab { background: var(--bg-raised); border: 1px solid var(--line); color: var(--ink-dim); font-size: 11.5px; padding: 6px 11px; }
+  .pc-tab .b { margin-left: 6px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+  .pc-tab.active { border-color: var(--accent); color: var(--accent); }
+  .pc-tab.is-current-path { border-color: #4a3a1a; }
+  #cards { padding: 14px; }
+  .leaf-card { border: 1px solid var(--line); padding: 12px 14px; margin-bottom: 8px; display: flex; gap: 10px; }
+  .leaf-card.is-current { border-color: #4a3a1a; background: rgba(224,175,104,0.05); }
+  .leaf-card .num { font-weight: 700; flex-shrink: 0; }
+  .leaf-card .desc { color: var(--ink-dim); }
+`;
+
+function esc(s) { return s.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+let path = ["imp", "1", "1.2", "1.2.1"]; // [phaseKey, ...number path]
+
+function findLevel(phaseKey, numPath) {
+  let nodes = MOCK_TREE[phaseKey].nodes;
+  const chain = [];
+  for (const num of numPath) {
+    const found = nodes.find((n) => n.number === num);
+    if (!found) break;
+    chain.push({ node: found, siblings: nodes });
+    nodes = found.children || [];
+  }
+  return { chain, finalSiblings: nodes };
+}
+
+function render() {
+  const phaseKey = path[0];
+  const numPath = path.slice(1);
+  const { chain, finalSiblings } = findLevel(phaseKey, numPath);
+
+  // outline strip: full ancestor chain, each step clickable, each showing
+  // how many siblings it has (so you know there's more to see at that level
+  // without having to click back up to find out).
+  let outline = `<div class="outline-row"><span class="outline-step"><span class="num" onclick="jump(0)">${MOCK_TREE[phaseKey].label}</span></span>`;
+  chain.forEach((step, i) => {
+    outline += `<span class="outline-sep">/</span><span class="outline-step"><span class="num" onclick="jump(${i + 1})">${step.node.number}</span><span class="outline-siblings">(${step.siblings.length} at this level)</span></span>`;
+  });
+  document.getElementById("outline").innerHTML = outline;
+
+  // tab row: siblings at the DEEPEST level reached, exactly like today,
+  // just with the outline above it for context now.
+  const lastLevelNodes = chain.length ? chain[chain.length - 1].siblings.find(n=>n.number===chain[chain.length-1].node.number).children || [] : MOCK_TREE[phaseKey].nodes;
+  let tabs = "";
+  const parentLevelForTabs = chain.length >= 2 ? chain[chain.length - 2].node.children : MOCK_TREE[phaseKey].nodes;
+  for (const n of parentLevelForTabs) {
+    const hasChildren = !!n.children;
+    const [d, t] = hasChildren ? subtreeCounts({children: n.children}) : statusGlyph(n.status).char === "✓" ? [1,1] : [0,1];
+    const active = chain.length && chain[chain.length-1].node.number === n.number;
+    tabs += `<button class="pc-tab ${active ? "active" : ""}" onclick="selectAtDepth(${chain.length - 1}, '${n.number}')">${n.number} ${esc(n.desc.split(":")[0].slice(0,22))}<span class="b">${d}/${t}</span></button>`;
+  }
+  document.getElementById("tabrow").innerHTML = tabs;
+
+  // cards: leaves at the final level -- when the path drills all the way
+  // to a leaf (not a branch), finalSiblings is empty (there's nothing
+  // BELOW a leaf), so fall back to the tab row's own sibling set, which
+  // is exactly the leaf(s) already selected/highlighted above.
+  const leafSource = finalSiblings.length ? finalSiblings : parentLevelForTabs;
+  const leaves = leafSource.filter((n) => !n.children);
+  let cards = "";
+  for (const l of leaves) {
+    const g = statusGlyph(l.status);
+    cards += `<div class="leaf-card ${l.status === "current" ? "is-current" : ""}"><span class="${g.cls} num">${g.char} ${l.number}</span><span class="desc">${esc(l.desc)}</span></div>`;
+  }
+  document.getElementById("cards").innerHTML = cards || `<p class="desc">No leaves directly at this level.</p>`;
+
+  let overallD = 0, overallT = 0;
+  for (const phase of Object.values(MOCK_TREE)) for (const n of phase.nodes) { const [d,t] = subtreeCounts(n); overallD += d; overallT += t; }
+  document.getElementById("overall").textContent = overallD + "/" + overallT + " done";
+}
+
+function jump(depth) { path = path.slice(0, depth + 1); render(); }
+function selectAtDepth(depth, num) { path = path.slice(0, depth + 1).concat(num); render(); }
+
+render();
+</script>
+</body>
+</html>

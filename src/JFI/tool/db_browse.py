@@ -63,13 +63,24 @@ def _json_safe(value):
     return value
 
 
-def query_table(engine, table_name: str, session_id: Optional[str] = None) -> list[dict]:
-    """Up to ROW_LIMIT rows of `table_name` as JSON-safe dicts, optionally
-    filtered to one session_id. Raises ValueError for an unknown table
-    name -- callers (a Streamlit selectbox, a remote fleet-dashboard
-    request relayed through a WebSocket) must never let an arbitrary
-    string reach a query, so this whitelist lookup is the only thing that
-    ever turns into SQL."""
+def query_table(
+    engine,
+    table_name: str,
+    session_id: Optional[str] = None,
+    limit: Optional[int] = None,
+    order: str = "asc",
+) -> list[dict]:
+    """Up to `limit` (default/max ROW_LIMIT) rows of `table_name` as
+    JSON-safe dicts, optionally filtered to one session_id, ordered by the
+    table's own primary key ("asc" = insertion order, "desc" = newest
+    first -- every registered table's PK is either an autoincrement `id`
+    or, for SessionRecord, `session_id` itself, so this is always a sound
+    default with no per-table special-casing needed). Raises ValueError for
+    an unknown table name -- callers (a Streamlit selectbox, a remote
+    fleet-dashboard request relayed through a WebSocket) must never let an
+    arbitrary string reach a query, so this whitelist lookup is the only
+    thing that ever turns into SQL."""
+    from sqlalchemy import desc as sa_desc
     from sqlmodel import select
 
     from JFI.models import get_session
@@ -78,11 +89,17 @@ def query_table(engine, table_name: str, session_id: Optional[str] = None) -> li
     if model is None:
         raise ValueError(f"Unknown table {table_name!r}")
 
+    effective_limit = ROW_LIMIT if limit is None else max(1, min(int(limit), ROW_LIMIT))
+
     with get_session(engine) as db:
         query = select(model)
         if session_id and hasattr(model, "session_id"):
             query = query.where(model.session_id == session_id)
-        query = query.limit(ROW_LIMIT)
+        pk_columns = list(model.__table__.primary_key.columns)
+        if pk_columns:
+            order_col = pk_columns[0]
+            query = query.order_by(sa_desc(order_col) if order == "desc" else order_col)
+        query = query.limit(effective_limit)
         rows = list(db.exec(query))
 
     return [{k: _json_safe(v) for k, v in row.model_dump().items()} for row in rows]

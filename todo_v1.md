@@ -1,8 +1,10 @@
 # TODO v1 — Planning pipeline redesign (Arc → Lead → Developer → Task Planner → Program Manager)
 
-Status as of 2026-09-24. Diagnosis and design only — nothing in this file is
-implemented yet. Grounded entirely in one real session's actual DB/log data
-(`StockAPIServer/.jfi/JFI.db`, session `start`), not hypothetical concerns.
+Status as of 2026-09-24: **all six Scope sections implemented and tested**
+(920 tests passing). Originally diagnosis-and-design only, grounded in one
+real session's actual DB/log data (`StockAPIServer/.jfi/JFI.db`, session
+`start`) — see "Why" below, unchanged as the historical record of what
+motivated this.
 
 ## Why — what the data actually shows
 
@@ -144,13 +146,13 @@ needs to fire once per (node, stage) pair instead — see Scope §1.
 The highest-risk, highest-value ticket in this file — every other section
 assumes this lands first.
 
-- [ ] Restructure `run_phase`'s tiered-planner loop (`src/JFI/runner.py`,
+- [x] Restructure `run_phase`'s tiered-planner loop (`src/JFI/runner.py`,
       currently a flat `for stage in PLANNER_STAGES: ... _drive_turn_loop`)
       into a recursive/iterative walk: Arc runs once for the whole tree:
       then for EACH top-level node it created, in order, drive that node's
       entire branch through Lead → Dev → Task Planner → Program Manager
       before moving to the next top-level node.
-- [ ] Completion markers need to become per-(node, stage), not per-stage.
+- [x] Completion markers need to become per-(node, stage), not per-stage.
       `_marker_present`/`ARCHITECT_STAGE_COMPLETE`-style bare markers
       can't distinguish "Lead finished node 1" from "Lead finished node 2"
       — needs either a marker that names its node id (e.g.
@@ -159,23 +161,23 @@ assumes this lands first.
       set the way Lead's own job would leave them). Prefer the DB-backed
       check if feasible — same philosophy as the depth checks in
       `plan_db_tools.py` (mechanical enforcement, not marker-parsing).
-- [ ] Resume behavior: a session stopped mid-branch must resume at the
+- [x] Resume behavior: a session stopped mid-branch must resume at the
       correct node AND stage — extend the existing resume-scan added for
       `test_run_phase_planner_resumes_after_the_last_completed_stage`
       (currently scans for the first INCOMPLETE stage across the whole
       tree) to scan for the first INCOMPLETE (node, stage) pair instead.
-- [ ] Each stage's system prompt (Lead/Dev/Task Planner) needs the current
+- [x] Each stage's system prompt (Lead/Dev/Task Planner) needs the current
       node id passed in explicitly (which branch am I working on right
       now), not just "the plan" generically — `get_system_message`'s
       signature and the phase-trigger text both need a node-id parameter.
-- [ ] Decide whether Arc's own top-level items must ALL exist before Lead
+- [x] Decide whether Arc's own top-level items must ALL exist before Lead
       starts on node 1, or whether Arc could also be incremental (produce
       node 1, hand off immediately, come back for node 2 later). Recommend
       keeping Arc as one whole-tree pass for v1 (matches the worked
       example exactly: "Arc creates 1, 2, 3, 4, 5" as a single step) —
       revisit only if Arc itself turns out to be a bottleneck once this
       ships.
-- [ ] Tests: a fake multi-branch tree exercising the walk order (node 1's
+- [x] Tests: a fake multi-branch tree exercising the walk order (node 1's
       entire subtree fully resolved before node 2's Lead pass ever
       starts — mirror `test_tiered_planner.py`'s `_RecordingConsole`
       pattern, tracking stage+node calls in order) and a resume test
@@ -184,9 +186,9 @@ assumes this lands first.
 
 ### 2. Rename/reframe the Developer stage (was `journeyman`)
 
-- [ ] In `PLANNER_STAGES` (`src/JFI/runner.py`), change the tag from
+- [x] In `PLANNER_STAGES` (`src/JFI/runner.py`), change the tag from
       `"Journy"` to `"Dev"`.
-- [ ] Rewrite the `journeyman` branch of `get_system_message`
+- [x] Rewrite the `journeyman` branch of `get_system_message`
       (`simple_session_manager.py`) so its job is explicitly: for each
       Team-Lead-level item, name the actual **files** involved (new or
       existing) and, per file, the **functions/responsibilities** it needs
@@ -195,7 +197,7 @@ assumes this lands first.
       `MAX_INVESTIGATION_DEPTH`) and the "one leaf at a time" discipline —
       both are already working correctly (no evidence in the session data
       that Journeyman itself caused runaway depth or blew reasoning caps).
-- [ ] Update the completion marker name if the stage is meaningfully
+- [x] Update the completion marker name if the stage is meaningfully
       redefined (`JOURNEYMAN_STAGE_COMPLETE` → `DEVELOPER_STAGE_COMPLETE`),
       or keep the marker and just change the prompt/tag — the marker name
       itself is internal, no user-visible cost either way. Pick whichever
@@ -207,7 +209,7 @@ assumes this lands first.
 
 ### 3. Broaden Task Planner (was `function_breakdown`) to every leaf, not just code
 
-- [ ] Rewrite the `function_breakdown` branch of `get_system_message` so it
+- [x] Rewrite the `function_breakdown` branch of `get_system_message` so it
       no longer says *"Testing leaves, and any Implementation leaf that is
       NOT itself writing code, are OUT OF SCOPE for this pass"* — instead,
       every leaf (code or not) gets checked for whether it's already ONE
@@ -216,8 +218,8 @@ assumes this lands first.
       curl+assert — mirroring the existing code-leaf worked example
       (`implement collect_news(...)`) so the model has a concrete pattern
       for non-code tickets too, not just an abstract instruction.
-- [ ] Rename tag `"Func"` → `"Tickets"` in `PLANNER_STAGES`.
-- [ ] Re-verify the existing "AT LEAST 2 children" / "don't split a
+- [x] Rename tag `"Func"` → `"Tickets"` in `PLANNER_STAGES`.
+- [x] Re-verify the existing "AT LEAST 2 children" / "don't split a
       genuinely-one-piece leaf" balance still holds once non-code leaves
       are in scope — a leaf like "run `uv sync`" must stay ONE leaf, never
       get artificially split.
@@ -229,13 +231,13 @@ were `execute_command`/`get_plan`/`get_leaf`, almost all before any code
 existed) — and partly subsumed by §1 (smaller per-branch scope naturally
 means less to re-verify per pass), but worth calling out explicitly too:
 
-- [ ] Give the Program Manager pass (§5) explicit incremental-review
+- [x] Give the Program Manager pass (§5) explicit incremental-review
       guidance: on a re-review after a targeted fix, only re-check the
       leaf(s) that changed plus their direct dependencies — not the entire
       repo from scratch. The old Product Owner prompt has no such
       incremental mode; it re-derives everything every single pass, which
       is exactly what cost the ~2-hour byte-identical cycle.
-- [ ] Consider whether `context_save`'d facts from an EARLIER Program
+- [x] Consider whether `context_save`'d facts from an EARLIER Program
       Manager pass should be explicitly surfaced to a LATER one
       (`context_lookup` is pull-based today, easy to skip) so re-verifying
       an unchanged fact isn't repeated from scratch every iteration.
@@ -245,7 +247,7 @@ means less to re-verify per pass), but worth calling out explicitly too:
 Together with §1 (depth-first traversal), this is the actual fix for the
 ~2-hour wasted replan cycle.
 
-- [ ] Design decision needed before implementing (recommend option A):
+- [x] Design decision needed before implementing (recommend option A):
   - **(A) New tool, `review_leaf(leaf_id, verdict, expected_changes="")`**
     — `verdict` is `"approved"` or `"rejected"`. Persists a review verdict
     per leaf (new `Leaf` field, e.g. `review_status`/`review_note`, or a
@@ -259,14 +261,14 @@ Together with §1 (depth-first traversal), this is the actual fix for the
     (one entry per leaf id, each with its own verdict) instead of prose —
     cheaper to build, but loses the "approved leaves proceed immediately"
     property that's the actual point of this redesign; not recommended.
-- [ ] Rewrite the `product_owner` system prompt
+- [x] Rewrite the `product_owner` system prompt
       (`simple_session_manager.py`) so it's scoped to the ONE branch Task
       Planner just finished (per §1) — inspecting the real repo state
       against just that branch's tickets, then calling
       `review_leaf(...)` on each of its genuine leaves (never on a parent
       — same guard `mark_leaf_done` already has) — recording a verdict per
       leaf instead of one APPROVED/REJECTED for the whole plan.
-- [ ] Rewire `runner.py`'s phase-advance logic: with §1 landed, a branch's
+- [x] Rewire `runner.py`'s phase-advance logic: with §1 landed, a branch's
       approved tickets are ready for `imp` as soon as THAT branch clears
       Program Manager — evaluate seriously whether `imp` can start on
       branch 1's tickets while branch 2 is still being planned, rather
@@ -276,7 +278,7 @@ Together with §1 (depth-first traversal), this is the actual fix for the
       with the existing strict phase order first (still a large
       improvement on its own: per-branch review without full replans) and
       split real phase-pipelining into a follow-up `todo_v2.md`.
-- [ ] Tests: mirror the existing `test_tiered_planner.py`/
+- [x] Tests: mirror the existing `test_tiered_planner.py`/
       `test_plan_db_tools.py` style — a `review_leaf` happy path, the
       parent-rejection guard, and a regression test asserting a rejected
       leaf's rework does NOT touch already-approved leaves in the SAME
@@ -285,14 +287,59 @@ Together with §1 (depth-first traversal), this is the actual fix for the
 
 ### 6. Circuit breaker on repeated rejection (defense in depth, even with §5)
 
-- [ ] However §5 lands, add an explicit cap: if the SAME leaf gets rejected
-      N times in a row (recommend N=3, matching the existing
-      `_is_retryable_llm_error`/review-fail-iteration cap conventions
-      elsewhere in `runner.py`) with no change to its description between
-      attempts, stop looping — surface it for the user rather than
-      burning further turns. Directly prevents a repeat of the observed
-      ~2-hour zero-progress cycle even if some other future gap in §1/§5
-      reintroduces the same failure mode.
+- [x] However §5 lands, add an explicit cap: if the SAME leaf gets rejected
+      with no fix applied in between, stop looping — surface it for the
+      user rather than burning further turns. Shipped as N=1 (one
+      rejection, period — not a multi-attempt counter that trips after
+      several), per explicit direction: even a handful of looped rejection
+      attempts on the same leaf is already the failure this exists to
+      prevent, so there is no "allowed streak" to size. Directly prevents
+      a repeat of the observed ~2-hour zero-progress cycle even if some
+      other future gap in §1/§5 reintroduces the same failure mode.
+
+## Implementation notes (what actually shipped)
+
+- **§6's circuit breaker is a hard stop after ONE rejection, not a
+  multi-attempt counter.** The plan above described an N-in-a-row warning
+  (initially shipped as N=3, then a warning-only trip at that count); both
+  were corrected per explicit direction: any looping on an unfixed
+  rejection is already the failure, so `REVIEW_REJECTION_CIRCUIT_BREAKER`
+  is 1, and `review_leaf` REFUSES a SECOND rejection on the same unfixed
+  leaf outright (an Error, nothing recorded), not just after several —
+  one call, one answer. Approve it, `update_leaf` it (which resets the
+  streak), or leave it and escalate. Mirrors how `mark_leaf_done` refuses
+  a parent outright rather than just warning about one.
+- **§5's Program Manager stayed a single whole-tree phase**, not deeply
+  interleaved with §1's depth-first per-node planner walk. It now records
+  a real per-leaf verdict (`review_leaf`) for every genuine leaf across
+  the WHOLE plan in one pass, and `write_plan_feedback` (unchanged
+  mechanism) still escalates to a new planner iteration when any leaf is
+  rejected — now naming the specific rejected leaf ids instead of prose
+  feedback about "the plan." True interleaving (Program Manager reviewing
+  branch 1 the moment Task Planner finishes it, before branch 2 is even
+  planned) was evaluated and set aside for v1 per this file's own §5 note
+  — it needs `imp` to be able to start on one approved branch while
+  another is still mid-planning, which touches the outer phase loop
+  (`planner → product_owner → imp → ...`), not just the planner's own
+  internal stages. Real candidate for `todo_v2.md`.
+- **A new `update_leaf` tool was added**, not originally listed in §5's
+  tool design — without it, a rejected ticket's rework loop had no
+  mechanical path (delete_leaf + add_leaf loses the leaf's id/review
+  history; there was no way to just fix the text in place).
+- **Schema migration**: `Leaf` gained `review_status`/`review_note`/
+  `rejection_count` columns. `SQLModel.metadata.create_all` only creates
+  NEW tables, it never alters an existing one — so `get_engine`
+  (`src/JFI/models/db.py`) now also runs a small idempotent `ALTER TABLE`
+  bootstrap (`_ensure_columns`) so an EXISTING `.jfi/JFI.db` (sqlite only)
+  picks up the new columns automatically on next open, no manual reset
+  needed.
+- **Stage marker scheme changed** (`TEAM_LEAD_STAGE_COMPLETE` →
+  `LEAD_STAGE_COMPLETE_NODE_<id>`, etc., and the last stage no longer
+  reuses the bare `PLANNER_COMPLETE` marker directly — that's now
+  synthetically appended once every branch clears every stage). A session
+  already mid-tiered-planning under the OLD binary will not resume
+  correctly under this one; the actual session that motivated this file
+  (StockAPIServer, 0/24 done after 46 hours) should just be started fresh.
 
 ## Out of scope for v1
 

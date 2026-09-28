@@ -22,7 +22,7 @@ class TestReadPlanMarkdown:
 
     def test_prefers_the_db_once_a_leaf_exists_rendered_in_plan_md_syntax(self, manager):
         """Byte-for-byte plan.md bullet syntax (no [id=N] tags) -- so
-        frontend/src/main.js's existing parser keeps working unchanged
+        Just-Finish-It-Fleet's src/main.js's existing parser keeps working unchanged
         against a DB-backed session's checklist."""
         manager.plan_file.parent.mkdir(parents=True, exist_ok=True)
         manager.plan_file.write_text("## Implementation\n- [ ] 1.1 stale plan.md item\n")

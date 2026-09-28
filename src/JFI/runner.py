@@ -40,7 +40,7 @@ from JFI.tool.deferred_tools import make_load_tool
 from JFI.tool.note_tools import clear_note, get_note, make_note_tools, PLAN_FEEDBACK, REVIEW_REPORT, REVIEWER_NOTES
 from JFI.tool.image_tools import capture_screenshot, view_image
 from JFI.tool.llm_tools import make_ask_llm
-from JFI.tool.plan_db_tools import has_leaves, render_plan_markdown
+from JFI.tool.plan_db_tools import has_leaves, render_plan_markdown, top_level_leaf_ids
 from JFI.tool.web_tools import fetch_webpage_images
 from JFI.tool.browser_tools import browse_webpage
 from JFI.tool.video_tools import extract_video_frames
@@ -501,7 +501,7 @@ def _read_plan_markdown(ssm: SessionManager) -> str:
     SimpleSessionManager's own plan_progress/phase_progress/etc. do once a
     session has leaves there -- render_plan_markdown renders it in
     plan.md's OLD bullet syntax byte-for-byte, so
-    frontend/src/main.js's existing parsePlanLines/buildPlanTree keeps
+    Just-Finish-It-Fleet's src/main.js's existing parsePlanLines/buildPlanTree keeps
     working completely unchanged; no frontend changes needed for a
     DB-backed session's checklist to show up there. Falls back to reading
     plan.md directly for a session that predates the DB migration. Empty
@@ -984,37 +984,64 @@ def _stuck_task_directive(task_title: str, elapsed_seconds: float, tokens_spent:
     )
 
 
-#: The tiered planner's 4 internal stages, in order -- (stage name passed to
-#: ssm.set_planner_stage/get_system_message's planner_stage, this stage's
-#: own completion marker, the display label for its transition rule, a short
-#: tag for the header/dashboard's "stage" status field -- see
-#: AbstractManager.set_status's `stage` param). The LAST stage deliberately
-#: reuses today's original PLANNER_COMPLETE marker (see get_system_message's
-#: planner_stage docstring) so nothing downstream of "is planner done"
-#: (phase_completed/get_remaining_phases/resumability) needs to know
-#: intermediate stages exist at all. "function_breakdown" (after
-#: journeyman) takes every already-atomic leaf that writes code and breaks
-#: IT down further into one child leaf per function/method it implements --
-#: a non-code leaf (verification, research, docs) is left untouched.
-PLANNER_STAGES = [
-    ("architect", "ARCHITECT_STAGE_COMPLETE", "ARCHITECT", "Arc"),
-    ("team_lead", "TEAM_LEAD_STAGE_COMPLETE", "TEAM LEAD", "Lead"),
-    ("journeyman", "JOURNEYMAN_STAGE_COMPLETE", "JOURNEYMAN", "Journy"),
-    ("function_breakdown", "PLANNER_COMPLETE", "FUNCTION BREAKDOWN", "Func"),
+#: Architect: one pass, whole tree -- see todo_v1.md §1. Same 4-tuple shape
+#: as PLANNER_NODE_STAGES below (stage name for ssm.set_planner_stage/
+#: get_system_message's planner_stage, completion marker, display label,
+#: header/dashboard status tag) but run exactly once, never per-node --
+#: it's the one stage producing the top-level branches everything else
+#: below walks depth-first, so it can't itself be scoped to a branch yet.
+PLANNER_ARC_STAGE = ("architect", "ARCHITECT_STAGE_COMPLETE", "ARCHITECT", "Arc")
+
+#: The tiered planner's 3 per-branch stages, in order -- (stage name, this
+#: stage's completion marker BASE (node id gets appended, see
+#: _node_scoped_marker), the display label for its transition rule, a short
+#: tag for the header/dashboard's "stage" status field). Run once per
+#: top-level node (see runner.top_level_leaf_ids), each node's own Lead ->
+#: Dev -> Task Planner sequence fully resolved before the next node starts
+#: -- see todo_v1.md §1 for why (smaller context per turn, and Program
+#: Manager can review a branch's tickets as soon as they exist instead of
+#: waiting for the whole tree). "journeyman" (Dev) walks its assigned
+#: node's subtree down to genuinely atomic leaves; "function_breakdown"
+#: (Task Planner) then takes EVERY atomic leaf under that same node --
+#: code-writing or not, see todo_v1.md §3 -- and reduces it to one
+#: mechanically-executable ticket.
+PLANNER_NODE_STAGES = [
+    ("team_lead", "LEAD_STAGE_COMPLETE", "LEAD", "Lead"),
+    ("journeyman", "DEV_STAGE_COMPLETE", "DEV", "Dev"),
+    ("function_breakdown", "TICKETS_STAGE_COMPLETE", "TASK PLANNER", "Tickets"),
 ]
 
+#: Bare marker synthetically appended to history (never asked of the model
+#: -- see run_phase) once every top-level node has cleared all of
+#: PLANNER_NODE_STAGES, so phase_completed/get_remaining_phases' own
+#: resumability scan (which looks for exactly f"{phase.upper()}_COMPLETE")
+#: keeps working unchanged even though no single turn ever says this
+#: phrase anymore.
+PLANNER_PHASE_COMPLETE_MARKER = "PLANNER_COMPLETE"
+
+
+def _node_scoped_marker(base_keyword: str, node_id: int) -> str:
+    """Turns a PLANNER_NODE_STAGES marker BASE (e.g. "LEAD_STAGE_COMPLETE")
+    into the one this specific top-level branch's model turn must say
+    (e.g. "LEAD_STAGE_COMPLETE_NODE_7") -- see todo_v1.md §1. A bare base
+    marker alone can't distinguish "Lead finished node 1" from "Lead
+    finished node 2"; every per-node stage needs its own."""
+    return f"{base_keyword}_NODE_{node_id}"
+
 #: Stage tag shown when PLANNER_SINGLE_PASS=1 opts out of tiering (see
-#: _planner_single_pass) -- the counterpart to PLANNER_STAGES' own tags for
-#: the one case where "planner" runs as a single, undifferentiated pass.
+#: _planner_single_pass) -- the counterpart to PLANNER_ARC_STAGE/
+#: PLANNER_NODE_STAGES' own tags for the one case where "planner" runs as
+#: a single, undifferentiated pass.
 PLANNER_SINGLE_PASS_STAGE_TAG = "Task"
 
 
 def _drive_turn_loop(console: AbstractManager, llm: BaseLLMStream, ssm: SessionManager,
                      phase: str, completion_keyword: str, failures: Dict[tuple, int]) -> bool:
     """
-    Runs turns for one phase (or, for the tiered planner, one STAGE within
-    "planner" -- see PLANNER_STAGES/run_phase) until `completion_keyword`
-    appears as a stand-alone marker in the assistant's own content, or the
+    Runs turns for one phase (or, for the tiered planner, one STAGE for one
+    top-level BRANCH within "planner" -- see PLANNER_ARC_STAGE/
+    PLANNER_NODE_STAGES/run_phase) until `completion_keyword` appears as a
+    stand-alone marker in the assistant's own content, or the
     run should stop. Returns True on completion, False if the run should
     stop early (user interrupt or unrecoverable LLM failure) -- same
     contract this loop had inline in run_phase before it was extracted to
@@ -1248,13 +1275,17 @@ def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: Ses
     key resolves to the same shared model/endpoint unless .env sets a
     per-phase override, so this indexing is a no-op in the common case.
 
-    "planner" runs as 3 internal stages by default -- Architect (top-level
-    shape) -> Team Lead (feature breakdown) -> Journeyman (genuinely atomic
-    leaves) -- instead of one combined pass, because a single pass was
-    observed letting compound leaves through (see PLANNER_STAGES and
-    get_system_message's planner_stage docstring). PLANNER_SINGLE_PASS=1
-    (see _planner_single_pass) opts back into the original one-pass
-    behavior. Every other phase is unaffected either way.
+    "planner" runs as 4 internal stages by default -- Architect (top-level
+    shape, one pass) -> then, depth-first per top-level branch: Lead
+    (feature breakdown) -> Dev (genuinely atomic leaves) -> Task Planner
+    (mechanical tickets) -- instead of one combined pass or a breadth-first
+    whole-tree sweep per stage, because both were observed producing
+    compound leaves and/or an enormous per-stage context (see
+    PLANNER_ARC_STAGE/PLANNER_NODE_STAGES and get_system_message's
+    planner_stage docstring, and todo_v1.md §1 for the full rationale).
+    PLANNER_SINGLE_PASS=1 (see _planner_single_pass) opts back into the
+    original one-pass behavior. Every other phase is unaffected either
+    way.
     """
     llm = llms[phase]
     # ask_llm delegates to whatever model this phase itself is using — a
@@ -1272,33 +1303,54 @@ def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: Ses
     )
 
     if tiered_planner:
-        # A resumed session may already have completed some prefix of
-        # PLANNER_STAGES in an earlier run of this same (still-open)
-        # "planner" phase -- self._planner_stage is in-memory only (reset
-        # on every fresh process), so nothing else remembers that. Scan
-        # history the same way get_remaining_phases does for the outer
-        # PHASES list, so e.g. Arc+Lead already done means this run starts
-        # at Journeyman instead of re-running Arc from scratch.
-        start_index = 0
-        for i, (_, keyword, _, _) in enumerate(PLANNER_STAGES):
-            if any(m.get("role") == "assistant" and _marker_present(m.get("content") or "", keyword)
-                   for m in ssm.history):
-                start_index = i + 1
-            else:
-                break
-        for i, (stage, keyword, label, tag) in enumerate(PLANNER_STAGES):
-            if i < start_index:
-                continue
-            ssm.set_planner_stage(stage)
-            console.set_status(stage=tag)
-            if i > 0:
-                # The very first stage's own instructions already frame it
-                # as "the first of three passes" -- only later transitions
-                # need their own announcement, live and in run.log alike
-                # (see PromptToolkitConsoleManager._log's RULE tag).
-                console.display_rule(f"PLANNER STAGE: {label}")
-            if not _drive_turn_loop(console, llm, ssm, phase, keyword, failures):
+        def _marker_already_in_history(keyword: str) -> bool:
+            return any(
+                m.get("role") == "assistant" and _marker_present(m.get("content") or "", keyword)
+                for m in ssm.history
+            )
+
+        # Architect: one pass, whole tree, unscoped -- same bare-marker
+        # resume check this always used (self._planner_stage is in-memory
+        # only, reset on every fresh process, so nothing else remembers
+        # whether this already ran).
+        arc_stage, arc_keyword, _arc_label, arc_tag = PLANNER_ARC_STAGE
+        if not _marker_already_in_history(arc_keyword):
+            ssm.set_planner_stage(arc_stage)
+            console.set_status(stage=arc_tag)
+            if not _drive_turn_loop(console, llm, ssm, phase, arc_keyword, failures):
                 return False
+
+        # Depth-first per branch (see PLANNER_NODE_STAGES/todo_v1.md §1):
+        # Lead -> Dev -> Task Planner, one top-level node's ENTIRE sequence
+        # resolved before the next node starts -- never a breadth-first
+        # sweep of one stage across the whole tree. Node-scoped markers
+        # (see _node_scoped_marker) make the SAME resume-by-history-scan
+        # approach work per (node, stage) instead of just per stage: a
+        # session stopped mid-branch resumes at the first node+stage pair
+        # whose own marker isn't in history yet, every earlier branch left
+        # untouched.
+        for node_id in top_level_leaf_ids(ssm.db_engine, ssm.session_id):
+            for stage, base_keyword, label, tag in PLANNER_NODE_STAGES:
+                node_keyword = _node_scoped_marker(base_keyword, node_id)
+                if _marker_already_in_history(node_keyword):
+                    continue
+                ssm.set_planner_stage(stage)
+                ssm.set_planner_node(node_id)
+                console.set_status(stage=tag)
+                console.display_rule(f"PLANNER STAGE: {label} — node {node_id}")
+                if not _drive_turn_loop(console, llm, ssm, phase, node_keyword, failures):
+                    return False
+        ssm.set_planner_node(None)
+
+        # Every branch has cleared every stage -- the phase itself is done.
+        # Synthetic (no LLM turn spent on it): phase_completed/
+        # get_remaining_phases' own resumability scan just needs the bare
+        # f"{phase.upper()}_COMPLETE" marker somewhere in history, and
+        # nothing downstream needs to know node-scoped intermediate stages
+        # exist at all -- see PLANNER_PHASE_COMPLETE_MARKER's own
+        # docstring.
+        if not _marker_already_in_history(PLANNER_PHASE_COMPLETE_MARKER):
+            ssm.append_raw({"role": "assistant", "content": PLANNER_PHASE_COMPLETE_MARKER})
     else:
         if phase == "planner" and hasattr(ssm, "set_planner_stage"):
             ssm.set_planner_stage(None)  # PLANNER_SINGLE_PASS=1: today's original combined prompt

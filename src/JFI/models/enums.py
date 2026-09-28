@@ -10,7 +10,7 @@ from enum import Enum
 
 
 class Phase(str, Enum):
-    """Mirrors PHASES in frontend/src/main.js and PHASE_SECTION's keys in
+    """Mirrors PHASES in Just-Finish-It-Fleet's src/main.js and PHASE_SECTION's keys in
     simple_session_manager.py -- keep all three in sync if this ever changes."""
 
     PLANNER = "planner"

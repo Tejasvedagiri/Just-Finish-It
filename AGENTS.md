@@ -6,16 +6,19 @@ for what JFI is and how to run it.
 
 ## Repo shape
 
-Two independently-built projects share this repo, deliberately kept apart:
+This repo is the Python agent itself (`src/JFI/`, `uv`-managed,
+PyInstaller-packaged via `uv run build`) — nothing else.
 
-- `src/JFI/` — the Python agent itself (`uv`-managed, PyInstaller-packaged
-  via `uv run build`).
-- `frontend/` — the fleet dashboard, a separate Node project (`npm run
-  dev`/`npm run build`/`npm run master`). It has its own `package.json` and
-  never shares dependencies or build tooling with the Python side.
-
-Don't blur this line — e.g. don't reach for a Python templating step to
-generate frontend assets, or vice versa.
+The fleet dashboard used to live here as `frontend/`; it's now its own
+standalone repo, [`Just-Finish-It-Fleet`](https://github.com/Tejasvedagiri/Just-Finish-It-Fleet)
+(a Node project — `npm run dev`/`npm run build`/`npm run master`), checked
+out as a sibling directory, not a subdirectory of this repo. The two only
+ever talk over a WebSocket (`MASTER_WS_URL`, see `socket_reporter.py`) —
+no shared dependencies, build tooling, or filesystem access. Don't blur
+this line — e.g. don't reach for a Python templating step to generate
+fleet-dashboard assets, or vice versa. If you need to change the fleet
+dashboard's code, that's a change in the `Just-Finish-It-Fleet` checkout,
+not this repo.
 
 ## Before you start: check `uv run` vs plain `python3`
 
@@ -42,10 +45,11 @@ This project always runs through `uv` (`uv run pytest`, `uv run build`,
    insurance, catches missing-import surprises before they reach a user
    running `dist/jfi` instead of from source.
 
-## After changing frontend code (`frontend/`)
+## After changing fleet-dashboard code (`Just-Finish-It-Fleet`, a separate repo)
 
-`npm run build` from `frontend/`, then verify live rather than trusting the
-diff — either open the dashboard in a browser or curl the served asset.
+`npm run build` from that repo's root, then verify live rather than
+trusting the diff — either open the dashboard in a browser or curl the
+served asset.
 `master.js` serves `index.html` with `no-cache` and hashed assets with
 `immutable` caching (see its `staticResponse()`) specifically so a rebuild
 is picked up without a stale-bundle bug; if you ever see the dashboard

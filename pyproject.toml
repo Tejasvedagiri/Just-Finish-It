@@ -30,8 +30,8 @@ web = ["streamlit>=1.38"]
 # Only needed for a session reporting to a fleet master
 # (src/JFI/manager/socket_reporter.py, gated on MASTER_WS_URL being set) --
 # the core agent has no dependency on this either. The master itself is a
-# separate Node project (frontend/, `npm run master`), not Python -- see
-# "Fleet dashboard" in README.
+# separate, standalone Node project (Just-Finish-It-Fleet, its own repo,
+# `npm run master`), not Python -- see "Fleet dashboard" in README.
 master = ["websockets>=13"]
 # Only needed for LLM_BACKEND=anthropic (see src/JFI/llm/anthropic_stream.py
 # and backend_select.py) -- everything else (the default OpenAI-compatible

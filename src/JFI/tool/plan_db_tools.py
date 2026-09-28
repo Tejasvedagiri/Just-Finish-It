@@ -2,10 +2,10 @@
 free-form write_file/append_to_file/replace_in_file text surgery plan.md
 required -- see /todo.md's "SQLite/Pydantic persistence rewrite" section
 for why (the renumbering bug that needed JFI.tool.plan_renumber as a
-bolt-on repair pass, and frontend/src/main.js's own independently-hand-
+bolt-on repair pass, and Just-Finish-It-Fleet's src/main.js's own independently-hand-
 rolled regex parser hitting its own bug).
 
-Nine tools instead of raw file edits: get_plan (read the whole tree),
+Eleven tools instead of raw file edits: get_plan (read the whole tree),
 get_leaf (one leaf's own full, never-truncated detail -- the single-node
 counterpart to get_plan), add_leaf (create a leaf/parent), start_leaf/mark_leaf_done (timing + status on a
 real leaf only -- see Leaf's own docstring on why a parent never carries
@@ -18,10 +18,20 @@ used to do by hand-deriving every descendant's number), merge_leaf (the
 undo for a single-child split_leaf: folds an only child back into its
 parent, collapsing the pointless nesting split_leaf can't itself avoid
 creating when a leaf turns out to have just one real sub-piece after all),
-and delete_leaf (removes a genuinely wrong/duplicate leaf outright --
-added after a real session hit exactly this gap: no delete/merge tool
-existed, so it fell back to direct SQL against the live WAL-mode DB to fix
-a mis-split rather than a proper, guarded tool call).
+delete_leaf (removes a genuinely wrong/duplicate leaf outright -- added
+after a real session hit exactly this gap: no delete/merge tool existed,
+so it fell back to direct SQL against the live WAL-mode DB to fix a
+mis-split rather than a proper, guarded tool call), update_leaf (edits an
+existing leaf's own description in place -- the mechanical half of
+Program Manager's rework loop: a rejected ticket needs to be fixable
+without losing its id/history, not delete+recreated), and review_leaf
+(Program Manager's per-ticket verdict -- approve or reject ONE leaf with
+an expected-changes note, instead of one whole-plan verdict; see
+task_rules.py's PROGRAM MANAGER rules and todo_v1.md §5).
+
+`top_level_leaf_ids` (not a model-facing tool -- an internal helper for
+runner.py's depth-first per-branch planner walk, see todo_v1.md §1) is
+also defined here since it shares `_load_leaves`.
 
 What runner.py wires into TOOL_MAP per session, the same way
 make_context_tools/make_load_tool are -- see make_plan_db_tools at the
@@ -187,7 +197,7 @@ def render_plan_markdown(engine, session_id: str) -> str:
     to the model calling the tools, never to a human reading a dashboard
     or the existing plan.md-format parsers) -- so two things that already
     consume that exact syntax keep working completely unchanged:
-    frontend/src/main.js's parsePlanLines/buildPlanTree (the fleet
+    Just-Finish-It-Fleet's src/main.js's parsePlanLines/buildPlanTree (the fleet
     dashboard's checklist tab), and a human just wanting something
     readable (the Streamlit dashboard's Plan section).
 
@@ -654,12 +664,136 @@ def delete_leaf(engine, session_id: str, leaf_id: int) -> str:
     return f"Deleted leaf id={leaf_id} ({description!r})."
 
 
+#: Program Manager verdicts review_leaf accepts.
+REVIEW_VERDICTS = ("approved", "rejected")
+
+#: A leaf gets exactly ONE rejection before review_leaf refuses another --
+#: see review_leaf's own docstring and todo_v1.md §6. Kept as a named
+#: constant (rather than a bare `1` inline) so the "why" has one place to
+#: live, not because this is meant to be tuned back up: a second
+#: reject-without-fixing attempt on the same leaf is exactly the shape of
+#: the real ~2-hour incident this exists to prevent -- one call, one
+#: answer, no loop.
+REVIEW_REJECTION_CIRCUIT_BREAKER = 1
+
+
+def update_leaf(engine, session_id: str, leaf_id: int, description: str) -> str:
+    """Edits an existing genuine leaf's own description in place -- the
+    mechanical half of Program Manager's rework loop: a leaf rejected via
+    review_leaf (with an expected-changes note) needs to be fixable
+    without losing its id, its position in the tree, or its history;
+    delete_leaf + add_leaf would do that. Refused on a parent (has
+    children -- there's no single "description" to edit there) or on a
+    leaf already marked DONE (completed work's record isn't rewritten
+    after the fact). Clears any prior review verdict/rejection streak --
+    an edited ticket is a new thing to review, not a repeat of the old
+    one."""
+    with get_session(engine) as db:
+        leaf = db.get(Leaf, leaf_id)
+        if leaf is None:
+            return f"Error: no leaf with id={leaf_id}."
+        has_children = db.exec(select(Leaf).where(Leaf.parent_id == leaf_id)).first() is not None
+        if has_children:
+            return f"Error: leaf {leaf_id} has children -- update_leaf only edits a genuine leaf, never a parent."
+        if leaf.status == LeafStatus.DONE:
+            return f"Error: leaf {leaf_id} is already marked done -- update_leaf refuses to rewrite completed work."
+
+        leaf.description = description
+        leaf.review_status = None
+        leaf.review_note = None
+        leaf.rejection_count = 0
+        db.add(leaf)
+        db.commit()
+
+    return f"Updated leaf id={leaf_id}: {description!r}. Ready for re-review."
+
+
+def review_leaf(engine, session_id: str, leaf_id: int, verdict: str, expected_changes: str = "") -> str:
+    """Program Manager's per-ticket verdict -- approve or reject ONE leaf,
+    instead of one whole-plan verdict for everything at once (see
+    task_rules.py's PROGRAM MANAGER rules). `verdict` is "approved" or
+    "rejected". Refused on a parent (has children -- review the genuine
+    leaves under it individually, never the parent itself).
+
+    On rejection, `expected_changes` (required -- what should change, not
+    just that something's wrong) becomes the leaf's review_note -- ONE
+    call, one answer. A SECOND attempt to reject the SAME still-unfixed
+    leaf (no update_leaf edit in between) is REFUSED outright, not
+    recorded, not warned-and-allowed: approve it as-is, or leave it and
+    escalate in your final reply, but this tool will not let the same
+    leaf be rejected twice in a row. Observed in practice: a whole-plan
+    version of this exact loop once burned ~2 hours re-reviewing a plan
+    that came back byte-identical (see todo_v1.md's "Why") -- looping on
+    an unfixed rejection even a few times is already the failure; this
+    tool enforces the stop itself after the very first one, the same way
+    mark_leaf_done refuses a parent outright rather than warning about it.
+
+    On approval, review_note/rejection_count both clear -- a leaf that's
+    fixed and re-approved starts fresh."""
+    if verdict not in REVIEW_VERDICTS:
+        return f"Error: verdict must be one of {REVIEW_VERDICTS}, got {verdict!r}."
+    if verdict == "rejected" and not expected_changes.strip():
+        return "Error: a rejection needs expected_changes -- say what should change, not just that it's wrong."
+
+    with get_session(engine) as db:
+        leaf = db.get(Leaf, leaf_id)
+        if leaf is None:
+            return f"Error: no leaf with id={leaf_id}."
+        has_children = db.exec(select(Leaf).where(Leaf.parent_id == leaf_id)).first() is not None
+        if has_children:
+            return f"Error: leaf {leaf_id} has children -- review the genuine leaves under it, never the parent."
+
+        if verdict == "rejected" and leaf.rejection_count >= REVIEW_REJECTION_CIRCUIT_BREAKER:
+            return (
+                f"Error: leaf {leaf_id} was already rejected once with no fix applied since -- "
+                "⚠️ CIRCUIT BREAKER: refusing to record a second rejection in a row. Either "
+                "approve it as-is, or call update_leaf to actually change it (which clears this) "
+                "before rejecting again, or leave it and escalate in your final reply instead of "
+                "asking again."
+            )
+
+        if verdict == "approved":
+            leaf.review_status = "approved"
+            leaf.review_note = None
+            leaf.rejection_count = 0
+        else:
+            leaf.review_status = "rejected"
+            leaf.review_note = expected_changes
+            leaf.rejection_count += 1
+        db.add(leaf)
+        db.commit()
+
+    if verdict == "rejected":
+        return (
+            f"Rejected leaf id={leaf_id}. Expected changes recorded. ⚠️ CIRCUIT BREAKER: this is "
+            "the ONE rejection this tool accepts for this leaf without a real fix (update_leaf) "
+            "in between -- do not reject it again; approve it or escalate instead."
+        )
+    return f"Approved leaf id={leaf_id}."
+
+
+def top_level_leaf_ids(engine, session_id: str) -> list[int]:
+    """Every top-level (parent_id is None) leaf id for this session, across
+    BOTH phase sections ("imp" and "testing" can each have their own
+    top-level items -- see _render_plan's phases_in_order), ordered by
+    creation so the walk order matches the order Architect actually added
+    them in. Not a model-facing tool -- an internal helper for runner.py's
+    depth-first per-branch planner walk (see todo_v1.md §1): Architect
+    creates these once, then Lead/Dev/Task Planner each walk this same
+    list, one branch fully resolved before the next starts."""
+    leaves = _load_leaves(engine, session_id)
+    top_level = [leaf for leaf in leaves if leaf.parent_id is None]
+    top_level.sort(key=lambda leaf: (leaf.created_at, leaf.id))
+    return [leaf.id for leaf in top_level]
+
+
 def make_plan_db_tools(engine, session_id: str) -> Dict[str, Callable]:
     """{"get_plan": ..., "get_leaf": ..., "add_leaf": ..., "start_leaf": ...,
     "mark_leaf_done": ..., "split_leaf": ..., "reorder_leaf": ...,
-    "merge_leaf": ..., "delete_leaf": ...} bound to one session's DB engine
-    -- what runner.py wires into TOOL_MAP, the same way execute_command/
-    context_save are rebound per session in _run_session."""
+    "merge_leaf": ..., "delete_leaf": ..., "update_leaf": ...,
+    "review_leaf": ...} bound to one session's DB engine -- what runner.py
+    wires into TOOL_MAP, the same way execute_command/context_save are
+    rebound per session in _run_session."""
     return {
         "get_plan": lambda: get_plan(engine, session_id),
         "get_leaf": lambda leaf_id: get_leaf(engine, session_id, leaf_id),
@@ -670,4 +804,8 @@ def make_plan_db_tools(engine, session_id: str) -> Dict[str, Callable]:
         "reorder_leaf": lambda leaf_id, after_leaf_id=0: reorder_leaf(engine, session_id, leaf_id, after_leaf_id),
         "merge_leaf": lambda leaf_id: merge_leaf(engine, session_id, leaf_id),
         "delete_leaf": lambda leaf_id: delete_leaf(engine, session_id, leaf_id),
+        "update_leaf": lambda leaf_id, description: update_leaf(engine, session_id, leaf_id, description),
+        "review_leaf": lambda leaf_id, verdict, expected_changes="": review_leaf(
+            engine, session_id, leaf_id, verdict, expected_changes
+        ),
     }

@@ -1,6 +1,7 @@
 """Socket-based counterpart to web_bridge.py's file-based bridge: mirrors
-one session's live status to a remote "master" (frontend/server/master.js,
-the Node-based fleet dashboard server) over a WebSocket instead of writing
+one session's live status to a remote "master" (server/master.js in the
+standalone Just-Finish-It-Fleet repo, the Node-based fleet dashboard
+server) over a WebSocket instead of writing
 .jfi/<session>/web_status.json to disk -- the mechanism a session on one
 machine uses to report into a fleet dashboard running on a different one,
 where there is no shared filesystem to write a status file into in the
@@ -188,12 +189,21 @@ class SocketReporter:
         request_id = payload.get("request_id")
         table = str(payload.get("table") or "")
         scoped = bool(payload.get("scoped", True))
+        try:
+            limit = int(payload["limit"]) if payload.get("limit") not in (None, "") else None
+        except (TypeError, ValueError):
+            limit = None
+        order = str(payload.get("order") or "asc").lower()
+        if order not in ("asc", "desc"):
+            order = "asc"
         response = {"type": "db_result", "key": self._key, "request_id": request_id, "table": table}
         if self._db_engine is None:
             response["error"] = "This session has no database engine to query."
         else:
             try:
-                response["rows"] = query_table(self._db_engine, table, self._session_id if scoped else None)
+                response["rows"] = query_table(
+                    self._db_engine, table, self._session_id if scoped else None, limit=limit, order=order
+                )
             except Exception as e:
                 response["error"] = str(e)
         await ws.send(json.dumps(response))

@@ -798,6 +798,57 @@ CORE_TOOLS += [
     {
         "type": "function",
         "function": {
+            "name": "update_leaf",
+            "description": (
+                "Edits an existing genuine leaf's own description in place -- fixes a ticket "
+                "without losing its id or history (unlike delete_leaf + add_leaf). Use this to "
+                "rework a leaf review_leaf rejected. Refuses on a parent (no single description "
+                "to edit) or a leaf already marked done. Clears any prior review verdict/"
+                "rejection streak -- an edited ticket is ready for fresh review."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan, to edit."},
+                    "description": {"type": "string", "description": "The new, complete description text."}
+                },
+                "required": ["leaf_id", "description"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "review_leaf",
+            "description": (
+                "Program Manager's per-ticket verdict -- approve or reject ONE leaf, instead of "
+                "one whole-plan verdict for everything at once. Refused on a parent (review the "
+                "genuine leaves under it individually). A rejection REQUIRES expected_changes "
+                "(what should change, not just that it's wrong). ONE rejection per leaf, no "
+                "more: a SECOND rejection on the SAME leaf with no update_leaf edit in between "
+                "is refused outright -- approve it or escalate instead of rejecting again."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan, to review."},
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["approved", "rejected"],
+                        "description": "Your verdict for this one leaf."
+                    },
+                    "expected_changes": {
+                        "type": "string",
+                        "description": "Required when verdict is 'rejected': concretely what should change."
+                    }
+                },
+                "required": ["leaf_id", "verdict"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "ask_llm",
             "description": (
                 "Asks a fresh, single-turn LLM call anything — write a description, brainstorm "
@@ -863,6 +914,8 @@ _DEFERRED_TOOL_SUMMARIES = {
     "reorder_leaf": "move a leaf to sit right after another sibling -- fixes an ordering bug without any manual renumbering",
     "merge_leaf": "fold a single child back into its parent -- the undo for a split_leaf that left a pointless single-child parent",
     "delete_leaf": "remove a genuinely wrong/duplicate leaf outright (refused on a parent or an already-done leaf)",
+    "update_leaf": "edit an existing leaf's description in place -- fixes a ticket without losing its id/history",
+    "review_leaf": "Program Manager's per-ticket approve/reject verdict, with required expected_changes on a rejection",
     "ask_llm": "a fresh, single-turn, STATELESS LLM call for a one-off text task (no file/conversation access)",
     "capture_screenshot": "capture the primary monitor to a PNG (headless environments fail cleanly)",
     "view_image": "attach an image file (a screenshot, a project asset, ...) so you can actually see it next turn",

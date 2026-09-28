@@ -92,7 +92,34 @@ def get_engine(project_root: Path):
             conn.exec_driver_sql("PRAGMA journal_mode=WAL")
             conn.exec_driver_sql("PRAGMA busy_timeout=5000")
     SQLModel.metadata.create_all(engine)
+    _ensure_columns(engine, "leaf", {
+        "review_status": "TEXT",
+        "review_note": "TEXT",
+        "rejection_count": "INTEGER DEFAULT 0",
+    })
     return engine
+
+
+def _ensure_columns(engine, table: str, columns: dict) -> None:
+    """Adds any of `columns` (name -> SQLite type/default clause) missing
+    from an already-existing table -- create_all() above only ever creates
+    NEW tables, it never alters one that's already there, so a schema
+    change to an existing table (e.g. Leaf gaining review_status/
+    review_note/rejection_count for Program Manager's per-ticket review)
+    needs this idempotent ALTER TABLE bootstrap to reach a session DB that
+    predates the change, the same "cheap and idempotent to reassert every
+    time" tradeoff already made for the WAL pragma above. SQLite-only
+    (ALTER TABLE ADD COLUMN syntax differs elsewhere) -- mysql/postgres
+    backends need a real migration tool if this ever needs to reach them,
+    not covered here."""
+    if not engine.url.get_backend_name().startswith("sqlite"):
+        return
+    with engine.connect() as conn:
+        existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+        for name, clause in columns.items():
+            if name not in existing:
+                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {clause}")
+        conn.commit()
 
 
 def get_session(engine) -> Session:

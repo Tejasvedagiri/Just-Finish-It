@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # renaming those would break resuming, not just relabel the UI.
 PHASE_DISPLAY_NAMES: Dict[str, str] = {
     "planner": "Plan",
-    "product_owner": "Product Owner",
+    "product_owner": "Program Manager",
     "imp": "Implement",
     "testing": "Test",
     "reviewer": "Review",
@@ -231,8 +231,9 @@ class AbstractManager(ABC):
                    stage: Optional[str] = None, plan_markdown: Optional[str] = None,
                    task_started_at: Optional[float] = None) -> None:
         """`stage` is a short sub-phase tag shown alongside the phase itself
-        (e.g. "Arc"/"Lead"/"Journy"/"Func"/"Task" for the tiered planner's
-        own internal stages -- see runner.PLANNER_STAGES) -- distinct from
+        (e.g. "Arc"/"Lead"/"Dev"/"Tickets"/"Task" for the tiered planner's
+        own internal stages -- see runner.PLANNER_ARC_STAGE/
+        PLANNER_NODE_STAGES) -- distinct from
         `task` (a per-leaf checkbox title) so runner.py's frequent
         `task=ssm.current_task_title(phase)` updates during a turn never
         clobber it; callers clear it with `stage=""` on phase change.

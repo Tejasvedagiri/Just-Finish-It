@@ -1,0 +1,81 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>6 — Dense Outline</title>
+<script src="_shared.js"></script>
+<style id="css"></style>
+</head>
+<body>
+<div id="app">
+  <a class="back-link" href="index.html">← all 6 mockups</a>
+  <div class="mockup-head">
+    <div class="tag">Option 6 of 6</div>
+    <h1>Dense outline / table of contents</h1>
+    <p>Maximum information density: one monospace line per leaf, indentation-by-number shows depth without needing tree lines or icons, status is a single glyph. Click a row to expand its full description inline (no navigation away, no losing your scroll position) — built for scanning a large (100+ leaf) plan fast, at the cost of being the least "designed" looking option.</p>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><span>Plan checklist</span><span class="n" id="overall"></span></div>
+    <div id="outline"></div>
+  </div>
+</div>
+<script>
+document.getElementById("css").textContent = SHARED_CSS + `
+  #outline { padding: 4px 0; }
+  .phase-title { padding: 7px 14px; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-faint); font-weight: 700; background: var(--bg-raised); border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+  .phase-title:first-child { border-top: none; }
+  .row { display: flex; align-items: baseline; gap: 8px; padding: 3px 14px; cursor: pointer; white-space: nowrap; overflow: hidden; }
+  .row:hover { background: rgba(0,175,175,0.05); }
+  .row.is-current { background: rgba(224,175,104,0.07); }
+  .row .indent { color: var(--line); flex-shrink: 0; }
+  .row .num { flex-shrink: 0; width: 46px; color: var(--ink-faint); font-weight: 700; }
+  .row.is-branch .num { color: var(--accent); }
+  .row .desc { color: var(--ink-dim); text-overflow: ellipsis; overflow: hidden; }
+  .row.is-leaf .desc { color: var(--ink); }
+  .row .badge { margin-left: auto; flex-shrink: 0; color: var(--ink-faint); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+  .expand-panel { padding: 8px 14px 12px 78px; color: var(--ink-dim); font-size: 12px; border-bottom: 1px solid var(--line-soft); background: var(--bg-raised); display: none; }
+  .expand-panel.open { display: block; }
+`;
+
+function esc(s) { return s.replace(/[&<>]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+let uid = 0;
+
+function renderRow(node, depth, phaseKey) {
+  const hasChildren = !!node.children;
+  const glyph = hasChildren ? null : statusGlyph(node.status);
+  const [d, t] = hasChildren ? subtreeCounts({children: node.children}) : [0, 0];
+  const rid = "r" + (uid++);
+  const indent = "│&nbsp;".repeat(Math.max(0, depth - 1)) + (depth > 0 ? "├─" : "");
+  let html = `<div class="row ${hasChildren ? "is-branch" : "is-leaf"} ${node.status === "current" ? "is-current" : ""}" onclick="toggleExpand('${rid}')">
+    <span class="indent">${indent}</span>
+    <span class="num">${glyph ? `<span class="${glyph.cls}">${glyph.char}</span> ` : ""}${node.number}</span>
+    <span class="desc">${esc(node.desc.split(/[:.]/)[0])}</span>
+    ${hasChildren ? `<span class="badge">${d}/${t}</span>` : ""}
+  </div>`;
+  if (!hasChildren) {
+    html += `<div class="expand-panel" id="${rid}">${esc(node.desc)}</div>`;
+  }
+  if (hasChildren) for (const c of node.children) html += renderRow(c, depth + 1, phaseKey);
+  return html;
+}
+
+function toggleExpand(rid) {
+  const el = document.getElementById(rid);
+  if (!el) return; // branch row, nothing to expand (its children are already shown as rows)
+  el.classList.toggle("open");
+}
+
+let out = "";
+let overallD = 0, overallT = 0;
+for (const [key, phase] of Object.entries(MOCK_TREE)) {
+  let pd = 0, pt = 0;
+  for (const n of phase.nodes) { const [d, t] = subtreeCounts(n); pd += d; pt += t; }
+  overallD += pd; overallT += pt;
+  out += `<div class="phase-title">${phase.label} · ${pd}/${pt}</div>`;
+  for (const n of phase.nodes) out += renderRow(n, 0, key);
+}
+document.getElementById("outline").innerHTML = out;
+document.getElementById("overall").textContent = overallD + "/" + overallT + " done";
+</script>
+</body>
+</html>

@@ -182,10 +182,11 @@ def _render_queue_input(jfi_dir: Path) -> None:
 def _render_status(status: dict) -> None:
     c1, c2, c3, c4 = st.columns(4)
     phase_label = (status.get("phase") or "-").title() or "-"
-    # Planner's own internal stage (Arc/Lead/Journy/Func/Task -- see
-    # runner.PLANNER_STAGES) rides the same "Phase" metric rather than a
-    # separate widget, so at a glance this reads "Planner (Journy)" instead
-    # of leaving the dashboard indistinguishable across all four passes.
+    # Planner's own internal stage (Arc/Lead/Dev/Tickets/Task -- see
+    # runner.PLANNER_ARC_STAGE/PLANNER_NODE_STAGES) rides the same "Phase"
+    # metric rather than a separate widget, so at a glance this reads
+    # "Planner (Dev)" instead of leaving the dashboard indistinguishable
+    # across all four passes.
     if status.get("stage"):
         phase_label += f" ({status['stage']})"
     c1.metric("Phase", phase_label)
