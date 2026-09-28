@@ -42,6 +42,9 @@ anthropic = ["anthropic>=0.40"]
 # src/JFI/models/db.py) -- SQLite, the default, needs no extra driver.
 mysql = ["pymysql>=1.1"]
 postgres = ["psycopg[binary]>=3.2"]
+laya = [
+    "laya>=0.3.21",
+]
 
 [project.scripts]
 jfi = "JFI.runner:main"

@@ -194,6 +194,36 @@ MODEL=qwen3:8b
 # same trust model execute_command already has.
 # MASTER_WS_URL=ws://203.0.113.5:8765/report
 
+# --- Optional: Laya judge (v2 planner, `uv sync --extra laya`) --------------
+
+# The v2 planner asks Laya (a small non-generative decision model) whether
+# each plan node is GOOD / needs BREAKDOWN / needs a REDO. It loads two
+# checkpoints, english + typed-decisions (~3.5 GiB RAM, ~1.7 GB download on
+# first use), once per session. Without the `laya` extra -- including in the
+# `uv run build` binary, which never bundles it -- every node is judged by a
+# fixed fallback rule instead. See laya_plan.md §5.
+
+# Answers below this confidence use the fallback rule. Default 0.6.
+# LAYA_MIN_CONFIDENCE=0.6
+
+# Load a checkpoint from a local folder instead of the published one, e.g.
+# the judge fine-tuned by laya-finetuning/finetune.py. Unset = the Hub copy.
+# LAYA_ENGLISH_PATH=laya-finetuning/checkpoints/jfi-judge-english
+# LAYA_TYPED_DECISIONS_PATH=laya-finetuning/checkpoints/jfi-judge-typed-decisions
+
+# Which checkpoint's answer decides: english (default) or typed-decisions.
+# Both are always asked, and both answers are kept for comparison.
+# LAYA_JUDGE_MODEL=english
+
+# Unload every model loaded in LM Studio before each Laya judge step, and
+# reload them afterwards with the same context length, parallelism,
+# identifier and TTL (also if Laya fails). Laya then runs in a short-lived
+# child process, so its memory is fully freed before the LLM comes back.
+# For machines that can't hold the LLM and Laya at once; costs a model
+# reload per judge step. Needs LM Studio's `lms` CLI. Off by default.
+# Accepts 1/true/yes/on.
+# UNLOAD_LLM_BEFORE_LAYA=1
+
 # --- Advanced ------------------------------------------------------------
 
 # Where the JFI/ session folder is created, relative to. Defaults to the

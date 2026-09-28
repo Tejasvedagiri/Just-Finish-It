@@ -22,6 +22,21 @@ iterations, known gaps). Then read the doc for the phase you're touching:
 If you change behavior those docs describe, update them in the same
 change. If a doc disagrees with the code, the code wins; fix the doc.
 
+## In-progress rewrite: the v2 pipeline
+
+A multi-session rewrite of the planner (and Dev/reviewer) is underway:
+Architect → Lead → Task with a Laya judge, and `v1` and `v2` side by side
+behind `SessionRecord.pipeline_version`. If your task touches the planner,
+imp, reviewer, the plan tools or the DB schema, read these first:
+
+- [`laya_plan.md`](laya_plan.md): the design and every agreed decision;
+- [`laya_impl_phases.md`](laya_impl_phases.md): the phases, and the
+  **Progress** section that says what's done and what's next.
+
+Update the Progress section at the end of any session that advances the
+rewrite. Until phase 11, `v1` is the default and must keep working
+unchanged.
+
 ## Repo shape
 
 This repo is the Python agent (`src/JFI/`, `uv`-managed,

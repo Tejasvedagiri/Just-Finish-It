@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENTRY_POINT = PROJECT_ROOT / "src" / "JFI" / "runner.py"
 DASHBOARD_SRC = PROJECT_ROOT / "src" / "JFI" / "web" / "dashboard.py"
 BINARY_NAME = "jfi"
+EXCLUDED_MODULES = ("laya", "torch", "transformers")
 
 
 def main() -> None:
@@ -55,6 +56,12 @@ def main() -> None:
         "--collect-all", "openai",
         "--collect-all", "playwright",
     ]
+    # Laya (the `laya` extra) pulls in torch + transformers -- gigabytes -- so
+    # the binary never bundles it, even when the extra is synced in this build
+    # environment. JFI.planner.judge imports it lazily and falls back to its
+    # fixed rule when it's missing (laya_plan.md D22).
+    for module in EXCLUDED_MODULES:
+        args += ["--exclude-module", module]
 
     # Bundling streamlit makes the standalone binary self-sufficient for the
     # web dashboard too: runner._launch_web_dashboard re-invokes this same

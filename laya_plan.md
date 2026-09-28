@@ -492,34 +492,86 @@ Most of these already exist in some form (`read_file`, `get_leaf`,
 
 ### 5.1 The questions
 
-Laya judges every unjudged node, **in process**, with the model loaded
-only for the moment it's needed:
+Laya judges every unjudged node, **in process**. The model is loaded once
+per session, on first use, and **stays loaded**:
 
 ```python
 from laya import Router
 
-router = Router()                                   # load
-results = router.predict_batch(                     # judge every unjudged node at once
+router = Router()                                   # once per session (lazy: loads on first predict)
+results = router.predict_batch(                     # each judge step: every unjudged node at once
     [{"state": state_for(node), "questions": QUESTIONS, "model": LAYA_MODEL}
      for node in unjudged_nodes])
-router.unload(); del router; gc.collect()           # tear down to free memory
-if torch.cuda.is_available(): torch.cuda.empty_cache()
 ```
 
-- **One load per judge step, not per node.** Loading a checkpoint costs
-  seconds (Laya's README: about 7 s on CPU), so the judge collects every
-  unjudged node in the current step and scores them in **one**
-  `predict_batch` call. It then tears the router down before the next LLM
-  episode starts. A single node (e.g. one redo) is still one load +
-  `predict` + teardown.
-- **Why tear down:** JFI usually runs next to a local LLM (Ollama,
-  llama.cpp, vLLM) on the same machine. Keeping Laya's model resident would
-  hold RAM/VRAM the LLM needs for its 32k–40k context. Tearing down after
-  each judge step gives it back.
-- **Pinned checkpoint:** `model=LAYA_MODEL` (default `"english"`) is passed
-  on every request. JFI's node text is English, and pinning stops the
-  router's language detection from loading the multilingual checkpoint as
-  well because of identifiers in the text.
+- **One batch per judge step, not one call per node.** The judge collects
+  every unjudged node in the current step and scores them in **one**
+  `predict_batch` call.
+- **Two checkpoints, no multilingual:** JFI uses `english` and
+  `typed-decisions`, created as `Router(max_loaded=2)` and preloaded with
+  exactly those two. `multilingual` is never loaded or downloaded. Which
+  checkpoint answers which question is open (§11).
+- **Kept resident, not torn down.** Measured (§5.1.1): both checkpoints
+  together cost about **3.5 GiB** of RAM, which is acceptable. An
+  in-process `unload()` doesn't return that memory to the OS anyway: the
+  allocator and Laya's tokenizer cache keep it. So tearing down would cost
+  a reload on every judge step and save nothing.
+- **If RAM ever matters:** running the judge in a **child process** that
+  exits does free everything (measured: back to 0.02 GiB). It costs a
+  ~4 s reload per judge step. `utils/laya_poc.py child` demonstrates it.
+  Not the default.
+
+#### 5.1.1 Measured cost (2026-09-28)
+
+Measured on the development machine: Windows 11, 12 CPU threads, no GPU,
+torch 2.14.0+cpu, laya 0.3.21, the `english` checkpoint pinned. One
+`predict_batch` of 10 realistic JFI nodes × the 2 §5.1 questions.
+
+| | Process RSS | Laya's share |
+|---|---|---|
+| Python baseline | 0.02 GiB | |
+| after `import laya, torch` | 0.19 GiB | +0.17 GiB (libraries) |
+| **model loaded + first batch done (resident)** | **2.01 GiB** | **+1.82 GiB** (model + tokenizer) |
+| **peak during load / first predict** | **2.68 GiB** | **+2.49 GiB** momentary |
+| after `unload()` + `gc.collect()` | 1.99 GiB | freed almost nothing |
+
+**Both checkpoints** (`english` + `typed-decisions`, from
+`utils/laya_poc.py`, same machine, cache warm):
+
+| | In process | Child process |
+|---|---|---|
+| after `import laya` (lazy, torch not loaded yet) | 0.02 GiB | 0.02 GiB |
+| **both loaded** (`preload`) | **3.48 GiB** (4.3 s) | **3.47 GiB** (4.1 s) |
+| one `predict` per checkpoint | 0.2 s each | 0.2 s each |
+| **after unload** | **3.49 GiB**: `unload()` + gc frees nothing | **0.02 GiB**: child exit frees everything |
+
+- **`UNLOAD_LLM_BEFORE_LAYA=1`** (D35) does exactly that, and also swaps
+  LM Studio's models out for the duration: snapshot, `lms unload --all`,
+  Laya in a child process, then reload every model with its original
+  context length, parallelism, identifier and TTL (reload also runs when
+  Laya fails). For machines that can't hold the LLM and Laya at once.
+- **Budget for it:** about **2.0 GiB resident** while JFI runs, with a
+  momentary **2.7 GiB peak** at first load. The peak is the checkpoint
+  being converted to fp32 on CPU; on disk it's stored as 16-bit
+  (`model.safetensors` = 842,609,210 bytes).
+- **Speed:** the first batch took 9.8 s including the load; a warm batch of
+  10 nodes took about 7 s on CPU (≈0.35 s per node × question).
+- **Disk:** Laya downloads **only the checkpoints it loads**. `Agent`
+  restricts `snapshot_download` to the requested subfolder via
+  `allow_patterns`. For `english` + `typed-decisions` that's **1.69 GB**
+  (842,609,210 + 842,609,220 bytes of `model.safetensors`, plus
+  tokenizers) in `~/.cache/huggingface`. (A multilingual copy found in the
+  cache on this machine predates this measurement; nothing JFI does
+  fetches it.)
+- **Zero-shot quality, first look:** every answer's confidence was 0.41–0.59
+  (below any sensible `LAYA_MIN_CONFIDENCE`), and the operational node
+  "run the server with uv run uvicorn …" was *not* flagged REDO, though
+  `redo_reason` did pick "operational" at 0.64. This matches Laya's README
+  (near chance zero-shot) and confirms the fallback rule (§5.2) will be
+  doing most of the judging until Laya is calibrated or fine-tuned.
+- **Always name the checkpoint:** every request passes `model="english"`
+  or `model="typed-decisions"` explicitly. The router's automatic language
+  routing is never used, so it can't reach for `multilingual`.
 - **Laya is an optional extra** (`uv sync --extra laya`, which adds `laya`
   and pulls in torch + transformers). It's imported lazily inside the
   judge, so JFI without it still runs; every verdict then comes from the
@@ -706,19 +758,8 @@ never as a pass.
 
 ## 8. State, resume and re-plan
 
-New `Leaf` columns (plus `_ensure_columns` for old DBs):
-
-| Column | Values |
-|---|---|
-| `level` | `architect` / `lead` / `task`: who created it; decides who breaks it down |
-| `plan_status` | `NULL` (unjudged) / `GOOD` / `BREAKDOWN` / `REDO`. Separate from Dev's todo/done/skipped `status`. |
-| `redo_count`, `redo_reason` | §4.7 |
-| `done_when` | finish condition; the unit test case on implement/integrate leaves |
-| `files` | JSON list: source file(s) + test file |
-| `depends_on` | JSON list of node ids |
-
-New tables: `RunbookEntry`, `DesignEntry`, `PlannerVerdict`. All three are
-in `export-db`.
+The full database changes (every new table and column, and how old DBs
+get them) are in **§13**.
 
 - **Planning done:** every node is `GOOD`.
 - **Resume:** read the statuses and continue from the same step of the
@@ -735,7 +776,7 @@ in `export-db`.
 
 | Area | Change |
 |---|---|
-| `src/JFI/planner/` (new) | `loop.py` (§2 loop + checks), `roles.py` (Architect create/redo/extend, Lead, Task prompts), `judge.py` (Laya questions, confidence gate, fallbacks), `laya_judge.py` (lazy `import laya`; `Router()` → `predict_batch` → `unload()` per judge step; `None` on any failure), `episode.py` (per-role packages, token counting against the budget). |
+| `src/JFI/planner/` (new) | `loop.py` (§2 loop + checks), `roles.py` (Architect create/redo/extend, Lead, Task prompts), `judge.py` (Laya questions, confidence gate, fallbacks), `laya_judge.py` (lazy `import laya`; one `Router()` per session, kept loaded; one `predict_batch` per judge step; `None` on any failure), `episode.py` (per-role packages, token counting against the budget). |
 | `src/JFI/imp/` (new) or `runner` | Dev as one short, scoped episode per leaf (§6): small brief, pull tools, the token budget, and overflow → split (§5.3). |
 | `tool/code_tools.py` (new) | `read_symbol` / `replace_symbol` (§4.8): one function at a time. Python via `ast`; other languages via the stub markers + a brace/indent scan. Every read tool gets a size cap with a "read more" hint. |
 | `tool/scaffold_tools.py` (new) | `scaffold_file` (§4.5): language-aware stubs, the `JFI:` marker, append-only. `unscaffold_file` (§4.7): removes Lead's own stubs/files, refusing anything that isn't a pure JFI stub. |
@@ -753,10 +794,10 @@ in `export-db`.
 | Status / fleet | Stage tags `Arc` / `Redo` / `Lead` / `Task` / `Judge`. The fleet repo drops `product_owner` + `testing`. |
 | Docs | Rewrite `docs/phase-planner.md`, `phase-imp.md`, `phase-reviewer.md`; delete `phase-product-owner.md`, `phase-testing.md`; update `pipeline.md`, `plan-tree.md`, `AGENTS.md`, `README.md`, `JFI_ENV_TEMPLATE`. |
 
-**Laya runs in process** (§5.1): a new optional extra `laya = ["laya>=0.3.21"]`
-in `pyproject.toml`, imported lazily. It's loaded for each judge step and
-torn down afterwards. Cost per judge step is one model load (seconds) plus
-about 1.2 s per node on CPU, less on GPU and less when batched.
+**Laya runs in process** (§5.1): the optional `laya` extra in
+`pyproject.toml`, imported lazily, loaded once per session and kept
+resident. It costs about 2.0 GiB RAM (§5.1.1) and about 0.35 s per node ×
+question on CPU, warm.
 
 ## 9A. Tests (real SQLite, real tmp dirs, observed behavior)
 
@@ -764,9 +805,9 @@ Laya is faked by monkeypatching `laya.Router` with a stub that records
 calls and returns scripted answers. The LLM gets scripted responses, as in
 today's `test_tiered_planner.py`. No model weights are needed in CI.
 
-- **Load/teardown:** one judge step creates exactly **one** `Router`, makes
-  **one** `predict_batch` call covering every unjudged node, and calls
-  `unload()` before the next LLM episode, even when prediction raises.
+- **Load once:** a session creates exactly **one** `Router`, lazily on
+  the first judge step; each judge step makes **one** `predict_batch` call
+  covering every unjudged node.
 - **Laya missing:** with `laya` not importable, planning still completes
   and every verdict is the §5.2 fallback, recorded as such.
 - **Binary:** the build spec excludes `laya` / `torch` / `transformers`
@@ -867,12 +908,35 @@ today's `test_tiered_planner.py`. No model weights are needed in CI.
 | D18 | **Escalation is allowed:** a Lead or Task redo that needs the layer above sends the parent back as REDO (§4.7). It's expected to be rare; its rate is tracked as a quality signal. |
 | D19 | **Dev overflow splits the leaf:** a Dev episode that hits the budget sends its leaf back for a Task split, and Dev continues with the pieces (§5.3). |
 | D20 | **Budget vs window:** 20k per episode, for models with 32k–40k context windows, and never above `CONTEXT_SIZE × CONTEXT_RATIO`. |
-| D21 | **Laya runs in process and is torn down after each judge step:** `Router()` → `predict_batch` over every unjudged node → `unload()`, so its memory goes back to the LLM. |
+| D21 | **Laya runs in process with two checkpoints, `english` + `typed-decisions`, no multilingual, kept loaded for the session** (lazy, on first judge step; one `predict_batch` per judge step). About 3.5 GiB resident; no teardown. A child-process judge frees everything if RAM ever matters (§5.1.1). |
 | D22 | **Laya stays out of the PyInstaller binary.** `dist/jfi` uses the fallback rule; Laya is available when running from source with `--extra laya`. |
+| D23 | **G1 fix:** every brief starts with a never-trimmed **scope anchor**; each role has a short prompt and a fixed core tool set; Laya picks 0–3 optional tools per node at judge time (stored on the node); `load_tool` stays as an escape hatch for the optional pool (§12, G1). |
+| D24 | **G2 fix: non-function files are Lead's scope.** Lead defines and skeletons manifests, config, fixtures, templates, migrations and docs as `artifact` file nodes; their leaves are verified by a mechanical check instead of a unit test. Project-wide files belong to a `project` component (§12, G2). |
+| D25 | **G3 fix: existing code is marked, not stubbed.** Lead's `mark_change` puts `JFI-CHANGE:` / `JFI-DELETE:` above existing symbols; Task makes `modify` / `delete` leaves; Dev updates existing tests + adds one new test; bug fixes are `modify` leaves whose `done_when` is the failing case. |
+| D26 | **G4 fix: non-code goals take a document path** (outline → sections → passages, mechanical checks instead of unit tests, the reviewer reads the whole document). |
+| D27 | **Phase completion is leaf state, not model text.** Planning is complete when Laya has marked every node `GOOD`; imp when every leaf is `done`; the reviewer when every leaf is `passed`. Every leaf must reach a done state. `<PHASE>_COMPLETE` markers are written by the runner from the DB. |
+| D28 | **G6:** Dev's queue is a topological order over the whole tree; `depends_on` is validated acyclic; a test failing on *another* stub's not-implemented body re-queues the leaf instead of "fixing" it. |
+| D29 | **G7:** forced directives are stored per node and delivered in that node's next episode; queued requests go to Architect extend mode at idle; skip and pause work between episodes. |
+| D30 | **G8:** review failures re-open the owning done leaves with a `fix_note` (no re-planning); extend mode only for genuinely missing work. |
+| D31 | **G9:** a GOOD node at any level is a valid Dev leaf (no stub → edit in place; no unit test → mechanical check). |
+| D32 | **G10:** the duplicate check runs inside the Laya judge step (embedding similarity between siblings). |
+| D33 | **G11–G15, G17–G23** as written in §12. **G12:** the e2e can be a single command (`uv run pytest`, `npm run test`). **G13:** a crashed Dev leaf restarts fresh, with 3 attempts before it's split. **G16:** option (a): old sessions finish on the old pipeline (`pipeline_version`). |
+| D34 | **Database:** every new table and column in §13, added for SQLite via `_ensure_columns`, and via an explicit migration for MySQL/Postgres. |
+| D35 | **`UNLOAD_LLM_BEFORE_LAYA`** (`.env`, off by default): before each Laya judge step, unload every LM Studio model (`lms ps --json` snapshot, `lms unload --all`), run Laya in a child process so its memory is really freed, then reload each model with its `modelKey`, context length, parallelism, identifier and TTL, also when Laya fails. Implemented in `JFI.llm.lmstudio_control` + `JFI.planner.judge`. |
 
 ## 11. Questions for you
 
-None open. Every question is answered in §10.
+1. **Which checkpoint judges what?** `english` is the general base model;
+   `typed-decisions` is fine-tuned on typed-decision workflows (Laya's
+   README: 0.77 vs 0.36 on its benchmark). Proposal: during phase 8 tuning,
+   **ask both** on every node and log both in `PlannerVerdict`; then keep
+   whichever agrees better with real outcomes (or use `typed-decisions`
+   for the verdict and `english` for embeddings: duplicates and tool
+   picks). OK?
+2. **Skipped leaves (G5):** a leaf the user skips (Ctrl+K/Q) is terminal
+   but not `done`. Should a phase with skipped leaves still count as
+   complete (the user chose to skip), or stay open until someone un-skips
+   or deletes them?
 
 **Tuned during implementation** (agreed: fix as we go, not blockers):
 
@@ -884,3 +948,658 @@ None open. Every question is answered in §10.
    how often Lead/Task escalate. `EPISODE_TOKEN_BUDGET`,
    `TOOL_RESULT_MAX_TOKENS` and the role prompts get adjusted from what
    real runs show.
+
+## 12. Gap review
+
+This section is a check of the plan against the current code, looking for
+things today's JFI does that the plan never accounts for, and for places
+where the plan contradicts itself. Each gap has a **proposed fix**, to be
+confirmed before implementation. Ordered by severity.
+
+### A. Blockers: the design doesn't work without these
+
+**G1. The fixed overhead alone would eat most of the 20k budget.**
+- **Measured:** today's system prompts are about **5,000 tokens** on their
+  own (imp 5,003; reviewer 4,603; planner 4,676; chars/4). The shared rule
+  blocks (`PLAN_FORMAT_RULES` 1,042 + `CONTEXT_CACHE_RULES` 652 +
+  `VERIFICATION_RULES` 1,274) are in every prompt. The deferred tool
+  schemas add about **5,900 tokens** once all 32 are unlocked, and today an
+  unlocked tool stays in every request for the rest of the session.
+- **Result:** a Dev episode could start at 8–11k before reading a single
+  line of code.
+- **Fix (agreed):** three layers, in this order.
+
+**G1.1 The scope anchor: never trimmed.** The constraint on everything
+below is that an episode must **never lose the context of its own scope**.
+So every brief starts with a fixed **scope anchor**. It's built in code,
+always present, and never cut to save tokens:
+
+```
+SCOPE
+  role:      Dev (implement one leaf)          ← or Architect / Lead / Task
+  node:      [id=42] implement get_session() -> Iterator[Session] in app/db/session.py
+  done_when: get_session() yields a Session that can query Todo
+  files:     app/db/session.py, tests/db/test_session.py
+  path:      persistence  >  app/db/session.py          (ancestor descriptions, one line each)
+  may:       edit the files above; add one unit test; pull design/runbook/code with tools
+  must not:  change other files' behaviour, other nodes, the design, the plan
+  finish:    mark_leaf_done(42)                  ← or finish(node_id)
+```
+
+- **Size:** about 150–250 tokens.
+- **Budget:** counted first; the budget check never removes it.
+- **Everything else is trimmed or pulled around it:** role rules, tool
+  schemas, pulled context.
+- **Redos:** the anchor also carries Laya's reason.
+- **Escalation:** the anchor says which node was escalated.
+
+**G1.2 Per-role prompts and a fixed core tool set.**
+
+- **Short prompts:** each role gets its own short prompt (≤ ~1.5k tokens).
+  The long shared blocks (`PLAN_FORMAT_RULES`, `CONTEXT_CACHE_RULES`,
+  `VERIFICATION_RULES`) are rewritten per role, keeping only the rules that
+  role acts on. Architect doesn't carry Dev's testing rules; Dev doesn't
+  carry plan-shaping rules.
+- **A fixed core tool set per role,** defined in code (≤ ~1.5k tokens of
+  schemas). It replaces session-wide `load_tool` unlocking, where an
+  unlocked tool stayed in every request for the rest of the session.
+
+  | Role | Core tools (always present) |
+  |---|---|
+  | Architect | `get_plan`, `get_leaf`, `add_leaf`, `update_leaf`, `delete_leaf`, `design_set/get`, `runbook_set/get`, `list_dir`, `read_file`, `search_code`, `finish` |
+  | Lead | `get_leaf`, `add_leaf`, `design_get`, `runbook_get`, `list_dir`, `read_symbol`, `scaffold_file`, `unscaffold_file`, `escalate`, `finish` |
+  | Task | `get_leaf`, `add_leaf`, `list_symbols`, `read_symbol`, `scaffold_file`, `design_get`, `escalate`, `finish` |
+  | Dev | `read_symbol`, `replace_symbol`, `list_symbols`, `read_file`, `write_file`, `search_code`, `design_get`, `runbook_get`, `execute_command`, `add_reviewer_note`, `mark_leaf_done` |
+  | Reviewer | `runbook_get`, `start_background_process`, `stop_background_process`, `execute_command`, `read_file`, `get_reviewer_notes`, `write_review_report`, `finish` |
+
+  Lists are indicative. The exact sets are fixed during implementation,
+  under the cap.
+
+**G1.3 Laya picks optional extras; `load_tool` is the escape hatch.**
+
+- **The optional pool:** tools most leaves don't need, e.g. browser,
+  `capture_screenshot` / `view_image`, `extract_video_frames`,
+  `fetch_webpage_images`, `ask_llm`, background processes (for Dev),
+  `context_save` / `context_lookup`.
+- **Laya picks 0–3 of them per node,** by embedding shortlist
+  (`predict_shortlist` + `cached_embed_fn`: cosine similarity between the
+  node text and each tool's one-line description). It's one cheap pass,
+  not one question per tool.
+- **No extra model load.** The pick runs **in the same judge step that
+  marks the node `GOOD`**, while Laya is already loaded, and is stored on
+  the node (new `tools` column, JSON list). Dev reads it when its episode
+  starts.
+- **Picks only add.** Laya can never remove a core tool, so a wrong pick
+  costs a few hundred tokens at most, never a missing capability.
+- **Escape hatch:** `load_tool` stays, scoped to the optional pool. If
+  Laya missed something, the episode loads it itself; a miss costs one
+  tool call, never a stuck leaf. Loaded tools last for that episode only.
+- **Logged in `PlannerVerdict`:** each pick, whether the picked tool was
+  used, and every `load_tool` of a tool Laya didn't pick. That's the
+  accuracy signal and the fine-tuning data, the same as the verdict log.
+- **Laya off / unavailable:** no extras are picked; the episode uses
+  `load_tool` as needed.
+
+**Expected result:** fixed overhead drops from 8–11k to about 3k (anchor +
+prompt + core tools). Laya's picks save another 0.5–1.5k on leaves that
+would otherwise load heavy tools "just in case".
+
+**Tests:**
+- every role's anchor + prompt + core schemas stays under
+  `ROLE_OVERHEAD_MAX_TOKENS` (e.g. 3,500);
+- the anchor is present and unchanged in every episode's first message,
+  including after budget trimming, redos and escalations;
+- Laya picks can't remove core tools;
+- `load_tool` works for pool tools, refuses anything outside the pool, and
+  expires with the episode;
+- with Laya off, no extras are picked and the episode still completes.
+
+**G2. Most of the product isn't functions: config, dependencies, fixtures,
+assets, docs.** The stub → implement → unit test model only covers code
+functions. A real app also needs:
+- `pyproject.toml` / `package.json` **with dependencies** (the runbook's
+  `setup: uv sync` needs them to exist);
+- `.env.example`, a `Dockerfile`, DB migrations / SQL schema;
+- HTML/CSS templates and static files;
+- shared test fixtures (`conftest.py`, a test DB);
+- a README.
+
+None of these has a function to stub or a unit test to write.
+- **Fix (agreed): defining them is part of Lead's scope.** Lead already
+  owns "folders, modules, files" for its component. Non-function files are
+  files too, so Lead defines them alongside the source files:
+  - **What Lead decides:** which non-function files the component needs
+    (the manifest and its dependency list, `.env.example` keys, the
+    Dockerfile, migration files, templates/static files, test fixtures such
+    as `conftest.py`, the README), where they go, and what each must
+    contain.
+  - **How it writes them:** with `scaffold_file` too, as a **skeleton**:
+    - the file's structure in its own format (a `pyproject.toml` with
+      `[project]` and the dependency list the design calls for; a
+      `conftest.py` with the fixture's signature; a template with its
+      blocks);
+    - plus `JFI:` lines saying what's left to fill in, in the format's
+      comment syntax (`#` for TOML/YAML/Dockerfile/`.env`, `<!-- -->` for
+      HTML, `--` for SQL).
+  - **One node per file,** like source files, with a `kind`:
+    - `code`: functions with stubs (as before);
+    - `artifact`: everything else.
+
+    Task turns an `artifact` file node into fill-in leaves, e.g. `fill
+    DATABASE_URL and API_KEY in .env.example`, `add the test-DB fixture to
+    tests/conftest.py`. A small artifact Laya judges GOOD goes straight to
+    Dev.
+  - **Verification instead of a unit test:** an `artifact` leaf's
+    `done_when` is a **mechanical check**, run by Dev like a unit test:
+    - `uv sync` exits 0;
+    - the file parses (TOML/YAML/JSON);
+    - `alembic upgrade head` runs;
+    - `docker build .` succeeds;
+    - the template renders;
+    - pytest collects the fixture.
+
+    D9 ("every implementation has a test attached") holds: the check *is*
+    the attached test.
+  - **Dependencies and setup order:** the manifest is the first node
+    under its component (`depends_on` from every code file that imports
+    from it). Its leaf's check is the runbook's `setup` entry, so Dev
+    verifies `setup` as soon as the dependencies exist, before any code
+    that needs them.
+  - **Cross-component artifacts** (the one project-wide `pyproject.toml`,
+    the root README, a Dockerfile for the whole app): Architect lists them
+    as a **`project` component**, so exactly one Lead owns them. That
+    prevents two Leads each scaffolding their own manifest.
+
+**G3. Changes to existing code (brownfield) have no path.** Stubs work for
+new functions. They don't cover modifying, renaming or deleting an
+existing function, fixing a bug, or refactoring. Those are most real goals
+on an existing repo. `scaffold_file` only appends new stubs.
+
+Example goal on an existing FastAPI app: *"Todos should have a due date,
+and `GET /todos` should return overdue ones first."* The work is: change
+the existing `Todo` model, change the existing `list_todos()`, add a new
+`is_overdue()`, delete the now-unused `sort_by_created()`, and update
+`list_todos()`'s existing test. Only the new function has a path today.
+
+- **Fix (agreed): Lead marks existing code the way stubs mark new code.**
+  - **Lead marks it** with a new tool, `mark_change(file, symbol, kind,
+    what)`. It puts a marker comment directly above the existing symbol
+    and never touches its body:
+
+    ```python
+    # JFI-CHANGE: sort overdue todos first (due_date < today), then by created_at
+    def list_todos(session: Session) -> list[Todo]:
+        ...existing code, untouched...
+    ```
+
+    `kind` is `change` (`JFI-CHANGE:`) or `delete` (`JFI-DELETE: <why>`).
+    Like `scaffold_file`, it refuses paths outside the project and any
+    symbol it can't find.
+  - **The file node** covers everything in that file: new stubs, change
+    markers and delete markers.
+  - **Task reads all three markers** and creates one leaf per marker, with
+    a leaf `kind`:
+    - `implement`: a `JFI:` stub (as before);
+    - `modify`: a `JFI-CHANGE:` marker;
+    - `delete`: a `JFI-DELETE:` marker.
+  - **Dev handles each kind:**
+    - **`implement`:** replace the stub, add one unit test (as before).
+    - **`modify`:** change the symbol and remove its `JFI-CHANGE:` line.
+      Run the symbol's **existing** tests, updating them only where the
+      intended behaviour changes, and add **one** new test for the new
+      behaviour (the leaf's `done_when`).
+    - **`delete`:** `search_code` for callers first. If anything still
+      calls it, don't delete: add a reviewer note and leave the leaf for
+      the reviewer. Otherwise delete the symbol and its tests.
+  - **Bug fixes** are `modify` leaves whose `done_when` is the failing
+    case, e.g. "`POST /login` with an empty password returns 422, not 500".
+    That case becomes the new unit test.
+  - **Nothing is forgotten silently:** the end-of-imp scan looks for all
+    three markers (`JFI:`, `JFI-CHANGE:`, `JFI-DELETE:`). Any left over is
+    unfinished work.
+
+**G4. Non-code goals.** `task_rules.py` detects `story` (and prose-heavy
+data-eng) goals today. Architect/Lead/Task, stubs and unit tests make no
+sense for "write a short story".
+- **Fix (agreed): a document path.** When
+  `AdaptiveSessionManager.task_type()` is `story` (or another prose type),
+  the same loop, stages and Laya judging run with document-shaped roles:
+
+  | Code path | Document path |
+  |---|---|
+  | Architect: stack, components, contracts | Architect: premise, audience, tone, length, **outline** (the sections), recorded as design entries; `project` artifacts become the output file(s) |
+  | Lead: files + stubs per component | Lead: one **section** per node, creating the output file with a heading and a `JFI:` placeholder per section (`scaffold_file` in Markdown: `<!-- JFI: ... -->`) |
+  | Task: implement / modify / delete leaves | Task: one leaf per **passage** (a scene, a paragraph group) |
+  | Dev: one function + one unit test | Dev: writes one passage in place of its placeholder |
+  | unit test | a **mechanical check** in `done_when`: word count within range, required points/names present, the placeholder gone |
+  | reviewer e2e: run the app | reviewer e2e: read the whole document once against the outline, tone and length, then report |
+
+  - **No unit tests, no stubs of code, no runbook** beyond "where the
+    output file lives".
+  - **Laya's questions are unchanged.** "Smallest sensible unit" now means
+    one passage.
+  - **Mixed goals** (e.g. a data pipeline plus a written report) stay on
+    the code path. The report is a `project` artifact.
+
+**G5. What ends an episode, and what ends a phase.** Today phases end on
+`<PHASE>_COMPLETE` marker lines the **model** writes, with "please
+continue… output 'X'" nudges. The plan never says what ends a Lead, Task,
+Architect or Dev episode.
+
+- **Fix (agreed): a phase is complete when all of its leaves are in a done
+  state, never because the model said so.** Every leaf carries a state for
+  each phase that works on leaves, and the runner checks the DB:
+
+  | Phase | Per-leaf state | Done state | Phase complete when |
+  |---|---|---|---|
+  | planner | `plan_status` | `GOOD` (set by Laya or its fallback) | **every** node is `GOOD` |
+  | imp (Dev) | `status` | `done` (via `mark_leaf_done`, after its test/check passed) | **every** leaf is `done` |
+  | reviewer | `review_status` (reused column) | `passed` | **every** leaf is `passed` (the e2e passed; see below) |
+  | cleanup | — (not leaf-based) | — | its one episode calls `finish` |
+
+  - **"All the leaves must have a done state":** a leaf left in any
+    non-done state keeps its phase open. There's no "mostly done".
+  - **Reviewer per-leaf state.** When the e2e passes, the runner marks
+    every leaf `passed`. When it fails, the reviewer names the failing
+    file/symbol, the leaves that own it become `failed` and are
+    **re-opened** for Dev (G8), and the phase isn't complete. After the fix
+    and a re-run of the e2e, `passed` is written again.
+  - **Leaves the user skipped (Ctrl+K/Q):** `skipped` is a terminal state,
+    but **not** `done`. See §11 for whether a skipped leaf still lets the
+    phase complete.
+  - **Markers become derived.** `PLANNER_COMPLETE`, `IMP_COMPLETE`,
+    `REVIEWER_COMPLETE` are appended by the **runner** when the DB says the
+    phase is complete, never taken from model text. They stay only so
+    `get_remaining_phases` and old sessions keep working. A model writing a
+    marker line no longer ends anything.
+  - **Resume** reads the same per-leaf states: the current phase is the
+    first one whose leaves aren't all done. That also fixes today's
+    "resume in iteration 2+" problem ("Known gaps" in `docs/pipeline.md`), where old
+    markers from iteration 1 made every phase look complete.
+- **What ends an episode** (inside a phase):
+  - Dev: `mark_leaf_done(id)`, which is refused unless the leaf's test or
+    check has passed in this episode.
+  - Architect / Lead / Task: `finish(node_id, summary)`.
+  - Reviewer: `write_review_report` (fail) or `finish` (pass).
+  - Cleanup: `finish`.
+  - The runner also enforces `MAX_EPISODE_TURNS` (e.g. 15). An episode
+    that hasn't finished by then is stopped and handled like a budget
+    overflow (§5.3). The no-tool-call nudge is reworded to "call
+    `finish`".
+
+**G6. Dev ordering across files will make unit tests fail.** Task sees only
+one file, so it can't set `depends_on` to leaves in *other* files. Dev
+could then implement `list_todos()` in `api/` before `get_session()` in
+`db/`, and `list_todos`'s unit test would hit `NotImplementedError`.
+- **Fix (agreed):**
+  - **Dev's queue is a topological order over the whole tree:** a leaf
+    waits for every leaf under any node its ancestors `depends_on`
+    (component → component set by Architect, file → file by Lead, leaf →
+    leaf by Task).
+  - Plus a mechanical check: if a leaf's test fails with the stub
+    body's `NotImplementedError` from another symbol, that's a *missing
+    dependency*, not a bug. The leaf is re-queued after the named symbol's
+    leaf instead of being "fixed".
+  - `depends_on` is also validated as **acyclic**.
+
+**G7. Mid-run user input goes nowhere.** Today the user can **queue** a
+request, **force** a directive (added to history, `drain_forced_input`),
+**skip** a task (Ctrl+K/Q) and **pause** (Ctrl+P), all through the one
+shared history. With scoped episodes, a forced directive written to
+session history never reaches the next episode's brief.
+- **Fix (agreed):**
+  - **Forced directives** during planning go to the *next* episode's brief
+    (and are stored on the node being worked on). During Dev they're
+    attached to the current leaf's next episode.
+  - **Queued requests** are held until the run reaches idle, as today, then
+    go to Architect extend mode.
+  - **Skip** marks the current Dev leaf skipped and moves on.
+  - **Pause** waits between episodes.
+
+### B. Serious: works, but badly or inconsistently
+
+**G8. Review failures are routed through the heaviest path.** A failed e2e
+is usually a bug in one function. The plan sends it to Architect extend
+mode, and "done leaves are never rewritten". So fixing a one-line bug
+means Architect → Laya → Lead → Laya → Task → Laya → Dev, and can't touch
+the leaf that has the bug.
+- **Fix (agreed):** a **fix path.** The reviewer's report names the failing
+  file/symbol. Architect (who sees everything) either:
+  - **re-opens the done leaf(s)** that own it: Dev status → todo, with the
+    report attached as a `fix_note`, which skips planning entirely; or
+  - uses extend mode only for genuinely missing work.
+
+  Re-opening a done leaf becomes an explicit, logged operation.
+
+**G9. Small goals.** "Fix the typo in README" → Architect makes one
+component node → Laya says GOOD. The plan then has a GOOD **component**
+leaf with no files, no stub and no unit test going to Dev. Rules like
+"every leaf has a unit test" and "Dev replaces a stub" don't fit.
+- **Fix (agreed):** a GOOD leaf at any level is a valid Dev leaf. Dev's
+  prompt handles "no stub" (edit in place) and "no unit test possible"
+  (`done_when` is a mechanical check, as in G2).
+
+**G10. Duplicates are effectively undetectable.** Laya judges one node at a
+time and never sees siblings (token budget), so its `duplicate` reason has
+nothing to compare against. That leaves only the role's self-check.
+- **Fix (agreed): the duplicate check lives in the Laya judge step.** It's a
+  **mechanical sibling-similarity check**, using the Laya model that's
+  already loaded. `laya.embed_fn_from_agent`
+  mean-pools its own encoder, so embedding every sibling's description and
+  flagging pairs above a cosine threshold costs no extra model. A flagged
+  pair makes the later-created node `REDO` (reason `duplicate`).
+
+**G11. Tests: stub test files, and failing stubs.**
+- A Lead-created *test* file with `raise NotImplementedError` stubs would
+  make the whole suite fail or error until every test is written.
+- **Fix (agreed):**
+  - test files are scaffolded with imports only, no test stubs;
+  - Dev's `test_one` run selects only its own test;
+  - `test_one` must support selecting one test in each stack's framework
+    (pytest node ids, `vitest -t`, `go test -run`), which is a runbook
+    responsibility Architect sets per stack.
+
+**G12. The reviewer and cleanup break the 20k rule; what the e2e is.** §0 says every LLM
+call fits in 20k; §0 also says history compression "stays for the
+reviewer and cleanup", i.e. long conversations.
+- **Fix (agreed):** the reviewer runs the e2e as one scoped episode (brief
+  = the `e2e` entry + the runbook index + reviewer notes), and cleanup as
+  one scoped episode. Compression is then unused by the new pipeline; it
+  stays only for old-pipeline sessions (G16).
+- **The e2e can be as simple as one command.** The runbook's `e2e` entry
+  is whatever exercises the whole app end to end for this stack:
+  - often just the full test suite: `uv run pytest`, `npm run test`,
+    `go test ./...`;
+  - a scripted scenario when the goal needs it (start, request, check,
+    stop).
+
+  Architect picks it (§4.3). The reviewer runs it, and falls back to
+  step-by-step only when it's a scenario. A one-command e2e keeps the
+  reviewer episode tiny.
+
+**G13. Resuming a Dev leaf mid-episode.** *(Decided: restart fresh, as
+below.)* Dev episodes aren't resumable
+conversations, and a crash mid-leaf leaves partial edits on disk.
+- **Fix (agreed):** a leaf that was started but not finished restarts as a
+  fresh episode. Its brief says "a previous attempt may have partially
+  edited `<files>`: check the current state first". (Its `JFI:` marker
+  tells it whether the stub was already replaced.)
+  - Each restart increments the leaf's `attempt_count`. At 3 attempts the
+    leaf is treated like a budget overflow: split by Task (§5.3), instead
+    of retrying the same thing.
+
+**G14. Token counting accuracy.** JFI estimates tokens as characters/4,
+which can be 20–30% off for code. The budget is a hard stop, so a bad
+estimate either stops good episodes early or lets real ones overflow the
+model's window.
+- **Fix (agreed):** use the server-reported `usage` when available. The
+  console already reads `chunk.usage` when a server sends it
+  (`pt_console_manager.print_agent_response`), but
+  `openai_compatable_stream.py` never requests it: it needs
+  `stream_options={"include_usage": True}`. Use chars/4 only as the
+  fallback. Keep `EPISODE_TOKEN_BUDGET` ≤ 0.7 × window as the margin for
+  estimate error.
+
+**G15. Per-role models.** `PHASE_ENV_PREFIX` gives per-phase models
+(`PLANNER_MODEL`, `IMP_MODEL`). Architect (design) likely wants a stronger
+model than Task (mechanical ticketing).
+- **Fix (agreed):** role prefixes `ARCHITECT_*`, `LEAD_*`, `TASK_*` via
+  the existing `phase_env`, falling back to `PLANNER_*`, then the shared
+  default.
+
+**G16. Sessions in flight when the upgrade lands.** An existing session
+has leaves with no `level` / `plan_status`, `testing` leaves, a history
+positioned mid-`testing` or mid-`product_owner`, and review columns in
+use.
+- **Fix (agreed): option (a).**
+  - **(a)** old sessions keep running on the old pipeline until they
+    finish (both code paths kept for one release);
+  - **(b)** migrate: existing un-done leaves become GOOD `task` leaves,
+    `testing` leaves become Dev leaves, and the session resumes at Dev.
+    Old completed work stays done.
+
+  **Decided: (a).** Each session records which pipeline it runs on
+  (`SessionRecord.pipeline_version`, §13):
+  - sessions created before the upgrade stay on `v1` and keep the old
+    code path until they finish;
+  - new sessions start on `v2`.
+  - The old path is removed in a later release, once no `v1` sessions are
+    expected.
+
+### C. Smaller: needs a line in the plan
+
+**G17. `read_symbol` / `replace_symbol` for non-Python languages.**
+*(Agreed: tree-sitter where available, marker-bounded fallback otherwise;
+the dependency choice is confirmed at implementation.)* "A
+brace/indent scan" is fragile for TS/JS/Go (nested braces in strings,
+decorators, overloads). **Fix (agreed):** tree-sitter if acceptable as a
+dependency; otherwise the fallback edits only between the stub's own
+`JFI:` markers (always well-delimited, since the tool generated them),
+with `read_file` ranges for everything else.
+
+**G18. `scaffold_file` path safety.** It writes to disk from model input.
+It must refuse paths outside the project root and anything under
+`.jfi/` / `.git/`.
+
+**G19. What the reviewer's e2e means for libraries and CLIs.** "Start the
+app, stop the app" doesn't apply to a library or a one-shot CLI. Proposed
+fix: for those, Architect writes `e2e` as "call the public API / run the
+CLI with sample input and check the output"; `run` / `stop` are optional
+runbook entries.
+
+**G20. Laya and non-English goals.** *(Superseded, 2026-09-28: JFI uses only
+`english` and `typed-decisions`; `multilingual` is dropped.)* Goals are
+expected in English. A non-English goal is still judged, just less
+reliably, and the §5.2 fallback covers low-confidence answers as it does
+for everything else.
+
+**G21. UI and reporting surfaces.** Things that read today's plan and
+phase model and need updating:
+- the TUI header / `set_status` fields;
+- `web/dashboard.py`: it shows the review report and plan feedback;
+- `socket_reporter` and the fleet's `plan_markdown` parser;
+- `export-db` (new tables, removed note kinds);
+- `PHASE_DISPLAY_NAMES`.
+
+The fleet dashboard parses `render_plan_markdown`'s `- [ ] N.M` format. The
+new `plan_status` / `level` should show there without breaking that parser.
+
+**G22. Test churn.** 12 test files mention the `testing` / `product_owner`
+phases, and many more string-match today's prompts
+(`test_tiered_planner.py`, `test_get_system_message.py`,
+`test_phase_messages.py`, …). The rewrite deletes or rewrites these.
+That's expected, but it should be planned as its own step so the suite is
+green at every commit, not broken for the length of the rewrite.
+
+**G23. Implementation order.** *(Agreed.)* The staged plan lives in its
+own document, **[laya_impl_phases.md](laya_impl_phases.md)**: 13 phases
+(0–12), `v1` and `v2` side by side behind `pipeline_version`, each phase
+shipped with the whole suite green. Its **Progress** section is the
+source of truth for what's done and what's next.
+
+## 13. Database changes
+
+Everything the design above needs, in one place. The DB stays `.jfi/JFI.db`
+(or `DB_BACKEND=mysql|postgres`), one per project, every row keyed by
+`session_id`.
+
+### 13.1 Changed tables
+
+**`Leaf`: the plan tree** (existing table, new columns):
+
+| Column | Type | Values / meaning | Used by |
+|---|---|---|---|
+| `level` | str, indexed | `architect` / `lead` / `task`: which role created it | routing (§2) |
+| `kind` | str | component: `component` / `project`; file: `code` / `artifact` / `section`; leaf: `implement` / `modify` / `delete` / `fill` / `passage` | Task, Dev (G2, G3, G4) |
+| `plan_status` | str, indexed, null | `NULL` (unjudged) / `GOOD` / `BREAKDOWN` / `REDO` | planner completion (G5) |
+| `redo_count` | int, default 0 | redos so far | redo cap (§4.7) |
+| `redo_reason` | str, null | `operational` / `vague` / `duplicate` / `design` / `too_big` | redo brief |
+| `escalation_count` | int, default 0 | escalations into this node | escalation cap (§4.7) |
+| `paused` | bool, default false | subtree paused by an escalation | loop (§4.7) |
+| `done_when` | text, null | finish condition; the test/check | Dev, reviewer |
+| `files` | JSON list, null | files it creates/changes, plus its test file | Dev brief, scope anchor |
+| `depends_on` | JSON list of leaf ids, null | must be done first; validated acyclic | Dev queue order (G6) |
+| `tools` | JSON list, null | optional tools Laya picked | Dev episode tool set (G1.3) |
+| `attempt_count` | int, default 0 | Dev episodes started on this leaf | restart cap (G13) |
+| `fix_note` | text, null | reviewer failure text when the leaf is re-opened | Dev brief (G8) |
+| `reopened_count` | int, default 0 | times re-opened by a failed review | reporting |
+
+Existing columns, and how their meaning changes:
+
+| Column | Change |
+|---|---|
+| `status` (`todo` / `done` / `skipped`) | Unchanged: Dev's per-leaf state. `done` is imp's done state (G5). |
+| `review_status` | **Reused** for the reviewer's per-leaf state: `passed` / `failed`. The legacy values `approved` / `rejected` stay readable for `v1` sessions. |
+| `review_note`, `rejection_count` | `v1` only; not written by `v2`. |
+| `phase` | `v2` writes only `imp`. `testing` / `product_owner` stay valid enum values for `v1` data. |
+
+**`SessionRecord`** (existing table, new columns):
+
+| Column | Type | Meaning |
+|---|---|---|
+| `pipeline_version` | str, default `v1` | `v1` = old pipeline, `v2` = this design (G16). New sessions write `v2`. |
+| `stage` | *(existing)* | now `architect` / `lead` / `task` / `judge` / `dev` / `review` |
+
+**`HistoryMessage`** (existing table, new column):
+
+| Column | Type | Meaning |
+|---|---|---|
+| `episode_id` | int, null, indexed | which episode a message belongs to. `NULL` for `v1` sessions. An episode's messages are rebuilt from exactly these rows. |
+
+**`UnlockedTool`**: `v1` only. In `v2`, a `load_tool` lasts one episode
+and is logged on `Episode.tools_loaded`, not here.
+
+**`DonePhase`**: now written by the runner **from leaf state** (G5): when
+every leaf is in the phase's done state. It's never written because the
+model said a marker.
+
+### 13.2 New tables
+
+**`Episode`**: one row per LLM episode (planner roles, each Dev leaf, the
+reviewer, cleanup):
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | int PK | |
+| `session_id` | str, indexed | |
+| `node_id` | int, null | the leaf/node it works on (null for cleanup) |
+| `role` | str | `architect` / `lead` / `task` / `dev` / `reviewer` / `cleanup` |
+| `mode` | str | `create` / `breakdown` / `redo` / `extend` / `implement` / `fix` / `e2e` |
+| `started_at`, `ended_at` | datetime | |
+| `turns` | int | model turns used |
+| `tokens` | int | tokens counted (server `usage` if reported, else estimate: G14) |
+| `end_reason` | str | `finish` / `done` / `budget` / `turn_cap` / `error` / `stopped` |
+| `tools_loaded` | JSON list | optional tools loaded via `load_tool` this episode |
+| `tools_used` | JSON list | tools actually called |
+
+It drives the budget and turn caps, the G13 restart, the Laya tool-pick
+accuracy (`tools` on the leaf vs `tools_used` / `tools_loaded`), and the
+UI's "what's running now".
+
+**`PlannerVerdict`**: one row per judged node:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | int PK | |
+| `session_id`, `node_id` | | |
+| `level` | str | |
+| `judged_at` | datetime | |
+| `laya_model` | str, null | checkpoint used (null when unavailable) |
+| `laya_verdict`, `laya_redo_reason` | str, null | Laya's raw answer |
+| `probabilities` | JSON | per-option probabilities for both questions |
+| `answer_confidence` | float, null | |
+| `fallback` | str | `none` / `conservative` / `llm` / `unavailable` |
+| `duplicate_of` | int, null | sibling it was flagged against (G10) |
+| `duplicate_score` | float, null | cosine similarity |
+| `budget_override` | bool | status forced by the token check (§5.3) |
+| `final_status` | str | the `plan_status` actually written |
+
+**`PlanEvent`**: an append-only log of plan state changes that aren't
+verdicts:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id`, `session_id`, `node_id`, `created_at` | | |
+| `type` | str | `redo` / `escalate` / `breakdown` / `reopen` / `overflow` / `restart` / `skip` / `cap_reached` / `directive` |
+| `detail` | text | reason, the escalation `why`, the reviewer failure, … |
+| `episode_id` | int, null | the episode that caused it |
+
+This is the audit trail behind "why is this leaf here". It feeds the
+escalation-rate signal (§4.7) and `export-db`.
+
+**`RunbookEntry`** (§3.1):
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id`, `session_id` | | unique on (`session_id`, `name`) |
+| `name` | str | `setup` / `run` / `stop` / `view` / `test` / `test_one` / `build` / `logs` / `e2e` / … |
+| `command` | text | may contain `{test_id}`-style placeholders |
+| `notes` | text | |
+| `verified` | bool | |
+| `verified_at` | datetime, null | |
+| `updated_by` | str | role that last wrote it |
+| `updated_at` | datetime | |
+
+**`DesignEntry`** (§3.2):
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id`, `session_id` | | unique on (`session_id`, `kind`, `key`) |
+| `kind` | str | `stack` / `component` / `contract` / `convention` / `assumption` / `out_of_scope` / `outline` (G4) |
+| `key` | str | e.g. `persistence`, `api->persistence` |
+| `text` | text | |
+| `created_by` | str | role |
+| `updated_at` | datetime | |
+
+**`Directive`** (G7): a user directive forced mid-run:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id`, `session_id`, `created_at` | | |
+| `node_id` | int, null | node it applies to (the one in progress when it was typed); null = next episode of any kind |
+| `text` | text | |
+| `consumed_episode_id` | int, null | episode that received it; null = still pending |
+
+### 13.3 `SessionNote` kinds
+
+| Kind | `v2` |
+|---|---|
+| `review_report` | kept: the reviewer's failure report (G8 uses it to re-open leaves) |
+| `reviewer_notes` | kept: Dev's notes for the reviewer |
+| `plan_feedback` | `v1` only (Program Manager is gone) |
+
+### 13.4 Getting the schema onto existing DBs
+
+- **New tables:** `create_all` creates them, as today.
+- **New columns on existing tables (SQLite):** added to `_ensure_columns`
+  in `models/db.py` (`Leaf`, `SessionRecord`, `HistoryMessage`), as
+  `AGENTS.md` requires.
+- **MySQL / Postgres:** `_ensure_columns` is SQLite-only today, so a
+  project on those backends with an existing DB would **not** get the new
+  columns. Fix: extend `_ensure_columns` with the `ALTER TABLE … ADD
+  COLUMN` syntax for both (all new columns are nullable or have defaults,
+  so it's a plain add), and test it against both dialects' DDL.
+- **No data migration.** `v1` sessions keep their rows as they are
+  (G16a). `v2` sessions write the new columns from the start.
+- **`export-db`:** dumps every new table (`Episode`, `PlannerVerdict`,
+  `PlanEvent`, `RunbookEntry`, `DesignEntry`, `Directive`), and the plan
+  render shows `level`, `kind`, `plan_status`, `done_when` and
+  `depends_on`.
+- **Web dashboard / fleet** (G21): read `pipeline_version` to know which
+  layout to show; `render_plan_markdown` keeps its `- [ ] N.M` line format
+  so the fleet parser doesn't break, with the new fields appended as a
+  suffix.
+
+### 13.5 DB tests
+
+- **Fresh DB:** every new table and column exists after `get_engine`.
+- **Old SQLite DB** (a fixture built with today's schema): gains every new
+  column and table on open; old rows read back unchanged.
+- **MySQL/Postgres DDL:** the generated `ALTER TABLE` statements are
+  correct per dialect (checked on the SQL, no server needed).
+- **Constraints:** uniqueness on `RunbookEntry` (`session_id`, `name`) and
+  `DesignEntry` (`session_id`, `kind`, `key`); `depends_on` cycles are
+  rejected on write.
+- **`v1` session:** still loads and resumes on the old path with the new
+  columns present but unused.
+- **`export-db`:** includes the new tables.
