@@ -31,12 +31,12 @@ should:
 
 ## Progress
 
-**Current phase:** phase 4 (code tools), on `feature/v2`.
-**Next step:** decide the tree-sitter question first (see "Open for this
-document"); then `scaffold_file` / `unscaffold_file` / `mark_change`,
-`read_symbol` / `replace_symbol` / `list_symbols`, `search_code`, `list_dir`,
-with path safety and the end-of-imp marker scan. Their schemas go in the
-episode tool registry (`EpisodeTools(extra_schemas=...)`), not `schemas.py`.
+**Current phase:** phase 5 (planner v2 with the fallback judge), on `feature/v2`.
+**Next step:** `src/JFI/planner/loop.py` + `roles.py`: gated stages
+(Architect → Lead → Task), routing by `level`, redo by the creator,
+`escalate`, the fallback judge (`JFI.planner.judge.fallback_status`), plan
+state in `Leaf.plan_status`, completion from DB state, and
+`run_phase("planner")` dispatching on `pipeline_version` (v1 unchanged).
 
 | Phase | Status | Branch / PR | Notes |
 |---|---|---|---|
@@ -44,7 +44,7 @@ episode tool registry (`EpisodeTools(extra_schemas=...)`), not `schemas.py`.
 | 1 Database schema | **done** | `feature/v2` | §13: new columns + 6 tables, portable column upgrade, export-db |
 | 2 Runbook + design | **done** | `feature/v2` | tools + index lines + result cap; schemas kept out of v1's tool list |
 | 3 Episode engine | **done** | `feature/v2` | `src/JFI/episode/`: brief + anchor, role tool sets, budget, turn cap, finish, directives, role models |
-| 4 Code tools | not started | | |
+| 4 Code tools | **done** | `feature/v2` | stubs, mark_change, symbol read/replace (ast + brace matcher, no tree-sitter), search, markers |
 | 5 Planner v2 (fallback judge) | not started | | |
 | 6 Dev v2 | not started | | |
 | 7 Reviewer + cleanup v2 | not started | | first full `v2` run |
@@ -59,6 +59,24 @@ Status values: `not started` / `in progress` / `in review` / `done`.
 ### Progress log
 
 Newest first. One entry per working session.
+
+- **2026-09-29 (cont.):** **Phase 4 done** (`tool/code_tools.py`):
+  - **Writing:** `scaffold_file` (language-aware stubs whose bodies are
+    generated, artifact `fill` skeletons, test files without failing
+    stubs, append-only), `unscaffold_file` (only pure stubs),
+    `mark_change`.
+  - **Reading and editing:** `read_symbol` / `replace_symbol` /
+    `list_symbols` (Python `ast`; brace matcher for JS/TS/Go/Rust),
+    `search_code`, `list_dir`, `scan_markers`.
+  - **Path safety:** refuses anything outside the root, `.git/` or
+    `.jfi/`.
+  - **Wiring:** the schemas are registered in `EpisodeTools`. Every role's
+    core set is now complete except `escalate` (phase 5); per-role schema
+    cost is 530–1,820 tokens (lead/dev a little over G1.2's ~1.5k
+    target).
+  - **tree-sitter:** not added.
+  - **Tests:** `test/test_code_tools.py` (30; byte-identical round trips
+    per language). Suite = baseline, 1000 passed.
 
 - **2026-09-29 (cont.):** **Phase 3 done** (`src/JFI/episode/`):
   - **`run_episode()`:** one scoped LLM conversation, ending on `finish`,
@@ -538,5 +556,6 @@ Once no `v1` sessions are expected.
 
 1. **Skipped leaves** (`laya_plan.md` §11) must be decided **by phase 6**,
    which is where `done` vs `skipped` gates imp completion.
-2. **tree-sitter** (phase 4) is a new dependency. Is it acceptable,
-   including in the PyInstaller binary?
+2. ~~tree-sitter~~ **Decided in phase 4: no new dependency.** Python uses
+   `ast`; JS/TS, Go and Rust use a brace matcher that skips strings and
+   comments. Revisit only if it proves fragile on real code.
