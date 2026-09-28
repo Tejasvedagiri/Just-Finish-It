@@ -120,15 +120,16 @@ MODEL=qwen3:8b
 
 # --- Debugging -----------------------------------------------------------
 
-# The planner phase runs as 3 internal passes by default -- Architect (top-
-# level shape only) -> Team Lead (feature breakdown) -> Journeyman (walks
-# every branch down to genuinely atomic, checkbox-ready leaves) -- instead
-# of one combined pass, because a single pass was observed letting compound
-# leaves through (a "leaf" that was really several independent test cases,
-# or several independent shell actions, bundled into one). Set this to opt
-# back into the original one-pass planner (cheaper: 1 LLM call instead of 3
-# for the whole phase) if you'd rather trade that decomposition quality for
-# lower planner cost. Accepts 1/true/yes/on.
+# The planner phase is tiered by default -- Architect (top-level shape
+# only, once) -> then, depth-first for each top-level node, Team Lead
+# (feature breakdown) -> Dev (walks the branch down to genuinely atomic,
+# checkbox-ready leaves) -> Task Planner (one child leaf per function) --
+# instead of one combined pass, because a single pass was observed letting
+# compound leaves through (a "leaf" that was really several independent test
+# cases, or several independent shell actions, bundled into one). Set this
+# to opt back into the original one-pass planner (far fewer LLM calls) if
+# you'd rather trade that decomposition quality for lower planner cost.
+# Accepts 1/true/yes/on.
 # PLANNER_SINGLE_PASS=1
 
 # Every execute_command call runs immediately, with no approval prompt at
@@ -147,7 +148,7 @@ MODEL=qwen3:8b
 # SHOW_STREAM_PROMPTS=1
 
 # Appends every LLM request/response pair this run makes to
-# JFI/<session>/llm_debug.jsonl -- one JSON object per line, full request
+# .jfi/llm_debug.jsonl -- one JSON object per line, full request
 # (messages + tools) and full response (content + tool_calls), no
 # truncation. Unlike SHOW_STREAM_PROMPTS (console/TUI-only, meant for
 # watching a run live), this persists to disk so a run can be inspected
@@ -157,8 +158,8 @@ MODEL=qwen3:8b
 
 # --- Optional: web dashboard (jfi-web) ---------------------------------------
 
-# Mirrors this session's live status to JFI/<session>/web_status.json and
-# accepts approval answers from JFI/<session>/web_answer.json, so the
+# Mirrors this session's live status to .jfi/web_status.json and
+# accepts approval answers from .jfi/web_answer.json, so the
 # `jfi-web` dashboard (pip install "just-finish-it[web]") can show live
 # progress and answer approval prompts from a browser instead of (or
 # alongside) the terminal. Off by default. Accepts 1/true/yes/on.
@@ -176,17 +177,18 @@ MODEL=qwen3:8b
 # yourself on the jfi-web command line.
 # JFI_WEB_PORT=7777
 
-# --- Optional: fleet dashboard (jfi-master) -----------------------------
+# --- Optional: fleet dashboard (Just-Finish-It-Fleet) -------------------
 
-# Reports this session's live status to a "master" fleet dashboard
-# (`jfi-master`, pip install "just-finish-it[master]") over a WebSocket --
+# Reports this session's live status to a "master" fleet dashboard (the
+# separate Just-Finish-It-Fleet repo, `npm run master`; this side needs
+# `uv sync --extra master`) over a WebSocket --
 # e.g. ws://203.0.113.5:8765/report. Unlike JFI_WEB_BRIDGE (file-based,
 # local-dashboard-only), the master can run on a completely different
 # machine from this session: the two only ever talk over this one socket,
 # never a shared filesystem. Independent of JFI_WEB_BRIDGE -- both can be
-# on at once. Off by default. See src/JFI/web/master_server.py.
+# on at once. Off by default. See src/JFI/manager/socket_reporter.py.
 #
-# SECURITY: jfi-master ships with no authentication -- anyone who can reach
+# SECURITY: the fleet master ships with no authentication -- anyone who can reach
 # its port can see every reporting session's live status. Only point this
 # at a master on a network you already trust (a VPN, a firewalled LAN),
 # same trust model execute_command already has.
