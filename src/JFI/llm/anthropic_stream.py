@@ -26,7 +26,7 @@ ANTHROPIC_API_KEY in .env (optionally per-phase, like OPENAI_API_KEY).
 import json
 import types
 
-from JFI.llm.base_llm_stream import BaseLLMStream, phase_env
+from JFI.llm.base_llm_stream import BaseLLMStream, phase_env, primary_prefix
 
 DEFAULT_MAX_TOKENS = 8192
 DEFAULT_REQUEST_TIMEOUT = 120.0
@@ -206,7 +206,8 @@ class AnthropicStream(BaseLLMStream):
 
         api_key = phase_env(prefix, "ANTHROPIC_API_KEY")
         if not api_key:
-            hint = f" (or {prefix}_ANTHROPIC_API_KEY, for the {prefix} phase)" if prefix else ""
+            name = primary_prefix(prefix)
+            hint = f" (or {name}_ANTHROPIC_API_KEY, for the {name} phase)" if name else ""
             raise KeyError(f"Missing required .env setting: ANTHROPIC_API_KEY{hint}")
         try:
             timeout = float(phase_env(prefix, "LLM_REQUEST_TIMEOUT", str(DEFAULT_REQUEST_TIMEOUT)))

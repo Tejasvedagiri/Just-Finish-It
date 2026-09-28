@@ -54,7 +54,7 @@ def load_history_from_db(engine, session_id: str) -> list[dict]:
     return messages
 
 
-def append_history_to_db(engine, session_id: str, messages: list[dict]) -> None:
+def append_history_to_db(engine, session_id: str, messages: list[dict], episode_id=None) -> None:
     """Appends `messages` (already-new ones only -- the caller tracks its
     own _flushed_count, same responsibility SimpleSessionManager.
     save_history already had for the old gzip file) as new HistoryMessage
@@ -77,5 +77,30 @@ def append_history_to_db(engine, session_id: str, messages: list[dict]) -> None:
                 tool_calls=message.get("tool_calls"),
                 tool_call_id=message.get("tool_call_id"),
                 name=message.get("name"),
+                episode_id=episode_id,
             ))
         db.commit()
+
+
+def load_episode_messages(engine, session_id: str, episode_id: int) -> list[dict]:
+    """One v2 episode's conversation, rebuilt from exactly its own rows --
+    what keeps an episode isolated from every other (laya_plan.md §0)."""
+    with get_session(engine) as db:
+        rows = list(db.exec(
+            select(HistoryMessage)
+            .where(HistoryMessage.session_id == session_id, HistoryMessage.episode_id == episode_id)
+            .order_by(HistoryMessage.seq)
+        ))
+    messages = []
+    for row in rows:
+        message: dict = {"role": row.role}
+        if row.content is not None:
+            message["content"] = row.content
+        if row.tool_calls:
+            message["tool_calls"] = row.tool_calls
+        if row.tool_call_id is not None:
+            message["tool_call_id"] = row.tool_call_id
+        if row.name is not None:
+            message["name"] = row.name
+        messages.append(message)
+    return messages

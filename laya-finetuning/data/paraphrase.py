@@ -20,6 +20,9 @@ whole apps once the goals no longer match.
     cp laya-finetuning/data/test.jsonl laya-finetuning/data/test_para.jsonl
     uv run python laya-finetuning/data/paraphrase.py --file laya-finetuning/data/test_para.jsonl
 
+No two rows end up with the same goal: rewrites that repeat any goal
+already in the file are rejected and retried on the next run.
+
 The file is rewritten atomically after every batch; rerunning the same
 command skips rows already done, so an interrupted run just resumes.
 Endpoint: LM Studio's OpenAI-compatible API, i.e. the same request as
@@ -60,6 +63,7 @@ Each input item has a project goal, a plan item (node) and its finish condition 
 
 Hard rules:
 - Goals: same product, same language/stack and same requirements, 1-2 sentences, under 250 characters. Never copy the input goal's wording.
+- Every goal_a and goal_b in your reply must be worded differently from every other goal in the reply, even for items that share the same input goal.
 - Node: keep EXACTLY the same amount and kind of work. Never add, remove, split or merge work. A big multi-part job must still read as big; a single small change must still read as single and small.
 - If the node is an action to operate something (install, run, start, stop, open, view, deploy, test-run, git), it must stay an action of operating something, not become building code.
 - If the node is vague (no concrete file, function or result), keep it vague; do not invent specifics.
@@ -88,7 +92,10 @@ def request(client, url, model, batch):
               "done_when": row.get("done_when", "")} for k, (_, row, style) in enumerate(batch)]
     user = "Rewrite each item in its own style:\n" + json.dumps(items, ensure_ascii=False, indent=1) + "\n/no_think"
     resp = client.post(f"{url}/chat/completions", json={
-        "model": model, "temperature": 0.9, "max_tokens": 6000,
+        # Reasoning models spend most of this thinking (observed: 1,362 of
+        # 1,582 tokens for two items, /no_think ignored); a 6,000 cap cut the
+        # JSON off mid-array at 6 items per batch.
+        "model": model, "temperature": 0.9, "max_tokens": 16000,
         "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
     })
     resp.raise_for_status()
@@ -97,10 +104,13 @@ def request(client, url, model, batch):
     return {batch[k][0]: by_k[k] for k in range(len(batch)) if k in by_k}
 
 
-def valid(o, row):
+def valid(o, row, used_goals):
+    """`used_goals`: every goal already in the file -- a repeat is rejected
+    (and retried on the next run) so no two rows end up sharing a goal."""
     goal_a, goal_b, node = (o.get(k, "").strip() for k in ("goal_a", "goal_b", "node"))
     return (goal_a and goal_b and node and len(node) <= 220 and len(goal_a) <= 320 and len(goal_b) <= 320
-            and goal_a != goal_b and goal_a != row["goal"] and node.lower() != row["node"].lower())
+            and goal_a != goal_b and goal_a != row["goal"] and node.lower() != row["node"].lower()
+            and goal_a.lower() not in used_goals and goal_b.lower() not in used_goals)
 
 
 def save(path, rows):
@@ -114,7 +124,7 @@ def save(path, rows):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--file", required=True, help="JSONL rewritten in place")
-    ap.add_argument("--batch", type=int, default=6)
+    ap.add_argument("--batch", type=int, default=4)
     ap.add_argument("--workers", type=int, default=2, help="parallel requests; match the model's parallel slots")
     ap.add_argument("--url", default="http://127.0.0.1:1234/v1")
     ap.add_argument("--model", default=None, help="default: the first model LM Studio lists")
@@ -126,8 +136,16 @@ def main():
     for r in rows:
         r.setdefault("app_id", app_id(r["goal"]))  # before any goal is rewritten
     rng = random.Random(args.seed)
-    todo = [(i, r, rng.choice(STYLES)) for i, r in enumerate(rows)
-            if "+para" not in str(r.get("source", "")) and not r.get("rewritten")]
+    pending = [(i, r) for i, r in enumerate(rows)
+               if "+para" not in str(r.get("source", "")) and not r.get("rewritten")]
+    # Rows of one app sit next to each other and share a goal; distinct
+    # styles within a batch keep their rewritten goals from coming out
+    # identical (observed: same goal + same style -> the same goal_a).
+    todo = []
+    for start in range(0, len(pending), args.batch):
+        chunk = pending[start:start + args.batch]
+        for (i, r), style in zip(chunk, rng.sample(STYLES, len(chunk))):
+            todo.append((i, r, style))
     print(f"{path.name}: {len(rows)} rows, {len(todo)} originals still to rewrite")
     save(path, rows)
     if not todo:
@@ -137,6 +155,7 @@ def main():
         model = args.model or client.get(f"{args.url}/models").json()["data"][0]["id"]
         print(f"model: {model}", flush=True)
         batches = [todo[i:i + args.batch] for i in range(0, len(todo), args.batch)]
+        used_goals = {r["goal"].strip().lower() for r in rows}
         done = failed = 0
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futures = {pool.submit(request, client, args.url, model, b): b for b in batches}
@@ -150,9 +169,10 @@ def main():
                     continue
                 for idx, row, style in batch:
                     o = replies.get(idx)
-                    if not o or not valid(o, row):
+                    if not o or not valid(o, row, used_goals):
                         failed += 1
                         continue
+                    used_goals.update({o["goal_a"].strip().lower(), o["goal_b"].strip().lower()})
                     new_row = {**row, "goal": o["goal_b"].strip(), "node": o["node"].strip(),
                                "done_when": o.get("done_when", "").strip() if row.get("done_when") else "",
                                "source": f"{row.get('source', 'handwritten')}+para", "style": style,

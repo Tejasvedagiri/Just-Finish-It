@@ -31,19 +31,19 @@ should:
 
 ## Progress
 
-**Current phase:** phase 3 (the episode engine), on `feature/v2`.
-**Next step:** `src/JFI/episode/`: the brief (a never-trimmed scope anchor +
-role prompt + node + runbook/design index lines), per-role core tool sets,
-the token budget (server usage first), the turn cap, the `finish` tool,
-`Episode` rows and history rows tagged with `episode_id`, directive delivery,
-and per-role model prefixes. See the phase 3 section below.
+**Current phase:** phase 4 (code tools), on `feature/v2`.
+**Next step:** decide the tree-sitter question first (see "Open for this
+document"); then `scaffold_file` / `unscaffold_file` / `mark_change`,
+`read_symbol` / `replace_symbol` / `list_symbols`, `search_code`, `list_dir`,
+with path safety and the end-of-imp marker scan. Their schemas go in the
+episode tool registry (`EpisodeTools(extra_schemas=...)`), not `schemas.py`.
 
 | Phase | Status | Branch / PR | Notes |
 |---|---|---|---|
 | 0 Groundwork | **done** | `feature/v2` | re-plan bug (planning rounds), server token usage, DB-era wording |
 | 1 Database schema | **done** | `feature/v2` | §13: new columns + 6 tables, portable column upgrade, export-db |
 | 2 Runbook + design | **done** | `feature/v2` | tools + index lines + result cap; schemas kept out of v1's tool list |
-| 3 Episode engine | not started | | |
+| 3 Episode engine | **done** | `feature/v2` | `src/JFI/episode/`: brief + anchor, role tool sets, budget, turn cap, finish, directives, role models |
 | 4 Code tools | not started | | |
 | 5 Planner v2 (fallback judge) | not started | | |
 | 6 Dev v2 | not started | | |
@@ -59,6 +59,26 @@ Status values: `not started` / `in progress` / `in review` / `done`.
 ### Progress log
 
 Newest first. One entry per working session.
+
+- **2026-09-29 (cont.):** **Phase 3 done** (`src/JFI/episode/`):
+  - **`run_episode()`:** one scoped LLM conversation, ending on `finish`,
+    `budget`, `turn_cap`, `error` or `stopped`, with an `Episode` row and
+    history rows tagged by `episode_id`.
+  - **The brief:** a never-trimmed SCOPE anchor as the first thing in the
+    system message, plus the runbook/design index lines.
+  - **Tools:** per-role core tool sets (not-yet-built phase 4 tools are
+    skipped automatically), and a per-episode `load_tool` limited to the
+    optional pool.
+  - **Budget:** capped at `CONTEXT_SIZE × ratio`; server usage is counted
+    when the server reports it.
+  - **Directives** are delivered once, to their node's next episode.
+  - **Role models:** `phase_env` accepts a prefix chain
+    (ARCHITECT→PLANNER→shared).
+  - **Tests:** `test/test_episode_engine.py` (19). Suite = baseline, 971
+    passed; build OK.
+  - **Data (parallel):** the LM Studio rewriter now works (unique goals;
+    distinct styles per batch; 16k token cap for reasoning models); the
+    full `train.jsonl` rewrite is running.
 
 - **2026-09-29 (cont.):** **Phase 2 done.**
   - `tool/runbook_tools.py` and `tool/design_tools.py`: set/get (upsert;

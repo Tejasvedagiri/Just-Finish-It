@@ -1,4 +1,4 @@
-from JFI.llm.base_llm_stream import BaseLLMStream, phase_env
+from JFI.llm.base_llm_stream import BaseLLMStream, phase_env, primary_prefix
 from openai import OpenAI
 
 # The openai SDK's own default read timeout is 600s (10 minutes) with no
@@ -19,7 +19,8 @@ def initial_service(prefix: str = "") -> OpenAI:
     api_key = phase_env(prefix, "OPENAI_API_KEY")
     missing = [name for name, value in (("OPENAI_URL", base_url), ("OPENAI_API_KEY", api_key)) if not value]
     if missing:
-        hint = f" (or {prefix}_{missing[0]}, for the {prefix} phase)" if prefix else ""
+        name = primary_prefix(prefix)
+        hint = f" (or {name}_{missing[0]}, for the {name} phase)" if name else ""
         raise KeyError(f"Missing required .env setting(s): {', '.join(missing)}{hint}")
     try:
         timeout = float(phase_env(prefix, "LLM_REQUEST_TIMEOUT", str(DEFAULT_REQUEST_TIMEOUT)))

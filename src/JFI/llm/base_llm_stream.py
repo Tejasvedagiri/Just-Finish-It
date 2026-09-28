@@ -2,7 +2,23 @@ from abc import ABC, abstractmethod
 import os
 
 
-def phase_env(prefix: str, key: str, fallback: str = "") -> str:
+def env_prefixes(prefix) -> tuple:
+    """`prefix` as a tuple: "" -> (), "PLANNER" -> ("PLANNER",), and a
+    tuple/list (a fallback chain, e.g. ("ARCHITECT", "PLANNER")) as-is."""
+    if not prefix:
+        return ()
+    if isinstance(prefix, (tuple, list)):
+        return tuple(p for p in prefix if p)
+    return (prefix,)
+
+
+def primary_prefix(prefix) -> str:
+    """The first prefix of a chain -- the name to show in "set X_MODEL" hints."""
+    chain = env_prefixes(prefix)
+    return chain[0] if chain else ""
+
+
+def phase_env(prefix, key: str, fallback: str = "") -> str:
     """
     Resolves one .env setting with an optional per-phase override.
 
@@ -12,9 +28,13 @@ def phase_env(prefix: str, key: str, fallback: str = "") -> str:
     each phase (planner/imp/testing/reviewer/cleanup) its own model and
     endpoint without requiring it: with no per-phase vars set, every phase
     resolves to the same shared default, exactly like before this existed.
+
+    `prefix` may also be a chain, tried in order -- the v2 roles use
+    ("ARCHITECT", "PLANNER"): ARCHITECT_MODEL, else PLANNER_MODEL, else MODEL
+    (laya_plan.md G15).
     """
-    if prefix:
-        value = os.environ.get(f"{prefix}_{key}")
+    for p in env_prefixes(prefix):
+        value = os.environ.get(f"{p}_{key}")
         if value:
             return value
     return os.environ.get(key, fallback)
