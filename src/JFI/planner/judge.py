@@ -127,6 +127,16 @@ def fallback_status(level: str) -> str:
     return GOOD if level == "task" else BREAKDOWN
 
 
+class FallbackJudge:
+    """The deterministic judge: fallback_status() for every node, no model.
+    Used until Laya is wired in (phase 8) and whenever it's unavailable --
+    same interface as LayaJudge."""
+
+    def judge(self, nodes: Sequence[JudgeNode]) -> List[Verdict]:
+        return [Verdict(node_id=n.node_id, status=fallback_status(n.level), source="fallback",
+                        fallback="conservative") for n in nodes]
+
+
 def build_state(goal: str, node: JudgeNode) -> dict:
     state = {
         "goal": goal[:GOAL_MAX_CHARS],

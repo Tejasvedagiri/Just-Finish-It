@@ -26,12 +26,12 @@ ROLE_ENV_PREFIXES = {
 }
 
 ROLE_CORE_TOOLS = {
-    "architect": ["get_plan", "get_leaf", "add_leaf", "update_leaf", "delete_leaf", "design_set", "design_get",
+    "architect": ["get_plan", "get_node", "add_node", "update_node", "delete_node", "design_set", "design_get",
                   "runbook_set", "runbook_get", "list_dir", "read_file", "search_code", "finish"],
-    "lead": ["get_leaf", "add_leaf", "update_leaf", "delete_leaf", "design_get", "design_set", "runbook_get",
-             "list_dir", "read_file", "read_symbol", "scaffold_file", "unscaffold_file", "mark_change",
-             "escalate", "finish"],
-    "task": ["get_leaf", "add_leaf", "update_leaf", "delete_leaf", "list_symbols", "read_symbol",
+    "lead": ["get_node", "list_nodes", "add_node", "update_node", "delete_node", "design_get", "design_set",
+             "runbook_get", "list_dir", "read_file", "read_symbol", "scaffold_file", "unscaffold_file",
+             "mark_change", "escalate", "finish"],
+    "task": ["get_node", "list_nodes", "add_node", "update_node", "delete_node", "list_symbols", "read_symbol",
              "scaffold_file", "design_get", "escalate", "finish"],
     "dev": ["read_symbol", "replace_symbol", "list_symbols", "read_file", "write_file", "replace_in_file",
             "search_code", "design_get", "runbook_get", "runbook_set", "execute_command", "add_reviewer_note",

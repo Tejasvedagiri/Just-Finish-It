@@ -101,7 +101,7 @@ def _anchor(node_id=7, role="lead"):
 
 
 def _tools(anchor, role="lead", extra=None):
-    impl = {"finish": make_finish(anchor), "get_leaf": lambda leaf_id: f"leaf {leaf_id}",
+    impl = {"finish": make_finish(anchor), "get_node": lambda node_id: f"node {node_id}",
             "design_get": lambda kind=None, key=None: "Design: empty.",
             "context_lookup": lambda keyword=None: "nothing saved", "execute_command": lambda command: "ok"}
     impl.update(extra or {})
@@ -118,11 +118,11 @@ def _run(engine, console, llm, anchor=None, budget=20_000, max_turns=None, role=
 
 def test_finish_ends_the_episode_and_records_it(engine):
     llm = LLM()
-    console = Console([turn(call("get_leaf", {"leaf_id": 7})),
+    console = Console([turn(call("get_node", {"node_id": 7})),
                        turn(call("finish", {"node_id": 7, "summary": "two files scaffolded"}))])
     result = _run(engine, console, llm)
     assert (result.end_reason, result.turns, result.summary) == ("finish", 2, "two files scaffolded")
-    assert result.tools_used == ["get_leaf", "finish"]
+    assert result.tools_used == ["get_node", "finish"]
     with get_session(engine) as db:
         row = db.get(Episode, result.episode_id)
     assert (row.role, row.mode, row.node_id, row.end_reason, row.turns) == ("lead", "breakdown", 7, "finish", 2)
@@ -131,7 +131,7 @@ def test_finish_ends_the_episode_and_records_it(engine):
 
 def test_the_scope_anchor_is_in_every_request(engine):
     llm = LLM()
-    console = Console([turn(call("get_leaf", {"leaf_id": 7}, "a")), turn(call("get_leaf", {"leaf_id": 7}, "b")),
+    console = Console([turn(call("get_node", {"node_id": 7}, "a")), turn(call("get_node", {"node_id": 7}, "b")),
                        turn(call("finish", {"node_id": 7, "summary": "done"}))])
     _run(engine, console, llm)
     assert len(llm.requests) == 3
@@ -187,7 +187,7 @@ def test_no_tool_call_gets_a_nudge_naming_the_finish_tool(engine):
 
 
 def test_stop_ends_the_episode(engine):
-    result = _run(engine, Console([turn(call("get_leaf", {"leaf_id": 7}))] * 5, stop_after=1), LLM())
+    result = _run(engine, Console([turn(call("get_node", {"node_id": 7}))] * 5, stop_after=1), LLM())
     assert result.end_reason == "stopped"
 
 

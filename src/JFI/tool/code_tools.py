@@ -382,6 +382,28 @@ def mark_change(root: Path, path: str, symbol: str, kind: str, what: str) -> str
     return f"Marked {symbol!r} in {path} for {kind}: {what.strip()}"
 
 
+def read_file_range(root: Path, path: str, start: Optional[int] = None, end: Optional[int] = None) -> str:
+    """v2 read_file: project-root-safe and size-capped, with an optional
+    1-based inclusive line range (numbered, so a later read can target it)."""
+    target, error = resolve_path(root, path)
+    if error:
+        return error
+    if not target.is_file():
+        return f"Error: {path} doesn't exist."
+    try:
+        text = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return f"Error: {path} isn't a text file."
+    if start is None and end is None:
+        return cap_result(text, f"Use read_file('{path}', start, end) for a line range, or read_symbol.")
+    lines = text.splitlines()
+    first, last = max(1, int(start or 1)), min(len(lines), int(end or len(lines)))
+    if first > last:
+        return f"Error: {path} has {len(lines)} lines; {start}-{end} is empty."
+    body = "\n".join(f"{no:>5}| {lines[no - 1]}" for no in range(first, last + 1))
+    return cap_result(f"{path} lines {first}-{last}:\n{body}", "Ask for a smaller range.")
+
+
 # ------------------------------------------------------------------ search / list / scan
 
 def _walk(root: Path, base: Path):
@@ -464,6 +486,7 @@ def make_code_tools(root: Path) -> Dict[str, Callable]:
         "list_symbols": lambda path: list_symbols(root, path),
         "search_code": lambda pattern, path=".", regex=False: search_code(root, pattern, path, regex),
         "list_dir": lambda path=".": list_dir(root, path),
+        "read_file": lambda path, start=None, end=None: read_file_range(root, path, start, end),
     }
 
 
@@ -502,4 +525,7 @@ CODE_TOOL_SCHEMAS = [
     _fn("search_code", "Search the project's files for text (or a regex) and get file:line matches.",
         {"pattern": {"type": "string"}, "path": _PATH, "regex": {"type": "boolean"}}, ["pattern"]),
     _fn("list_dir", "List one directory level of the project.", {"path": _PATH}, []),
+    _fn("read_file", "Read a text file, or a numbered line range of it (start/end, 1-based, inclusive). Prefer "
+        "read_symbol for one function.", {"path": _PATH, "start": {"type": "integer"}, "end": {"type": "integer"}},
+        ["path"]),
 ]

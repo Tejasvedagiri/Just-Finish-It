@@ -27,6 +27,7 @@ from JFI.manager.socket_reporter import SocketReporter, master_ws_url as _read_m
 # Session Management
 from JFI.session.abstract_session_manager import SessionManager
 from JFI.session.adaptive_session_manager import AdaptiveSessionManager
+from JFI.session.pipeline import session_pipeline
 from JFI.session.simple_session_manager import (
     SessionInUseError, SimpleSessionManager, get_phase_trigger, _marker_present,
 )
@@ -1290,6 +1291,57 @@ def _drive_turn_loop(console: AbstractManager, llm: BaseLLMStream, ssm: SessionM
     return False
 
 
+def _session_goal(history: List[Dict[str, Any]]) -> str:
+    """The goal the user typed, from the planner's "My goal is: ..." trigger."""
+    for m in history:
+        content = m.get("content")
+        if m.get("role") == "user" and isinstance(content, str) and content.startswith("My goal is:"):
+            return content[len("My goal is:"):].rsplit("\n\nBuild the step-by-step plan", 1)[0].strip()
+    return ""
+
+
+def _replan_feedback(history: List[Dict[str, Any]]) -> str:
+    """User messages since the last finished planning round -- a failed
+    review, a queued request -- or "" on the first planning pass."""
+    last_done = max((i for i, m in enumerate(history) if m.get("role") == "assistant"
+                     and _marker_present(m.get("content") or "", PLANNER_PHASE_COMPLETE_MARKER)), default=None)
+    if last_done is None:
+        return ""
+    texts = [m["content"] for m in history[last_done + 1:]
+             if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    return "\n\n".join(texts)
+
+
+def _run_planner_v2(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: SessionManager) -> bool:
+    """The v2 planner (laya_plan.md §2) for sessions created with
+    JFI_PIPELINE=v2. The judge is the deterministic fallback rule until Laya
+    is wired in (phase 8). Completion is recorded both as v2 DB state (every
+    node GOOD) and as the PLANNER_COMPLETE marker the phase-level resume
+    still reads."""
+    from JFI.episode.roles import ROLE_ENV_PREFIXES
+    from JFI.planner.judge import FallbackJudge
+    from JFI.planner.loop import Planner
+
+    role_llms: Dict[str, BaseLLMStream] = {}
+
+    def llm_for_role(role: str) -> BaseLLMStream:
+        if role not in role_llms:
+            role_llms[role] = make_llm_stream(ROLE_ENV_PREFIXES[role])
+        return role_llms[role]
+
+    console.display_rule("PHASE: PLANNER (v2)")
+    result = Planner(console, ssm.db_engine, ssm.session_id, _session_goal(ssm.history),
+                     Path(ssm.session_path).parent, llm_for_role, FallbackJudge(),
+                     feedback=_replan_feedback(ssm.history)).run()
+    if not result.complete:
+        console.display_error(f"Planning did not finish: {result.reason or 'stopped'}.")
+        return False
+    ssm.add_message("assistant", PLANNER_PHASE_COMPLETE_MARKER)
+    console.display_system(f"✅ Phase 'planner' completed ({result.episodes} planner episodes).")
+    console.mark_phase_done("planner")
+    return True
+
+
 def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: SessionManager,
               phase: str) -> bool:
     """
@@ -1312,6 +1364,10 @@ def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: Ses
     original one-pass behavior. Every other phase is unaffected either
     way.
     """
+    if phase == "planner" and hasattr(ssm, "db_engine") and \
+            session_pipeline(ssm.db_engine, ssm.session_id) == "v2":
+        return _run_planner_v2(console, llms, ssm)
+
     llm = llms[phase]
     # ask_llm delegates to whatever model this phase itself is using — a
     # phase with its own .env override (PLANNER_MODEL, etc.) gets an ask_llm
@@ -1380,7 +1436,7 @@ def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: Ses
         # exist at all -- see PLANNER_PHASE_COMPLETE_MARKER's own
         # docstring.
         if not _marker_already_in_history(PLANNER_PHASE_COMPLETE_MARKER):
-            ssm.append_raw({"role": "assistant", "content": PLANNER_PHASE_COMPLETE_MARKER})
+            ssm.add_message("assistant", PLANNER_PHASE_COMPLETE_MARKER)
     else:
         if phase == "planner" and hasattr(ssm, "set_planner_stage"):
             ssm.set_planner_stage(None)  # PLANNER_SINGLE_PASS=1: today's original combined prompt
@@ -1493,6 +1549,11 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
                 console.display_system("All phases have already been completed for this session.")
 
             for phase in active_phases:
+                if phase == "product_owner" and session_pipeline(ssm.db_engine, ssm.session_id) == "v2":
+                    # v2 has no Program Manager: the planner's judge already
+                    # settled every node (laya_plan.md D3).
+                    console.mark_phase_done(phase)
+                    continue
                 if phase == "product_owner":
                     # A separate, tighter loop than the rest of this
                     # for-loop drives -- see _run_product_owner_loop's own

@@ -13,13 +13,15 @@ the DB instead of to a JSON file.
 from sqlmodel import select
 
 from JFI.models import ImplementedFile, QueuedItem, SessionRecord, UnlockedTool, get_session
+from JFI.session.pipeline import new_session_pipeline
 
 
 def load_metadata_from_db(engine, session_id: str, repo_path: str) -> dict:
     with get_session(engine) as db:
         record = db.get(SessionRecord, session_id)
         if record is None:
-            db.add(SessionRecord(session_id=session_id, repo_path=repo_path))
+            db.add(SessionRecord(session_id=session_id, repo_path=repo_path,
+                                 pipeline_version=new_session_pipeline()))
             db.commit()
             record = db.get(SessionRecord, session_id)
 
@@ -56,7 +58,8 @@ def save_metadata_to_db(engine, session_id: str, repo_path: str, metadata: dict)
     with get_session(engine) as db:
         record = db.get(SessionRecord, session_id)
         if record is None:
-            record = SessionRecord(session_id=session_id, repo_path=repo_path)
+            record = SessionRecord(session_id=session_id, repo_path=repo_path,
+                                   pipeline_version=new_session_pipeline())
         record.digest_summary = metadata.get("digest_summary") or None
         record.digest_block_count = metadata.get("digest_block_count", 0)
         db.add(record)

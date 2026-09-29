@@ -194,6 +194,32 @@ MODEL=qwen3:8b
 # same trust model execute_command already has.
 # MASTER_WS_URL=ws://203.0.113.5:8765/report
 
+# --- Experimental: the v2 pipeline (laya_plan.md) ---------------------------
+
+# Sessions CREATED while this is v2 run the v2 planner: Architect -> Lead ->
+# Task in short, scoped episodes, every node judged GOOD / BREAKDOWN / REDO,
+# and no Program Manager phase. Existing sessions keep the pipeline they were
+# created with. Default v1. Implementation/review are still v1 for now.
+# JFI_PIPELINE=v2
+
+# Token budget for one episode (default 20000; capped further by
+# CONTEXT_SIZE x CONTEXT_COMPRESSION_RATIO), and its turn cap (default 15).
+# EPISODE_TOKEN_BUDGET=20000
+# MAX_EPISODE_TURNS=15
+
+# Longest single tool result, in tokens, before it's cut with a hint (3000).
+# TOOL_RESULT_MAX_TOKENS=3000
+
+# Longest plan node description, in characters (default 200).
+# PLANNER_ITEM_MAX_CHARS=200
+
+# Redos per node before it's accepted as-is (2); escalations into one node
+# (1); planner episodes per planning round before everything left is
+# accepted as-is (200).
+# PLANNER_REDO_CAP=2
+# PLANNER_ESCALATION_CAP=1
+# MAX_PLANNER_EPISODES=200
+
 # --- Optional: Laya judge (v2 planner, `uv sync --extra laya`) --------------
 
 # The v2 planner asks Laya (a small non-generative decision model) whether

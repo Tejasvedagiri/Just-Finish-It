@@ -31,12 +31,13 @@ should:
 
 ## Progress
 
-**Current phase:** phase 5 (planner v2 with the fallback judge), on `feature/v2`.
-**Next step:** `src/JFI/planner/loop.py` + `roles.py`: gated stages
-(Architect → Lead → Task), routing by `level`, redo by the creator,
-`escalate`, the fallback judge (`JFI.planner.judge.fallback_status`), plan
-state in `Leaf.plan_status`, completion from DB state, and
-`run_phase("planner")` dispatching on `pipeline_version` (v1 unchanged).
+**Current phase:** phase 6 (Dev v2), on `feature/v2`.
+**Next step:** one fresh Dev episode per `GOOD` leaf in topological order
+over `depends_on` (§6): brief + scope anchor, `read_symbol` /
+`replace_symbol`, one function + one unit test, `test_one` from the
+runbook, `mark_leaf_done` as the finish tool; `run_phase("imp")`
+dispatching on `pipeline_version`. v2 sessions still skip the Program
+Manager and use v1 imp/testing/reviewer until phases 6-7 land.
 
 | Phase | Status | Branch / PR | Notes |
 |---|---|---|---|
@@ -45,7 +46,7 @@ state in `Leaf.plan_status`, completion from DB state, and
 | 2 Runbook + design | **done** | `feature/v2` | tools + index lines + result cap; schemas kept out of v1's tool list |
 | 3 Episode engine | **done** | `feature/v2` | `src/JFI/episode/`: brief + anchor, role tool sets, budget, turn cap, finish, directives, role models |
 | 4 Code tools | **done** | `feature/v2` | stubs, mark_change, symbol read/replace (ast + brace matcher, no tree-sitter), search, markers |
-| 5 Planner v2 (fallback judge) | not started | | |
+| 5 Planner v2 (fallback judge) | **done** | `feature/v2` | `src/JFI/planner/`: nodes, prompts, loop; `JFI_PIPELINE`; `run_phase("planner")` dispatch; no PM phase in v2 |
 | 6 Dev v2 | not started | | |
 | 7 Reviewer + cleanup v2 | not started | | first full `v2` run |
 | 8 Laya judge | **in progress** (judge module done early) | `feature/laya` | `JFI.planner.judge` + `UNLOAD_LLM_BEFORE_LAYA`; not wired into a planner yet (needs phase 5) |
@@ -59,6 +60,40 @@ Status values: `not started` / `in progress` / `in review` / `done`.
 ### Progress log
 
 Newest first. One entry per working session.
+
+- **2026-09-28:** **Phase 5 done** (`src/JFI/planner/`):
+  - **`nodes.py`:** the node tools (`add_node`, `update_node`,
+    `delete_node`, `escalate`, `get_node`, `list_nodes`, `get_plan`) with
+    creator-only edits, Lead/Task scoped to their one node, the depth cap,
+    `PLANNER_ITEM_MAX_CHARS`, acyclic `depends_on`, and
+    `PLANNER_ESCALATION_CAP`. `escalate` sends back the layer above's
+    node: the scope node itself during a breakdown, its parent during a
+    redo.
+  - **`prompts.py`:** Architect create/extend/redo, Lead breakdown/redo,
+    Task breakdown/split/redo (G2 project component + artifacts, G3
+    `mark_change` / modify / delete leaves).
+  - **`loop.py`:** `Planner.run()` takes the first pending action per
+    level (judge -> redo -> breakdown), so the gates (D15) and resume come
+    from DB state. It also has the redo cap, the overflow -> REDO
+    "too_big" path, `MAX_PLANNER_EPISODES`, and `PlannerVerdict` /
+    `PlanEvent` rows. An escalation during a breakdown is kept (not
+    overwritten with GOOD).
+  - **`judge.py`:** `FallbackJudge` (same interface as `LayaJudge`).
+  - **Wiring:** `session/pipeline.py`. `SessionRecord.pipeline_version`
+    comes from `JFI_PIPELINE` at creation. `run_phase("planner")` sends
+    v2 sessions to `_run_planner_v2`, which uses the goal from the
+    "My goal is:" trigger and the user messages since the last
+    `PLANNER_COMPLETE` as extend feedback, and appends `PLANNER_COMPLETE`.
+    v2 sessions skip `product_owner` (D3). The v2 env vars are in
+    `JFI_ENV_TEMPLATE`.
+  - **Not done:** the §5.3 token check forcing BREAKDOWN is not
+    implemented. An oversized node is caught by the next role's episode
+    overflowing instead.
+  - **Tests:** `test/test_planner_v2.py` (9): the scripted Architect ->
+    Lead -> Task run with stubs on disk, the gate, redo + cap, escalation
+    + unpause, resume, the episode budget, the pipeline flag, and the
+    `run_phase` dispatch. Full suite: 1010 passed, the 6 known Windows
+    failures. ruff clean; `uv run build` OK.
 
 - **2026-09-29 (cont.):** **Phase 4 done** (`tool/code_tools.py`):
   - **Writing:** `scaffold_file` (language-aware stubs whose bodies are
