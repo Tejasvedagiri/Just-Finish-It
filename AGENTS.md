@@ -33,6 +33,10 @@ imp, reviewer, the plan tools or the DB schema, read these first:
 - [`laya_impl_phases.md`](laya_impl_phases.md): the phases, and the
   **Progress** section that says what's done and what's next.
 
+The v2 code is `src/JFI/episode/` (scoped episodes), `src/JFI/planner/`
+and `src/JFI/imp/`, and a session opts in when it's created with
+`JFI_PIPELINE=v2` (`session/pipeline.py`); `run_phase` dispatches on it.
+
 Update the Progress section at the end of any session that advances the
 rewrite. Until phase 11, `v1` is the default and must keep working
 unchanged.

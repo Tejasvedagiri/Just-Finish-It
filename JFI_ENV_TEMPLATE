@@ -199,7 +199,7 @@ MODEL=qwen3:8b
 # Sessions CREATED while this is v2 run the v2 planner: Architect -> Lead ->
 # Task in short, scoped episodes, every node judged GOOD / BREAKDOWN / REDO,
 # and no Program Manager phase. Existing sessions keep the pipeline they were
-# created with. Default v1. Implementation/review are still v1 for now.
+# created with. Default v1. The reviewer and cleanup are still v1 for now.
 # JFI_PIPELINE=v2
 
 # Token budget for one episode (default 20000; capped further by
@@ -219,6 +219,10 @@ MODEL=qwen3:8b
 # PLANNER_REDO_CAP=2
 # PLANNER_ESCALATION_CAP=1
 # MAX_PLANNER_EPISODES=200
+
+# v2 Dev: how many fresh episodes one leaf gets before it's sent back to Task
+# to be split into smaller pieces (default 3).
+# MAX_DEV_ATTEMPTS=3
 
 # --- Optional: Laya judge (v2 planner, `uv sync --extra laya`) --------------
 

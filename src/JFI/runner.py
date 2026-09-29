@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version as _package_version
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from dotenv import find_dotenv, load_dotenv
 from openai import APIConnectionError, APIStatusError
@@ -1300,45 +1300,89 @@ def _session_goal(history: List[Dict[str, Any]]) -> str:
     return ""
 
 
+ITERATION_FEEDBACK_PREFIX = "USER FEEDBACK FOR ITERATION:\n"
+ITERATION_FEEDBACK_TAIL = "\n\nCall get_plan(), leave every done leaf"
+
+
 def _replan_feedback(history: List[Dict[str, Any]]) -> str:
-    """User messages since the last finished planning round -- a failed
-    review, a queued request -- or "" on the first planning pass."""
+    """The iteration feedback (a failed review, queued requests) since the
+    last finished planning round, or "" on the first planning pass. Only the
+    session loop's own feedback messages count -- the phase triggers in
+    between are instructions to the v1 phases, not something the user
+    asked for."""
     last_done = max((i for i, m in enumerate(history) if m.get("role") == "assistant"
                      and _marker_present(m.get("content") or "", PLANNER_PHASE_COMPLETE_MARKER)), default=None)
     if last_done is None:
         return ""
-    texts = [m["content"] for m in history[last_done + 1:]
-             if m.get("role") == "user" and isinstance(m.get("content"), str)]
+    texts = [m["content"][len(ITERATION_FEEDBACK_PREFIX):].rsplit(ITERATION_FEEDBACK_TAIL, 1)[0].strip()
+             for m in history[last_done + 1:]
+             if m.get("role") == "user" and isinstance(m.get("content"), str)
+             and m["content"].startswith(ITERATION_FEEDBACK_PREFIX)]
     return "\n\n".join(texts)
+
+
+def _role_llms() -> Callable[[str], BaseLLMStream]:
+    """One model client per v2 role, built on first use from its env chain
+    (e.g. ARCHITECT_MODEL, else PLANNER_MODEL, else MODEL)."""
+    from JFI.episode.roles import ROLE_ENV_PREFIXES
+
+    cache: Dict[str, BaseLLMStream] = {}
+
+    def llm_for_role(role: str) -> BaseLLMStream:
+        if role not in cache:
+            cache[role] = make_llm_stream(ROLE_ENV_PREFIXES[role])
+        return cache[role]
+    return llm_for_role
+
+
+def _v2_planner(console: AbstractManager, ssm: SessionManager, llm_for_role, feedback: str = ""):
+    """The judge is the deterministic fallback rule until Laya is wired in
+    (phase 8)."""
+    from JFI.planner.judge import FallbackJudge
+    from JFI.planner.loop import Planner
+
+    return Planner(console, ssm.db_engine, ssm.session_id, _session_goal(ssm.history),
+                   Path(ssm.session_path).parent, llm_for_role, FallbackJudge(), feedback=feedback)
 
 
 def _run_planner_v2(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: SessionManager) -> bool:
     """The v2 planner (laya_plan.md §2) for sessions created with
-    JFI_PIPELINE=v2. The judge is the deterministic fallback rule until Laya
-    is wired in (phase 8). Completion is recorded both as v2 DB state (every
-    node GOOD) and as the PLANNER_COMPLETE marker the phase-level resume
-    still reads."""
-    from JFI.episode.roles import ROLE_ENV_PREFIXES
-    from JFI.planner.judge import FallbackJudge
-    from JFI.planner.loop import Planner
-
-    role_llms: Dict[str, BaseLLMStream] = {}
-
-    def llm_for_role(role: str) -> BaseLLMStream:
-        if role not in role_llms:
-            role_llms[role] = make_llm_stream(ROLE_ENV_PREFIXES[role])
-        return role_llms[role]
-
+    JFI_PIPELINE=v2. Completion is recorded both as v2 DB state (every node
+    GOOD) and as the PLANNER_COMPLETE marker the phase-level resume still
+    reads."""
     console.display_rule("PHASE: PLANNER (v2)")
-    result = Planner(console, ssm.db_engine, ssm.session_id, _session_goal(ssm.history),
-                     Path(ssm.session_path).parent, llm_for_role, FallbackJudge(),
-                     feedback=_replan_feedback(ssm.history)).run()
+    result = _v2_planner(console, ssm, _role_llms(), _replan_feedback(ssm.history)).run()
     if not result.complete:
         console.display_error(f"Planning did not finish: {result.reason or 'stopped'}.")
         return False
     ssm.add_message("assistant", PLANNER_PHASE_COMPLETE_MARKER)
     console.display_system(f"✅ Phase 'planner' completed ({result.episodes} planner episodes).")
     console.mark_phase_done("planner")
+    return True
+
+
+#: The v1 tools a v2 Dev episode reuses as they are; everything else Dev
+#: gets comes from the v2 tool modules (JFI.imp.dev).
+DEV_V1_TOOLS = ("write_file", "replace_in_file", "execute_command")
+
+
+def _run_imp_v2(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: SessionManager) -> bool:
+    """v2 implementation (laya_plan.md §6): one short Dev episode per leaf.
+    IMP_COMPLETE is written from DB state -- every leaf finished (D27) --
+    never from model text."""
+    from JFI.imp.dev import Imp
+
+    llm_for_role = _role_llms()
+    console.display_rule("PHASE: IMPLEMENTATION (v2)")
+    result = Imp(console, ssm.db_engine, ssm.session_id, Path(ssm.session_path).parent, llm_for_role("dev"),
+                 {name: TOOL_MAP[name] for name in DEV_V1_TOOLS},
+                 replan=lambda: _v2_planner(console, ssm, llm_for_role).run()).run()
+    if not result.complete:
+        console.display_error(f"Implementation did not finish: {result.reason or 'stopped'}.")
+        return False
+    ssm.add_message("assistant", "IMP_COMPLETE")
+    console.display_system(f"✅ Phase 'imp' completed ({result.episodes} dev episodes).")
+    console.mark_phase_done("imp")
     return True
 
 
@@ -1367,6 +1411,9 @@ def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: Ses
     if phase == "planner" and hasattr(ssm, "db_engine") and \
             session_pipeline(ssm.db_engine, ssm.session_id) == "v2":
         return _run_planner_v2(console, llms, ssm)
+    if phase == "imp" and hasattr(ssm, "db_engine") and \
+            session_pipeline(ssm.db_engine, ssm.session_id) == "v2":
+        return _run_imp_v2(console, llms, ssm)
 
     llm = llms[phase]
     # ask_llm delegates to whatever model this phase itself is using — a
@@ -1549,9 +1596,13 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
                 console.display_system("All phases have already been completed for this session.")
 
             for phase in active_phases:
-                if phase == "product_owner" and session_pipeline(ssm.db_engine, ssm.session_id) == "v2":
-                    # v2 has no Program Manager: the planner's judge already
-                    # settled every node (laya_plan.md D3).
+                if phase in ("product_owner", "testing") and \
+                        session_pipeline(ssm.db_engine, ssm.session_id) == "v2":
+                    # v2 has no Program Manager (the planner's judge already
+                    # settled every node, laya_plan.md D3) and no testing
+                    # phase (every leaf carries its own unit test, D10). The
+                    # marker keeps the phase-level resume moving past them.
+                    ssm.add_message("assistant", f"{phase.upper()}_COMPLETE")
                     console.mark_phase_done(phase)
                     continue
                 if phase == "product_owner":
@@ -1606,9 +1657,8 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
 
             ssm.add_message(
                 "user",
-                f"USER FEEDBACK FOR ITERATION:\n{feedback}\n\n"
-                f"{ssm.get_project_state_summary()}\n\n"
-                f"Call get_plan(), leave every done leaf as it is, add_leaf new leaves for this "
+                f"{ITERATION_FEEDBACK_PREFIX}{feedback}\n\n"
+                f"{ssm.get_project_state_summary()}{ITERATION_FEEDBACK_TAIL} as it is, add_leaf new leaves for this "
                 f"request, then implement and test them."
             )
             # Fresh pass: the header rewinds to planner and counts the loop.

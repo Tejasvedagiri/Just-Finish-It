@@ -249,8 +249,13 @@ def test_run_phase_sends_v2_sessions_to_the_new_planner(engine, tmp_path, monkey
 
 
 def test_replan_feedback_is_what_the_user_said_since_the_last_plan():
+    """Only the loop's own feedback message counts: the phase triggers that
+    also land in history after a plan are instructions to v1 phases."""
     history = [{"role": "user", "content": "My goal is: x"},
                {"role": "assistant", "content": "PLANNER_COMPLETE"},
-               {"role": "user", "content": "the review failed: add a --help flag"}]
-    assert runner._replan_feedback(history) == "the review failed: add a --help flag"
+               {"role": "user", "content": "Begin implementation. Work through the pending imp leaves"},
+               {"role": "user", "content": runner.ITERATION_FEEDBACK_PREFIX + "the review failed:\n\nadd --help"
+                                           + "\n\nProject state: 3 files" + runner.ITERATION_FEEDBACK_TAIL
+                                           + " as it is, ..."}]
+    assert runner._replan_feedback(history) == "the review failed:\n\nadd --help\n\nProject state: 3 files"
     assert runner._replan_feedback(history[:1]) == ""

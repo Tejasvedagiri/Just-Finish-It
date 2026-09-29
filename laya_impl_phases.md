@@ -31,13 +31,14 @@ should:
 
 ## Progress
 
-**Current phase:** phase 6 (Dev v2), on `feature/v2`.
-**Next step:** one fresh Dev episode per `GOOD` leaf in topological order
-over `depends_on` (§6): brief + scope anchor, `read_symbol` /
-`replace_symbol`, one function + one unit test, `test_one` from the
-runbook, `mark_leaf_done` as the finish tool; `run_phase("imp")`
-dispatching on `pipeline_version`. v2 sessions still skip the Program
-Manager and use v1 imp/testing/reviewer until phases 6-7 land.
+**Current phase:** phase 7 (reviewer + cleanup v2), on `feature/v2`.
+**Next step:** the reviewer as one e2e episode (§7): the runbook's `e2e`,
+`run`/`stop`, reviewer notes, the leftover-marker check; PASS marks the
+runbook entries verified; FAIL goes down the G8 fix path (re-open the
+owning done leaves with a `fix_note`, which the Dev brief already
+carries) or Architect extend mode. Then cleanup, and `run_phase`
+dispatch for both. Still owed from phase 6: the real-model exit check
+(a small CLI goal end-to-end with `JFI_PIPELINE=v2`).
 
 | Phase | Status | Branch / PR | Notes |
 |---|---|---|---|
@@ -47,7 +48,7 @@ Manager and use v1 imp/testing/reviewer until phases 6-7 land.
 | 3 Episode engine | **done** | `feature/v2` | `src/JFI/episode/`: brief + anchor, role tool sets, budget, turn cap, finish, directives, role models |
 | 4 Code tools | **done** | `feature/v2` | stubs, mark_change, symbol read/replace (ast + brace matcher, no tree-sitter), search, markers |
 | 5 Planner v2 (fallback judge) | **done** | `feature/v2` | `src/JFI/planner/`: nodes, prompts, loop; `JFI_PIPELINE`; `run_phase("planner")` dispatch; no PM phase in v2 |
-| 6 Dev v2 | not started | | |
+| 6 Dev v2 | **done** (real-model exit check pending) | `feature/v2` | `src/JFI/imp/`: queue, gated `mark_leaf_done`, deferral, restart/attempt cap, overflow split, setup/finish-up; testing phase skipped in v2 |
 | 7 Reviewer + cleanup v2 | not started | | first full `v2` run |
 | 8 Laya judge | **in progress** (judge module done early) | `feature/laya` | `JFI.planner.judge` + `UNLOAD_LLM_BEFORE_LAYA`; not wired into a planner yet (needs phase 5) |
 | 9 Document path | not started | | |
@@ -60,6 +61,46 @@ Status values: `not started` / `in progress` / `in review` / `done`.
 ### Progress log
 
 Newest first. One entry per working session.
+
+- **2026-09-28 (cont.):** **Phase 6 done in code** (`src/JFI/imp/`):
+  - **`queue.py`:** real GOOD leaves in tree order. A leaf waits for its own
+    `depends_on` plus every leaf under any node an ancestor depends on
+    (G6). A cycle across levels falls back to the first unfinished leaf
+    instead of stalling.
+  - **`dev.py` (`Imp`):**
+    - One fresh Dev episode per leaf.
+    - `mark_leaf_done` is the gate: it runs the runbook's `test_one` with
+      the given `test_id` (or a `check` command), and only exit 0 marks
+      the leaf done. Commands run with `PYTHONDONTWRITEBYTECODE=1`: a
+      same-size one-character fix within the same second otherwise ran
+      the stale `.pyc`, and the gate refused a correct fix (observed in
+      the tests).
+    - A failure on another leaf's stub (native traceback, or pytest's
+      `file:line: NotImplementedError` mapped to its def) defers the
+      leaf behind the leaf whose target symbol matches. Deferral doesn't
+      count as an attempt and is capped at 3.
+    - Restarts are briefed as a partial attempt. At `MAX_DEV_ATTEMPTS`
+      or on a budget/turn-cap overflow, the leaf goes `BREAKDOWN` and the
+      planner is re-run (a Task split). A leaf that can't be split is
+      SKIPPED with a reviewer note.
+    - `setup` runs first (one fix episode if it fails). `build` and the
+      marker scan run last (one finish-up episode, the rest noted).
+  - **`prompts.py`:** per kind: implement, integrate, modify, delete, fill,
+    and generic (D31).
+  - **Wiring:** `run_phase("imp")` dispatches v2 to `_run_imp_v2`
+    (`IMP_COMPLETE` from DB state). v2 skips `testing` like
+    `product_owner`, writing their markers so resume moves past them.
+    `_replan_feedback` now reads only the loop's own `USER FEEDBACK FOR
+    ITERATION:` messages, not the phase triggers.
+  - **Other changes:**
+    - The TASK split prompt says the original leaf becomes a parent.
+    - `escalate` targets the layer above in both breakdown and redo.
+    - `MAX_DEV_ATTEMPTS` is in `JFI_ENV_TEMPLATE`.
+    - AGENTS.md points at the v2 packages.
+  - **Tests:** `test/test_imp_v2.py` (9), which run real pytest in a
+    subprocess. Full suite: 1019 passed, the 6 known Windows failures.
+    ruff clean; build OK.
+  - **Not yet:** a real-model run (the phase 6 exit criterion).
 
 - **2026-09-28:** **Phase 5 done** (`src/JFI/planner/`):
   - **`nodes.py`:** the node tools (`add_node`, `update_node`,

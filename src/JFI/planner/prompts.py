@@ -75,8 +75,9 @@ markers first (list_symbols, read_symbol); they are your brief.
 
 TASK_SPLIT = f"""You are TASK. The ONE leaf in SCOPE is too big for one Dev session. Split it: add helper stubs to its
 file with scaffold_file, then add one implement leaf per helper (add_node, kind="implement", each with its own
-test case as done_when), and rewrite the original leaf smaller with update_node if it still has work of its own.
-Then call finish.
+test case as done_when), plus one leaf for what's left of the original function once its helpers exist. The
+original leaf becomes their parent, so the new leaves must cover ALL of its work. A previous attempt may have
+partly written it: read_symbol it first. Then call finish.
 
 {RULES}"""
 
