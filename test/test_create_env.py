@@ -10,6 +10,17 @@ from unittest import mock
 import pytest
 
 from JFI import create_env
+from JFI import create_env_detect as detect
+
+
+@pytest.fixture(autouse=True)
+def nothing_detected(monkeypatch):
+    """The wizard must never probe a real GPU, model server or LM Studio from
+    a test: detection reports nothing, so every value falls back."""
+    monkeypatch.setattr(create_env, "_detect_system", lambda: detect.System(os_name="Linux"))
+    monkeypatch.setattr(create_env, "_detect_models", lambda backend, url, key: None)
+    monkeypatch.setattr(create_env, "_measure_speed", lambda url, key, model: detect.Speed(None, None))
+    monkeypatch.setattr(create_env, "_laya_installed", lambda: False)
 
 
 class TestCheckPythonVersion:
@@ -441,13 +452,18 @@ class TestIsConfigured:
 
 
 # After the shared backend/key/model/CONTEXT_SIZE sub-flow, run_setup_wizard
-# asks, in order: SESSION_MANAGER, the 6 _TUNING_KNOBS, THEME, whether to
-# enable JFI_WEB_BRIDGE, whether to set MASTER_WS_URL (fleet dashboard), and
+# asks, in order: the 6 _TUNING_KNOBS, THEME, whether to enable
+# JFI_WEB_BRIDGE, whether to set MASTER_WS_URL (fleet dashboard), and
 # whether to configure any per-phase override -- an empty answer to each of
-# these 11 prompts accepts its default/says "no". Verified against the real
+# these 10 prompts accepts its default/says "no". Verified against the real
 # prompt sequence (see _TAIL's index comments) rather than hand-counted,
 # since this flow is long enough to miscount by hand.
-_TAIL = [""] * 11  # [session_manager, TEMP, FREQ, COMPRESSION, STREAM, REASONING, TIMEOUT, THEME, BRIDGE, FLEET, PER_PHASE]
+# [TEMP, FREQ, COMPRESSION, STREAM, REASONING, TIMEOUT, THEME, BRIDGE, FLEET,
+#  MAX_EPISODE_TURNS, TOOL_RESULT_MAX_TOKENS,
+#  PLANNER_ITEM_MAX_CHARS, PLANNER_REDO_CAP, PLANNER_ESCALATION_CAP, MAX_PLANNER_EPISODES, MAX_DEV_ATTEMPTS,
+#  LAYA, AUTO_APPROVE, REVIEW_LOOP_APPROVAL, LOG_LLM_CALL_DEBUG, SHOW_STREAM_PROMPTS, FLARESOLVERR_URL, PER_PHASE]
+_TAIL = [""] * 23
+EPISODE_TURNS, LAYA_ANSWER, AUTO_APPROVE = 9, 16, 17
 
 
 class TestRunSetupWizard:
@@ -478,7 +494,6 @@ class TestRunSetupWizard:
         assert values["ANTHROPIC_API_KEY"] == "sk-ant-fake"
         assert values["MODEL"] == "claude-sonnet-5"
         assert values["CONTEXT_SIZE"] == "200000"
-        assert "SESSION_MANAGER" not in values  # adaptive is the default, so left unwritten
         assert "JFI_WEB_BRIDGE" not in values  # declined, so left unwritten
         assert "Saved to" in capsys.readouterr().out
 
@@ -524,6 +539,34 @@ class TestRunSetupWizard:
         assert values["OPENAI_URL"] == "http://127.0.0.1:1234/v1"
         assert values["OPENAI_API_KEY"] == "lm-studio"
 
+    def test_lm_studio_values_come_from_what_is_loaded(self, tmp_path, monkeypatch, capsys):
+        """The loaded model is listed first with its context and size, and
+        CONTEXT_SIZE defaults to the context LM Studio actually loaded --
+        not .env's old value, which is shown next to it. (A stale .env value
+        vs a 4,096-token reload is what killed the first calc run.)"""
+        env_path = tmp_path / ".env"
+        env_path.write_text("LLM_BACKEND=lmstudio\nMODEL=qwen/qwen3.8-27b\nCONTEXT_SIZE=38000\n", encoding="utf-8")
+        monkeypatch.setattr(create_env, "ENV_PATH", env_path)
+        monkeypatch.setattr(create_env, "fetch_openai_compatible_models",
+                            lambda url, key: ["meta/muse-glimmer", "qwen/qwen3.8-27b"])
+        loaded = detect.ServerModel("qwen/qwen3.8-27b", True, 38144, 262144, 21.8)
+        monkeypatch.setattr(create_env, "_detect_models", lambda backend, url, key: [
+            detect.ServerModel("meta/muse-glimmer", False, None, 131072, 20.0), loaded])
+        monkeypatch.setattr(create_env, "_measure_speed", lambda url, key, model: detect.Speed(87.0, True))
+
+        # lmstudio, URL, key, model #1 (the loaded one is listed first), CONTEXT_SIZE: accept, rest default
+        answers = iter(["3", "", "", "1", "", *_TAIL])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+
+        values = create_env.run_setup_wizard(create_env._parse_env_file(env_path))
+
+        out = capsys.readouterr().out
+        assert "1. qwen/qwen3.8-27b  (loaded, 38,144-token context, 21.8 GB)" in out
+        assert values["MODEL"] == "qwen/qwen3.8-27b"
+        assert values["CONTEXT_SIZE"] == "38144"
+        assert "loaded with a 38,144-token context (currently 38000 in .env)" in out
+        assert (values["CONTEXT_COMPRESSION_RATIO"], values["LLM_REQUEST_TIMEOUT"]) == ("0.73", "290")
+
     def test_reconfiguring_the_same_backend_still_prefills_its_prior_custom_url(self, tmp_path, monkeypatch):
         """The fix above must not break the opposite, legitimate case: rerunning
         --setup for the SAME backend should still offer the previously
@@ -566,24 +609,10 @@ class TestRunSetupWizard:
         assert values["OPENAI_API_KEY"] == "real-key"
         assert values["MODEL"] == "some-model-id"
 
-    def test_explicit_simple_session_manager_choice_is_persisted(self, tmp_path, monkeypatch):
-        env_path = tmp_path / ".env"
-        env_path.write_text("MODEL=old\n", encoding="utf-8")
-        monkeypatch.setattr(create_env, "ENV_PATH", env_path)
-        monkeypatch.setattr(create_env, "fetch_anthropic_models", lambda key: None)
-
-        tail = list(_TAIL)
-        tail[0] = "2"  # SESSION_MANAGER -> simple
-        # backend: anthropic(5); model: fetch fails -> typed; CONTEXT_SIZE: accept; rest as above
-        answers = iter(["5", "claude-sonnet-5", "", *tail])
-        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
-        monkeypatch.setattr(create_env.getpass, "getpass", lambda *a, **k: "sk-ant-fake")
-
-        values = create_env.run_setup_wizard({})
-
-        assert values["SESSION_MANAGER"] == "simple"
-
-    def test_tuning_knobs_default_to_the_documented_values_and_are_all_written(self, tmp_path, monkeypatch):
+    def test_tuning_knobs_are_computed_not_fixed_defaults(self, tmp_path, monkeypatch):
+        """The user: "Do not take default values. You calculate the right
+        values." With nothing measured, a hosted, non-reasoning model gets the
+        hosted ratio, a 4k reply reserve and the safe timeout."""
         env_path = tmp_path / ".env"
         env_path.write_text("MODEL=old\n", encoding="utf-8")
         monkeypatch.setattr(create_env, "ENV_PATH", env_path)
@@ -597,10 +626,12 @@ class TestRunSetupWizard:
 
         assert values["TEMPERATURE"] == "0.7"
         assert values["FREQUENCY_PENALTY"] == "0.0"
-        assert values["CONTEXT_COMPRESSION_RATIO"] == "0.7"
-        assert values["STREAM_OUTPUT_CAP"] == "10000"
-        assert values["REASONING_OUTPUT_CAP"] == "3000"
-        assert values["LLM_REQUEST_TIMEOUT"] == "120"
+        assert values["CONTEXT_COMPRESSION_RATIO"] == "0.80"
+        assert values["STREAM_OUTPUT_CAP"] == "4000"
+        assert values["REASONING_OUTPUT_CAP"] == "2000"
+        assert values["LLM_REQUEST_TIMEOUT"] == "300"
+        assert values["TOOL_RESULT_MAX_TOKENS"] == "8000"  # 10% of a 160k budget, capped
+        assert values["MAX_EPISODE_TURNS"] == "25"
         assert "THEME" not in values  # left blank -> auto-detect, so not written
 
     def test_tuning_knobs_can_be_overridden(self, tmp_path, monkeypatch):
@@ -610,9 +641,9 @@ class TestRunSetupWizard:
         monkeypatch.setattr(create_env, "fetch_anthropic_models", lambda key: None)
 
         tail = list(_TAIL)
-        tail[1] = "0.3"          # TEMPERATURE
-        tail[4] = "20000"        # STREAM_OUTPUT_CAP
-        tail[7] = "dark-ocean"   # THEME
+        tail[0] = "0.3"          # TEMPERATURE
+        tail[3] = "20000"        # STREAM_OUTPUT_CAP
+        tail[6] = "dark-ocean"   # THEME
         answers = iter(["5", "claude-sonnet-5", "", *tail])
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
         monkeypatch.setattr(create_env.getpass, "getpass", lambda *a, **k: "sk-ant-fake")
@@ -622,6 +653,47 @@ class TestRunSetupWizard:
         assert values["TEMPERATURE"] == "0.3"
         assert values["STREAM_OUTPUT_CAP"] == "20000"
         assert values["THEME"] == "dark-ocean"
+
+    def test_pipeline_knobs_and_the_judge_are_asked(self, tmp_path, monkeypatch):
+        """The user: "There is a lot of env variables not asked." Saying yes to LAYA asks
+        its settings too; a flag answered no is written 0, so an old 1 in
+        .env is really turned off."""
+        env_path = tmp_path / ".env"
+        env_path.write_text("MODEL=old\nAUTO_APPROVE_COMMANDS=1\n", encoding="utf-8")
+        monkeypatch.setattr(create_env, "ENV_PATH", env_path)
+        monkeypatch.setattr(create_env, "fetch_anthropic_models", lambda key: None)
+
+        tail = list(_TAIL)
+        tail[EPISODE_TURNS] = "20"
+        tail[AUTO_APPROVE] = "n"
+        tail[LAYA_ANSWER] = "y"
+        tail[LAYA_ANSWER + 1:LAYA_ANSWER + 1] = ["cuda", "0.8", ""]  # LAYA_DEVICE, LAYA_MIN_CONFIDENCE, UNLOAD
+        answers = iter(["5", "claude-sonnet-5", "", *tail])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+        monkeypatch.setattr(create_env.getpass, "getpass", lambda *a, **k: "sk-ant-fake")
+
+        values = create_env.run_setup_wizard({"AUTO_APPROVE_COMMANDS": "1"})
+
+        assert (values["MAX_EPISODE_TURNS"], values["MAX_DEV_ATTEMPTS"]) == ("20", "3")
+        assert "EPISODE_TOKEN_BUDGET" not in values
+        assert (values["LAYA"], values["LAYA_DEVICE"], values["LAYA_MIN_CONFIDENCE"]) == ("1", "cuda", "0.8")
+        assert values["UNLOAD_LLM_BEFORE_LAYA"] == "0"
+        assert values["AUTO_APPROVE_COMMANDS"] == "0"
+        assert "FLARESOLVERR_URL" not in values
+
+    def test_a_bare_fleet_port_becomes_a_full_url(self):
+        """Observed: answering `8765` wrote MASTER_WS_URL=8765, which the
+        session can't connect to."""
+        assert create_env._master_ws_url("8765") == "ws://127.0.0.1:8765/report"
+        assert create_env._master_ws_url("fleet-box:9000") == "ws://fleet-box:9000/report"
+        assert create_env._master_ws_url("ws://10.0.0.5:8765/report") == "ws://10.0.0.5:8765/report"
+
+    def test_the_episode_budget_shown_is_the_one_that_applies(self):
+        """The user: "Remove episode size and use CONTEXT_SIZE" -- an episode
+        gets CONTEXT_SIZE x CONTEXT_COMPRESSION_RATIO, and the wizard says so."""
+        values = {"CONTEXT_SIZE": "32768", "CONTEXT_COMPRESSION_RATIO": "0.7"}
+        assert create_env._effective_episode_budget(values, {}) == 22_937
+        assert create_env._effective_episode_budget(values, {"CONTEXT_SIZE": "16384"}) == 11_468
 
     def test_web_bridge_declined_writes_nothing(self, tmp_path, monkeypatch):
         env_path = tmp_path / ".env"
@@ -645,10 +717,10 @@ class TestRunSetupWizard:
         monkeypatch.setattr(create_env, "fetch_anthropic_models", lambda key: None)
 
         tail = list(_TAIL)
-        tail[8] = "y"  # enable JFI_WEB_BRIDGE
+        tail[7] = "y"  # enable JFI_WEB_BRIDGE
         # JFI_WEB_PORT is only asked when the bridge is enabled, so it's inserted right after
         # index 8 (BRIDGE) and before index 9 (PER_PHASE) rather than living in _TAIL itself.
-        answers = iter(["5", "claude-sonnet-5", "", *tail[:9], "9000", *tail[9:]])
+        answers = iter(["5", "claude-sonnet-5", "", *tail[:8], "9000", *tail[8:]])
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
         monkeypatch.setattr(create_env.getpass, "getpass", lambda *a, **k: "sk-ant-fake")
 
@@ -671,23 +743,23 @@ class TestRunSetupWizard:
 
         assert "MASTER_WS_URL" not in values
 
-    def test_fleet_dashboard_accepted_defaults_to_port_7776(self, tmp_path, monkeypatch):
+    def test_fleet_dashboard_accepted_defaults_to_the_masters_port_8765(self, tmp_path, monkeypatch):
         env_path = tmp_path / ".env"
         env_path.write_text("MODEL=old\n", encoding="utf-8")
         monkeypatch.setattr(create_env, "ENV_PATH", env_path)
         monkeypatch.setattr(create_env, "fetch_anthropic_models", lambda key: None)
 
         tail = list(_TAIL)
-        tail[9] = "y"  # report to a fleet dashboard: yes
+        tail[8] = "y"  # report to a fleet dashboard: yes
         # MASTER_WS_URL is only asked when accepted, inserted right after index 9 (FLEET) and
         # before index 10 (PER_PHASE); "" here accepts the suggested default URL.
-        answers = iter(["5", "claude-sonnet-5", "", *tail[:10], "", *tail[10:]])
+        answers = iter(["5", "claude-sonnet-5", "", *tail[:9], "", *tail[9:]])
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
         monkeypatch.setattr(create_env.getpass, "getpass", lambda *a, **k: "sk-ant-fake")
 
         values = create_env.run_setup_wizard({})
 
-        assert values["MASTER_WS_URL"] == "ws://127.0.0.1:7776/report"
+        assert values["MASTER_WS_URL"] == "ws://127.0.0.1:8765/report"
 
     def test_fleet_dashboard_url_can_be_overridden(self, tmp_path, monkeypatch):
         env_path = tmp_path / ".env"
@@ -696,14 +768,14 @@ class TestRunSetupWizard:
         monkeypatch.setattr(create_env, "fetch_anthropic_models", lambda key: None)
 
         tail = list(_TAIL)
-        tail[9] = "y"
-        answers = iter(["5", "claude-sonnet-5", "", *tail[:10], "ws://fleet-host:7776/report", *tail[10:]])
+        tail[8] = "y"
+        answers = iter(["5", "claude-sonnet-5", "", *tail[:9], "ws://fleet-host:8765/report", *tail[9:]])
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
         monkeypatch.setattr(create_env.getpass, "getpass", lambda *a, **k: "sk-ant-fake")
 
         values = create_env.run_setup_wizard({})
 
-        assert values["MASTER_WS_URL"] == "ws://fleet-host:7776/report"
+        assert values["MASTER_WS_URL"] == "ws://fleet-host:8765/report"
 
     def test_per_phase_override_writes_prefixed_keys_only_for_that_phase(self, tmp_path, monkeypatch):
         """The user-named example: PLANNER_MODEL (and a whole separate
@@ -716,11 +788,11 @@ class TestRunSetupWizard:
         monkeypatch.setattr(create_env, "fetch_openai_compatible_models", lambda url, key: ["gpt-4.1"])
 
         tail = list(_TAIL)
-        tail[10] = "y"  # configure per-phase overrides: yes
+        tail[-1] = "y"  # configure per-phase overrides: yes
         # after PER_PHASE: override PLANNER? yes; PLANNER backend=openai(4); PLANNER OPENAI_URL:
         # accept default; PLANNER model: pick #1 (gpt-4.1); PLANNER CONTEXT_SIZE: accept guess;
         # then decline IMP/TESTING/REVIEWER/CLEANUP in turn
-        phase_answers = ["y", "4", "", "1", "", "n", "n", "n", "n"]
+        phase_answers = ["y", "4", "", "1", "", "n", "n", "n"]
         input_answers = iter(["5", "claude-sonnet-5", "", *tail, *phase_answers])
         getpass_answers = iter(["sk-ant-fake", "sk-openai-fake"])  # shared ANTHROPIC key, then PLANNER's openai key
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(input_answers))
@@ -795,19 +867,6 @@ class TestMainSetupWizardTrigger:
 
         wizard.assert_not_called()
 
-    def test_interactive_session_with_a_fully_configured_env_skips_the_wizard(self, tmp_path, monkeypatch, capsys):
-        self._isolated_env(tmp_path, monkeypatch, "OPENAI_URL=http://x/v1\nOPENAI_API_KEY=k\nMODEL=m\n")
-        monkeypatch.setattr(create_env.sys.stdin, "isatty", lambda: True)
-        monkeypatch.setattr(create_env.sys, "argv", ["create-env"])
-        wizard = mock.Mock()
-        monkeypatch.setattr(create_env, "run_setup_wizard", wizard)
-        monkeypatch.setattr(create_env, "check_llm_reachable", lambda url, **k: True)
-
-        create_env.main()
-
-        wizard.assert_not_called()
-        assert "skipping setup" in capsys.readouterr().out
-
     def test_interactive_session_with_missing_config_runs_the_wizard(self, tmp_path, monkeypatch):
         env_path = self._isolated_env(tmp_path, monkeypatch, "MODEL=m\n")
         monkeypatch.setattr(create_env.sys.stdin, "isatty", lambda: True)
@@ -824,10 +883,12 @@ class TestMainSetupWizardTrigger:
         # for the case where .env genuinely didn't exist yet.
         assert wizard.call_args[0][1] == env_path.parent / ".env_v1"
 
-    def test_setup_flag_forces_the_wizard_even_when_already_configured(self, tmp_path, monkeypatch):
+    def test_interactive_session_always_runs_the_wizard_even_when_already_configured(self, tmp_path, monkeypatch):
+        """The user: "Update JFI.create_env:main to always do --setup". A
+        configured .env used to skip the wizard unless --setup was passed."""
         env_path = self._isolated_env(tmp_path, monkeypatch, "OPENAI_URL=http://x/v1\nOPENAI_API_KEY=k\nMODEL=m\n")
         monkeypatch.setattr(create_env.sys.stdin, "isatty", lambda: True)
-        monkeypatch.setattr(create_env.sys, "argv", ["create-env", "--setup"])
+        monkeypatch.setattr(create_env.sys, "argv", ["create-env"])
         wizard = mock.Mock(return_value={"OPENAI_URL": "http://x/v1", "OPENAI_API_KEY": "k", "MODEL": "m"})
         monkeypatch.setattr(create_env, "run_setup_wizard", wizard)
         monkeypatch.setattr(create_env, "check_llm_reachable", lambda url, **k: True)
@@ -841,7 +902,7 @@ class TestMainSetupWizardTrigger:
 class TestVersionedWizardWrites:
     """The user-requested behavior: create .env itself the very first time
     (nothing existed before this run at all), but once .env exists, never
-    touch it again -- every later wizard save (including --setup reruns)
+    touch it again -- every later wizard save
     goes to a fresh .env_v1/.env_v2/... instead."""
 
     def test_genuinely_fresh_run_writes_env_itself(self, tmp_path, monkeypatch):
@@ -868,7 +929,7 @@ class TestVersionedWizardWrites:
         monkeypatch.setattr(create_env, "ENV_PATH", env_path)
         monkeypatch.setattr(create_env, "ENV_TEMPLATE_PATH", tmp_path / "nope")
         monkeypatch.setattr(create_env.sys.stdin, "isatty", lambda: True)
-        monkeypatch.setattr(create_env.sys, "argv", ["create-env", "--setup"])
+        monkeypatch.setattr(create_env.sys, "argv", ["create-env"])
         wizard = mock.Mock(return_value={"OPENAI_URL": "http://x/v1", "OPENAI_API_KEY": "k", "MODEL": "m"})
         monkeypatch.setattr(create_env, "run_setup_wizard", wizard)
         monkeypatch.setattr(create_env, "check_llm_reachable", lambda url, **k: True)

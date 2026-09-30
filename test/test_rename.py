@@ -33,10 +33,3 @@ def test_no_just_finish_it_occurrences_in_source():
         if ".just_finish_it" in text or "just_finish_it" in text.lower():
             hits.append(str(path.relative_to(REPO_ROOT)))
     assert not hits, f"'just_finish_it' still present in: {hits}"
-
-
-def test_jfi_folder_present_and_used_in_code():
-    """The flat .jfi/ folder is the canonical session/plan location."""
-    from JFI.session.simple_session_manager import DEFAULT_PLAN_PATH
-
-    assert DEFAULT_PLAN_PATH == ".jfi/plan.md"

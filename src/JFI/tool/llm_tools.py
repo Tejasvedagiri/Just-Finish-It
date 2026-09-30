@@ -13,8 +13,7 @@ def ask_llm(prompt: str, llm, console=None) -> str:
     conversation history, no plan/file context — and returns the reply as
     plain text.
 
-    Mirrors BaseLLMStream.check_user_approval's own silent-stream-
-    consumption pattern for the actual LLM call: it's a side call, not a
+    Consumes the stream silently: it's a side call, not a
     turn in the phase's own conversation, so it never touches the AI-space
     transcript or session history. `console`, when given, only gets a
     record_token_usage(...) call afterward — real usage if the server

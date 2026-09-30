@@ -93,38 +93,6 @@ class TestNoStaleReTrigger:
         assert feedback2 is None and review_failed2 is False
 
 
-class TestPlannerTriggerForReIteration:
-    def test_planner_trigger_mentions_review_report(self):
-        """When a failed-review re-iteration starts, the planner trigger points
-        at the report and forbids touching already-done leaves."""
-        from JFI.session.simple_session_manager import get_phase_trigger
-
-        msg = get_phase_trigger(
-            "planner", "goal", "JFI/demo/plan.md", iteration=2, review_failed=True
-        )
-        assert "write_review_report" in msg
-        assert "already done" in msg  # do not touch a leaf that's already done
-
-    def test_planner_trigger_without_review_is_plain(self):
-        from JFI.session.simple_session_manager import get_phase_trigger
-
-        msg = get_phase_trigger("planner", "goal", "JFI/demo/plan.md", iteration=2)
-        assert "review" not in msg.lower()
-
-
-def test_reviewer_trigger_points_at_get_plan_not_a_plan_file():
-    """The reviewer trigger used to say "evaluate against {plan_path}",
-    literally naming a plan.md path that never exists for a DB-backed
-    session -- observed in practice sending the Reviewer off checking for
-    a nonexistent file. It must point at get_plan() instead, never name
-    plan.md as something to read."""
-    from JFI.session.simple_session_manager import get_phase_trigger
-
-    msg = get_phase_trigger("reviewer", "goal", "JFI/demo/plan.md")
-    assert "get_plan()" in msg
-    assert "plan.md" not in msg
-
-
 class TestLoopCap:
     def test_max_review_iterations_is_positive(self):
         from JFI.runner import MAX_REVIEW_ITERATIONS

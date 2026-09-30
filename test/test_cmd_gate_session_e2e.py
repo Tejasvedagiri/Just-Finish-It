@@ -30,19 +30,20 @@ class _FakeLLM:
 
 
 @pytest.fixture(autouse=True)
-def _restore_tool_map():
-    from JFI.runner import TOOL_MAP
-    original = TOOL_MAP["execute_command"]
+def _restore_tool_map(monkeypatch):
+    from JFI import runner
+    # The planner builds its own per-role clients; make them fail the same way.
+    monkeypatch.setattr(runner, "make_llm_stream", lambda prefixes: _FakeLLM())
+    original = runner.TOOL_MAP["execute_command"]
     yield
-    TOOL_MAP["execute_command"] = original
+    runner.TOOL_MAP["execute_command"] = original
 
 
 def test_run_pipeline_binds_gated_execute_command_to_session_context_cache():
     from JFI.runner import PHASES, TOOL_MAP, run_pipeline
 
-    # "s" answers the "LLM request failed. Retry, or stop the run?" menu
-    # run_phase now raises instead of giving up silently (see runner.py);
-    # "n" is left over for the later, separate gated(...) call below.
+    # "s" answers the planner episode's "LLM request failed. Retry, or stop
+    # the run?" menu; "n" is left over for the separate gated(...) call below.
     console = _FakeConsole(answers=["gate-session", "goal: do the thing", "s", "n"])
     run_pipeline(console, {phase: _FakeLLM() for phase in PHASES})
 

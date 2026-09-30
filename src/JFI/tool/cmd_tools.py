@@ -79,8 +79,8 @@ def execute_command(command: str, timeout: int = 300) -> str:
 #
 # "Save" persists to the session's own context store (JFI.models.ContextEntry)
 # under the APPROVED_CMD_KEY row -- the same store the LLM uses as its own
-# scratchpad via the context_save/context_lookup tools (context_tools.py,
-# CONTEXT_CACHE_RULES in simple_session_manager.py), just a row the model's
+# scratchpad via the context_save/context_lookup tools (context_tools.py),
+# just a row the model's
 # own context_lookup never sees (see context_tools._INTERNAL_KEYS). One row
 # per session, JSON-encoded list as its value -- get/set_context_value
 # (context_tools.py) already handle one key atomically, so there is no
@@ -156,12 +156,6 @@ class CmdApprovalGate:
             self.approve_all = True
             return True
         return answer == "y"
-
-
-def request_cmd_approval(command: str, console, engine, session_id: str) -> bool:
-    """One-shot approval check (no 'Yes for all' memory across calls) — a thin
-    wrapper over CmdApprovalGate for callers that don't need session state."""
-    return CmdApprovalGate(console, engine, session_id).request(command)
 
 
 def make_gated_execute_command(console, engine, session_id: str):

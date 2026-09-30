@@ -27,7 +27,6 @@ def table_registry() -> dict:
     """name -> SQLModel class, built lazily (not at import time) so
     importing this module doesn't pull in JFI.models before it's needed."""
     from JFI.models import (
-        ActivityEvent,
         BackgroundProcess,
         ContextEntry,
         DonePhase,
@@ -52,7 +51,6 @@ def table_registry() -> dict:
         "UnlockedTool": UnlockedTool,
         "ImplementedFile": ImplementedFile,
         "BackgroundProcess": BackgroundProcess,
-        "ActivityEvent": ActivityEvent,
         "DonePhase": DonePhase,
     }
 

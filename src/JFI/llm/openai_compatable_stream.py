@@ -1,4 +1,4 @@
-from JFI.llm.base_llm_stream import BaseLLMStream, phase_env
+from JFI.llm.base_llm_stream import BaseLLMStream, phase_env, primary_prefix
 from openai import OpenAI
 
 # The openai SDK's own default read timeout is 600s (10 minutes) with no
@@ -19,7 +19,8 @@ def initial_service(prefix: str = "") -> OpenAI:
     api_key = phase_env(prefix, "OPENAI_API_KEY")
     missing = [name for name, value in (("OPENAI_URL", base_url), ("OPENAI_API_KEY", api_key)) if not value]
     if missing:
-        hint = f" (or {prefix}_{missing[0]}, for the {prefix} phase)" if prefix else ""
+        name = primary_prefix(prefix)
+        hint = f" (or {name}_{missing[0]}, for the {name} phase)" if name else ""
         raise KeyError(f"Missing required .env setting(s): {', '.join(missing)}{hint}")
     try:
         timeout = float(phase_env(prefix, "LLM_REQUEST_TIMEOUT", str(DEFAULT_REQUEST_TIMEOUT)))
@@ -28,10 +29,22 @@ def initial_service(prefix: str = "") -> OpenAI:
     return OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
 
 
+def _rejects_stream_options(error: Exception) -> bool:
+    """A 400 that names stream_options: the server doesn't know the option
+    (some older OpenAI-compatible servers validate unknown fields strictly)."""
+    status = getattr(error, "status_code", None)
+    return status == 400 and "stream_options" in str(error)
+
+
 class OpenAICompatableStream(BaseLLMStream):
     def __init__(self, prefix: str = ""):
         super().__init__(prefix)
         self.stream_service = initial_service(prefix)
+        # Real token counts, not the chars/4 estimate, for the header and the
+        # v2 episode budget: most servers only include `usage` in a stream
+        # when asked. Turned off for the rest of the run the first time a
+        # server rejects the option, so asking never breaks a working setup.
+        self._ask_for_usage = True
 
     def close(self):
         self.stream_service.close()
@@ -52,4 +65,12 @@ class OpenAICompatableStream(BaseLLMStream):
         if tools:
             kwargs["tools"] = tools
 
+        if self._ask_for_usage:
+            try:
+                return self.stream_service.chat.completions.create(
+                    **kwargs, stream_options={"include_usage": True})
+            except Exception as e:
+                if not _rejects_stream_options(e):
+                    raise
+                self._ask_for_usage = False
         return self.stream_service.chat.completions.create(**kwargs)

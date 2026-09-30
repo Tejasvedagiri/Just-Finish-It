@@ -1,4 +1,4 @@
-"""run_pipeline wires get_plan/add_leaf/start_leaf/mark_leaf_done/split_leaf
+"""run_pipeline wires the reviewer's read-only plan tools (get_plan, get_leaf)
 to the session's own DB engine (see SimpleSessionManager.plan_db_tools()
 and runner.py's _run_session), before any real LLM call happens -- same
 fake-LLM-raises-immediately pattern as test_cmd_gate_session_e2e.py uses
@@ -33,15 +33,17 @@ class _FakeLLM:
         raise RuntimeError("stop here — not retryable, not a real LLM call")
 
 
-_PLAN_DB_TOOL_NAMES = ["get_plan", "add_leaf", "start_leaf", "mark_leaf_done", "split_leaf"]
+_PLAN_DB_TOOL_NAMES = ["get_plan", "get_leaf"]
 
 
 @pytest.fixture(autouse=True)
-def _restore_tool_map():
-    from JFI.runner import TOOL_MAP
-    originals = {name: TOOL_MAP[name] for name in _PLAN_DB_TOOL_NAMES}
+def _restore_tool_map(monkeypatch):
+    from JFI import runner
+    # The planner builds its own per-role clients; make them fail the same way.
+    monkeypatch.setattr(runner, "make_llm_stream", lambda prefixes: _FakeLLM())
+    originals = {name: runner.TOOL_MAP[name] for name in _PLAN_DB_TOOL_NAMES}
     yield
-    TOOL_MAP.update(originals)
+    runner.TOOL_MAP.update(originals)
 
 
 def test_run_pipeline_binds_plan_db_tools_to_the_sessions_own_engine():
@@ -54,36 +56,17 @@ def test_run_pipeline_binds_plan_db_tools_to_the_sessions_own_engine():
         assert "not available yet" not in TOOL_MAP[name](**_dummy_args(name))
 
 
-def test_the_wired_tools_actually_write_to_this_sessions_real_db():
-    """Not just "rebound to *something*" -- exercises the full round trip
-    through TOOL_MAP dispatch: add a leaf, start it, finish it, confirm
-    get_plan reflects it, all via the SAME callables run_pipeline wired in."""
+def test_the_wired_tools_read_this_sessions_real_db():
+    """Not just "rebound to *something*": get_plan reads the SAME session's
+    DB that run_pipeline opened."""
     from JFI.runner import PHASES, TOOL_MAP, run_pipeline
 
     console = _FakeConsole(answers=["plan-db-roundtrip", "goal: do the thing", "s"])
     run_pipeline(console, {phase: _FakeLLM() for phase in PHASES})
 
     assert "empty" in TOOL_MAP["get_plan"]().lower()
-
-    add_result = TOOL_MAP["add_leaf"](phase="imp", description="Core arithmetic")
-    assert "Added leaf id=" in add_result
-    leaf_id = int(add_result.split("id=")[1].split(" ")[0])
-
-    TOOL_MAP["start_leaf"](leaf_id=leaf_id)
-    assert "Core arithmetic" in TOOL_MAP["get_plan"]()
-
-    done_result = TOOL_MAP["mark_leaf_done"](leaf_id=leaf_id)
-    assert f"Marked leaf id={leaf_id} done" in done_result
-
-    plan_text = TOOL_MAP["get_plan"]()
-    assert "[x]" in plan_text
+    assert TOOL_MAP["get_leaf"](leaf_id=999999).startswith("Error")
 
 
 def _dummy_args(tool_name: str) -> dict:
-    return {
-        "get_plan": {},
-        "add_leaf": {"phase": "imp", "description": "placeholder"},
-        "start_leaf": {"leaf_id": 999999},
-        "mark_leaf_done": {"leaf_id": 999999},
-        "split_leaf": {"leaf_id": 999999, "into": ["a", "b"]},
-    }[tool_name]
+    return {"get_plan": {}, "get_leaf": {"leaf_id": 999999}}[tool_name]

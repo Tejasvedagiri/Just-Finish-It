@@ -234,3 +234,4 @@ __marimo__/
 # request instead of an external PROJECTS_ROOT -- these are run output, not
 # project source.
 /benchmark/runs/
+/.idea/misc.xml

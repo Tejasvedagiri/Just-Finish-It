@@ -1,157 +1,24 @@
 """
-Tests for iteration-2 item 4.2: each phase is handed ONLY its own pending items.
-
-The Implementation system message must embed the unchecked "- [ ]"
-Implementation lines (and nothing from Testing), and the Testing system message
-must embed only the unchecked Testing lines. Completed "- [x]" lines are
-excluded, as are items from the other section.
+The goal is recorded once in history as "My goal is: <goal>"
+(runner.GOAL_PREFIX), and runner._session_goal reads it back on resume and
+for the planner. The per-phase trigger messages the old one-conversation
+phases needed are gone: every phase now builds its own episode prompt.
 """
 
-
-PLAN = """# Plan
-## Context and Prerequisites
-- something to note
-
-## Implementation
-- [ ] 1.1 first implementation step
-- [x] 1.2 second implementation step (done)
-- [ ] 1.3 third implementation step
-
-## Testing
-- [ ] 2.1 first test
-- [x] 2.2 second test (passed)
-"""
+from JFI.runner import GOAL_PREFIX, _session_goal
 
 
-def _system_message(manager, phase):
-    """The system prompt that get_messages(phase) would send for this phase."""
-    messages = manager.get_messages(phase)
-    assert messages[0]["role"] == "system"
-    return messages[0]["content"]
+def test_the_goal_message_is_read_back():
+    history = [{"role": "user", "content": f"{GOAL_PREFIX} Build a CLI calculator."}]
+    assert _session_goal(history) == "Build a CLI calculator."
 
 
-class TestImpPhaseGetsOnlyImplementationPending:
-    def test_embeds_only_unchecked_implementation_items(self, manager):
-        manager.plan_file.write_text(PLAN)
-        msg = _system_message(manager, "imp")
-
-        assert "- [ ] 1.1 first implementation step" in msg
-        assert "- [ ] 1.3 third implementation step" in msg
-
-    def test_excludes_completed_implementation_items(self, manager):
-        manager.plan_file.write_text(PLAN)
-        msg = _system_message(manager, "imp")
-
-        assert "second implementation step (done)" not in msg
-
-    def test_excludes_testing_items(self, manager):
-        manager.plan_file.write_text(PLAN)
-        msg = _system_message(manager, "imp")
-
-        assert "first test" not in msg
-        assert "second test (passed)" not in msg
+def test_goal_is_still_read_from_sessions_that_recorded_v1s_planner_instruction():
+    """Sessions created while v1 still existed recorded the goal with v1's
+    planner instruction after it."""
+    old = "My goal is: Build a CLI calculator.\n\nBuild the step-by-step plan now, using add_leaf/split_leaf as described."
+    assert _session_goal([{"role": "user", "content": old}]) == "Build a CLI calculator."
 
 
-class TestTestingPhaseGetsOnlyTestingPending:
-    def test_embeds_only_unchecked_testing_items(self, manager):
-        manager.plan_file.write_text(PLAN)
-        msg = _system_message(manager, "testing")
-
-        assert "- [ ] 2.1 first test" in msg
-
-    def test_excludes_completed_testing_items(self, manager):
-        manager.plan_file.write_text(PLAN)
-        msg = _system_message(manager, "testing")
-
-        assert "second test (passed)" not in msg
-
-    def test_excludes_implementation_items(self, manager):
-        manager.plan_file.write_text(PLAN)
-        msg = _system_message(manager, "testing")
-
-        assert "implementation step" not in msg
-
-
-class TestPhaseTriggers:
-    def test_imp_trigger_points_at_pending_implementation(self, manager):
-        """The plan is DB-backed now (JFI.tool.plan_db_tools) -- the trigger
-        names the tool calls to use instead of a plan.md path."""
-        from JFI.session.simple_session_manager import get_phase_trigger
-
-        trigger = get_phase_trigger("imp", plan_path=manager.plan_path)
-        assert "implementation" in trigger.lower()
-        assert "start_leaf" in trigger and "mark_leaf_done" in trigger
-
-    def test_testing_trigger_points_at_pending_testing(self, manager):
-        from JFI.session.simple_session_manager import get_phase_trigger
-
-        trigger = get_phase_trigger("testing", plan_path=manager.plan_path)
-        assert "testing" in trigger.lower()
-        assert "start_leaf" in trigger and "mark_leaf_done" in trigger
-
-    def test_cleanup_trigger_points_at_session_folder(self, manager):
-        from pathlib import Path
-        from JFI.session.simple_session_manager import get_phase_trigger
-
-        trigger = get_phase_trigger("cleanup", plan_path=manager.plan_path)
-        session_dir = str(Path(manager.plan_path).parent)
-        assert session_dir in trigger
-        assert "deliverable" in trigger
-
-
-class TestEmptyPlan:
-    def test_imp_queue_noted_when_no_items(self, manager):
-        msg = _system_message(manager, "imp")
-        assert "(no unchecked Implementation items found)" in msg
-
-    def test_testing_queue_noted_when_no_items(self, manager):
-        msg = _system_message(manager, "testing")
-        assert "(no unchecked Testing items found)" in msg
-
-
-class TestIteration2Sections:
-    """Items 3.2/3.3 wording: agents use the embedded queue first."""
-
-    def test_imp_prompt_tells_agent_to_use_embedded_queue(self, manager):
-        manager.plan_file.write_text(PLAN)
-        msg = _system_message(manager, "imp")
-        assert "Your work queue" in msg
-        # The agent is told to take the FIRST item from the embedded list.
-        assert "work queue (the pending imp leaves)" in msg
-
-    def test_testing_prompt_still_points_at_get_plan_for_context(self, manager):
-        """Plan is DB-backed now -- the testing prompt names get_plan()
-        (not a plan.md path) as the thing to fall back on for context."""
-        manager.plan_file.write_text(PLAN)
-        msg = _system_message(manager, "testing")
-        assert "get_plan()" in msg
-        assert "Your work queue" in msg
-
-
-class TestWordingUsesEmbeddedListFirst:
-    """Item 3.3: both phases tell the agent to take items from the embedded
-    list instead of re-scanning the plan file."""
-
-    def test_imp_prompt_no_longer_instructs_re_scanning(self, manager):
-        manager.plan_file.write_text(PLAN)
-        msg = _system_message(manager, "imp")
-        # Old wording ("read_file {plan_path} and take the FIRST unchecked") is gone.
-        assert f"read_file {manager.plan_path} and take" not in msg
-        # The loop step 1 now points at the embedded queue.
-        assert "take the FIRST item from it" in msg
-
-    def test_testing_prompt_no_longer_instructs_re_scanning(self, manager):
-        manager.plan_file.write_text(PLAN)
-        msg = _system_message(manager, "testing")
-        # Old wording ("read_file {plan_path} and take the FIRST unchecked") is gone.
-        assert f"read_file {manager.plan_path} and take" not in msg
-        assert "take the FIRST item from it" in msg
-
-    def test_one_mark_leaf_done_call_per_step_rule_intact(self, manager):
-        """DB-backed replacement for the old "tick one box per step" rule --
-        mark_leaf_done is called once per finished leaf, right away, never
-        batched -- see the imp/testing phase prompts' own step 5."""
-        manager.plan_file.write_text(PLAN)
-        for phase in ("imp", "testing"):
-            msg = _system_message(manager, phase)
-            assert "call per" in msg or "call per leaf" in msg
+def test_no_goal_message_means_no_goal():
+    assert _session_goal([{"role": "user", "content": "USER FEEDBACK FOR ITERATION:\nadd dark mode"}]) == ""

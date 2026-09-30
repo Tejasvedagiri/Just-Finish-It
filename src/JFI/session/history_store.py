@@ -1,7 +1,6 @@
 """DB-backed conversation history -- full cutover replacement for
-history.jsonl.gz (see /todo.md's Live validation section for why: once the
-plan itself moved to the DB, the remaining files -- history.jsonl.gz,
-context.json, metadata.json, run.log -- were the obvious next step rather
+history.jsonl.gz (once the plan itself moved to the DB, the remaining files
+-- history.jsonl.gz, context.json, metadata.json, run.log -- followed rather
 than leaving the migration half-done).
 
 `HistoryMessage.seq` is an explicit per-session incrementing counter (not
@@ -54,7 +53,7 @@ def load_history_from_db(engine, session_id: str) -> list[dict]:
     return messages
 
 
-def append_history_to_db(engine, session_id: str, messages: list[dict]) -> None:
+def append_history_to_db(engine, session_id: str, messages: list[dict], episode_id=None) -> None:
     """Appends `messages` (already-new ones only -- the caller tracks its
     own _flushed_count, same responsibility SimpleSessionManager.
     save_history already had for the old gzip file) as new HistoryMessage
@@ -77,5 +76,6 @@ def append_history_to_db(engine, session_id: str, messages: list[dict]) -> None:
                 tool_calls=message.get("tool_calls"),
                 tool_call_id=message.get("tool_call_id"),
                 name=message.get("name"),
+                episode_id=episode_id,
             ))
         db.commit()

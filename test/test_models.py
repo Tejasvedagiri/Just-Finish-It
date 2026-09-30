@@ -20,7 +20,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from JFI.models import (
-    ActivityEvent,
     BackgroundProcess,
     ContextEntry,
     DonePhase,
@@ -113,18 +112,6 @@ class TestRoundTrip:
         assert len(leaves) == 1
         assert leaves[0].description == "Do the thing"
         assert leaves[0].status == LeafStatus.TODO
-
-    def test_activity_event_persists(self, tmp_path):
-        engine = get_engine(tmp_path / "JFI" / "demo")
-        with get_session(engine) as db:
-            db.add(SessionRecord(session_id="demo", repo_path="/tmp/repo"))
-            db.add(ActivityEvent(session_id="demo", severity="good", text="ticked 3/5"))
-            db.commit()
-
-        with get_session(engine) as db:
-            events = list(db.exec(select(ActivityEvent).where(ActivityEvent.session_id == "demo")))
-        assert len(events) == 1
-        assert events[0].text == "ticked 3/5"
 
     def test_session_record_awaiting_options_round_trips_as_json(self, tmp_path):
         """awaiting_options is the one list-shaped field SessionRecord kept
@@ -252,7 +239,7 @@ class TestConversationTables:
         assert [kind for _, kind, _ in merged] == ["message", "event", "message"]
 
 
-class TestBackgroundProcessAndActivityEvent:
+class TestBackgroundProcess:
     def test_background_process_round_trips(self, tmp_path):
         engine = get_engine(tmp_path / "JFI" / "demo")
         with get_session(engine) as db:
@@ -264,17 +251,6 @@ class TestBackgroundProcessAndActivityEvent:
             proc = db.exec(select(BackgroundProcess).where(BackgroundProcess.session_id == "demo")).first()
         assert proc.status == "running"
         assert proc.exited_at is None
-
-    def test_activity_event_round_trips(self, tmp_path):
-        engine = get_engine(tmp_path / "JFI" / "demo")
-        with get_session(engine) as db:
-            db.add(SessionRecord(session_id="demo", repo_path="/tmp/repo"))
-            db.add(ActivityEvent(session_id="demo", severity="good", text="ticked 3/5"))
-            db.commit()
-
-        with get_session(engine) as db:
-            event = db.exec(select(ActivityEvent).where(ActivityEvent.session_id == "demo")).first()
-        assert event.severity == "good"
 
 
 class TestContextEntry:

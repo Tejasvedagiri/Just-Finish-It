@@ -1,6 +1,6 @@
 """context_save / context_lookup -- the model's own persistent scratchpad,
 DB-backed via JFI.models.ContextEntry (full cutover replacement for
-context.json; see /todo.md's Live validation section).
+context.json).
 
 Pulled, never pushed: the model decides what it needs via these two tools
 as ordinary calls in the normal loop -- LLM call -> tool call -> context

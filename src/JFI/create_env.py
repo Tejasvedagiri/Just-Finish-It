@@ -12,23 +12,22 @@ and needs no `OPENAI_URL` at all. Checking the wrong pair of settings for
 the backend actually configured is exactly the bug this module used to
 have -- see `backend_select.py` for the same two-family split at runtime.
 
-When run in a real terminal (`sys.stdin.isatty()`) and the required
-settings for whatever `LLM_BACKEND` is currently set aren't all present,
-this also runs an interactive setup wizard: pick a backend, enter its
+When run in a real terminal (`sys.stdin.isatty()`) this always runs an
+interactive setup wizard (a run that isn't interactive only checks): pick a backend, enter its
 key, fetch and pick a model from that server/API's own `/models` list
 (never hand-typed blind), and get a best-effort `CONTEXT_SIZE` default
 guessed from the model's own name -- always shown before being accepted,
 never written silently. See `run_setup_wizard`.
 
 Stdlib only, deliberately -- this has to work before any dependency is
-even installed, the same reasoning `plan_renumber.py` follows for staying
-a standalone script rather than an LLM tool. `JFI.llm.backend_select` and
+even installed. `JFI.llm.backend_select` and
 `JFI.llm.base_llm_stream` are safe to import here despite that: both are
 pure-stdlib themselves (the `anthropic` package is only imported lazily,
 inside `AnthropicStream.__init__`, never at module import time).
 """
 
 import getpass
+import importlib.util
 import json
 import re
 import shutil
@@ -37,6 +36,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from JFI import create_env_detect as detect
 from JFI.llm.backend_select import _KNOWN_BACKENDS, _LLAMACPP_DEFAULTS, _LMSTUDIO_DEFAULTS, _OLLAMA_DEFAULTS
 
 MIN_PYTHON = (3, 12)
@@ -326,15 +326,19 @@ def _prompt_secret(prompt: str, default: str = "") -> str:
     return raw or default
 
 
-def _prompt_model_choice(fetch, fallback_prompt: str) -> str:
+def _prompt_model_choice(fetch, fallback_prompt: str, notes: dict | None = None) -> str:
+    """`notes` (model id -> "loaded, 38,144-token context, 21.8 GB") puts the
+    loaded models first and says what's loaded and how big each one is."""
     print("\nFetching available models...")
     ids = fetch()
     if not ids:
         print(f"{WARN}Couldn't list models automatically -- enter the model id yourself.")
         return input(f"{fallback_prompt}: ").strip()
+    notes = notes or {}
+    ids = sorted(ids, key=lambda i: not notes.get(i, "").startswith("loaded"))
     shown = ids[:40]
     for i, model_id in enumerate(shown, 1):
-        print(f"  {i}. {model_id}")
+        print(f"  {i}. {model_id}" + (f"  ({notes[model_id]})" if model_id in notes else ""))
     if len(ids) > 40:
         print(f"  ... and {len(ids) - 40} more -- type the model id directly if yours isn't shown above.")
     raw = input("> [1] (or type a model id): ").strip()
@@ -357,16 +361,77 @@ def _prompt_yes_no(prompt: str, default: bool = False) -> bool:
     return raw in ("y", "yes")
 
 
-PHASE_PREFIXES = ("PLANNER", "IMP", "TESTING", "REVIEWER", "CLEANUP")
+PHASE_PREFIXES = ("PLANNER", "IMP", "REVIEWER", "CLEANUP")
 
 
-def _configure_llm(values: dict, updates: dict, prefix: str = "") -> tuple:
+# Detection goes through these so tests can replace them -- the wizard's tests
+# must never probe a real GPU or model server.
+def _detect_system() -> "detect.System":
+    return detect.detect_system()
+
+
+def _detect_models(backend: str, url: str, key: str):
+    return detect.detect_models(backend, url, key)
+
+
+def _measure_speed(url: str, key: str, model: str) -> "detect.Speed":
+    print(f"\nTiming one short request to {model} (and checking it can call tools)...")
+    return detect.measure_speed(url, key, model)
+
+
+def _laya_installed() -> bool:
+    return importlib.util.find_spec("laya") is not None
+
+
+def _print_system(system: "detect.System") -> None:
+    print("\n--- Detected ---")
+    ram = (f"{system.ram_total_gb:.1f} GB RAM ({system.ram_free_gb:.1f} GB free)"
+           if system.ram_total_gb and system.ram_free_gb is not None else "RAM unknown")
+    print(f"  {system.os_name}, {system.cores or '?'} cores, {ram}")
+    gpu = system.gpu
+    if gpu and gpu.kind == "apple":
+        print(f"  {gpu.name}: shared memory, ~{gpu.total_gb:.0f} GB usable by the GPU" if gpu.total_gb
+              else f"  {gpu.name}: shared memory")
+    elif gpu:
+        free = f", {gpu.free_gb:.1f} GB free" if gpu.free_gb is not None else ""
+        print(f"  {gpu.name}: {gpu.total_gb:.1f} GB VRAM{free}" if gpu.total_gb else f"  {gpu.name}")
+    else:
+        print("  no GPU detected: local models run from RAM")
+
+
+def _ask(values: dict, updates: dict, suggestion: "detect.Suggestion", key: str | None = None) -> str:
+    """A computed value as the default, with why -- and the .env value when
+    it differs, since an old value is how a stale setting survives."""
+    key = key or suggestion.name
+    current = (values.get(key) or "").strip()
+    note = f" (currently {current} in .env)" if current and current != suggestion.value else ""
+    print(f"   why: {suggestion.reason}{note}")
+    updates[key] = _prompt_text(key, suggestion.value)
+    return updates[key]
+
+
+def _model_notes(models) -> dict:
+    notes = {}
+    for m in models or []:
+        bits = []
+        if m.loaded:
+            bits.append(f"loaded, {m.loaded_context:,}-token context" if m.loaded_context else "loaded")
+        if m.size_gb:
+            bits.append(f"{m.size_gb:.1f} GB")
+        if bits:
+            notes[m.id] = ", ".join(bits)
+    return notes
+
+
+def _configure_llm(values: dict, updates: dict, prefix: str = "",
+                   system: "detect.System | None" = None) -> tuple:
     """Runs the backend/key/model/CONTEXT_SIZE sub-flow, writing `{prefix}_
     {KEY}` into `updates` for a phase override (e.g. PLANNER_MODEL) or the
     bare `{KEY}` for the shared/default settings when `prefix` is empty --
-    exactly the naming `phase_env` resolves at runtime. Returns (backend,
-    model) so the caller can react to what was picked (e.g. print a
-    summary)."""
+    exactly the naming `phase_env` resolves at runtime. CONTEXT_SIZE is
+    computed from what the server reports (see create_env_detect). Returns
+    (backend, model, {name: Suggestion}) -- the other computed values, for
+    the caller's later prompts."""
 
     def key(name: str) -> str:
         return f"{prefix}_{name}" if prefix else name
@@ -393,6 +458,7 @@ def _configure_llm(values: dict, updates: dict, prefix: str = "") -> tuple:
             lambda: fetch_anthropic_models(api_key) if api_key else None,
             "Claude model id (e.g. claude-sonnet-5)",
         )
+        openai_url, models = "", None
     else:
         defaults = _BACKEND_DEFAULTS.get(backend, {})
         if backend == "custom":
@@ -410,15 +476,30 @@ def _configure_llm(values: dict, updates: dict, prefix: str = "") -> tuple:
             api_key = _prompt_secret(key("OPENAI_API_KEY"), default_key)
         updates[key("OPENAI_URL")] = openai_url
         updates[key("OPENAI_API_KEY")] = api_key
+        models = _detect_models(backend, openai_url, api_key) if openai_url else None
         model = _prompt_model_choice(
             lambda: fetch_openai_compatible_models(openai_url, api_key) if openai_url else None,
             "Model id",
+            notes=_model_notes(models),
         )
 
     updates[key("MODEL")] = model
-    context_default = guess_context_size(backend, model)
-    updates[key("CONTEXT_SIZE")] = _prompt_text(f"{key('CONTEXT_SIZE')} (best-effort guess for {model!r})", str(context_default))
-    return backend, model
+    hosted = backend in ("openai", "anthropic", "claude")
+    speed = _measure_speed(openai_url, api_key, model) if openai_url and model else None
+    if speed:
+        if speed.tokens_per_second:
+            print(f"   {speed.tokens_per_second:.0f} tokens/s")
+        if speed.tool_calls_work is False:
+            print(f"{CROSS} {model} answered without calling the tool -- JFI needs a model that can call tools.")
+        elif speed.note:
+            print(f"{WARN}{speed.note}")
+    found = detect.Detected(system=system, model=detect.find_model(models, model), speed=speed, hosted=hosted,
+                            laya_installed=_laya_installed())
+    suggestions = {s.name: s for s in detect.compute(model, found, lambda m: guess_context_size(backend, m))}
+    for warning in found.warnings:
+        print(f"{WARN}{warning}")
+    _ask(values, updates, suggestions["CONTEXT_SIZE"], key=key("CONTEXT_SIZE"))
+    return backend, model, suggestions
 
 
 # name -> (default value shown/written, prompt suffix)
@@ -430,6 +511,106 @@ _TUNING_KNOBS = [
     ("REASONING_OUTPUT_CAP", "3000", ""),
     ("LLM_REQUEST_TIMEOUT", "120", " (seconds)"),
 ]
+
+
+# The episode pipeline's knobs, with the code's own defaults (budget.py,
+# result_cap.py, planner/loop.py, planner/nodes.py, imp/dev.py). The user:
+# "There is a lot of env variables not asked."
+_EPISODE_KNOBS = [
+    ("MAX_EPISODE_TURNS", "25", " (model replies inside ONE episode before it's stopped)"),
+    ("TOOL_RESULT_MAX_TOKENS", "3000", " (longest single tool result; the rest is cut with a hint)"),
+]
+_PLANNER_KNOBS = [
+    ("PLANNER_ITEM_MAX_CHARS", "200", " (longest plan-node description, in characters)"),
+    ("PLANNER_REDO_CAP", "2", " (rewrites of one node before it's accepted as-is)"),
+    ("PLANNER_ESCALATION_CAP", "1", " (times a node may send its parent back to be redone)"),
+    ("MAX_PLANNER_EPISODES", "200",
+     " (safety stop: most planner episodes in a whole planning round -- calc used 8, "
+     "a 97-node app 47; not a size to tune)"),
+    ("MAX_DEV_ATTEMPTS", "3", " (Dev episodes on one leaf before it's split)"),
+]
+_FLAGS = [
+    ("AUTO_APPROVE_COMMANDS", "Run every shell command without asking (AUTO_APPROVE_COMMANDS)?"),
+    ("REVIEW_LOOP_APPROVAL", "Ask before each fix iteration after a failed review (REVIEW_LOOP_APPROVAL)?"),
+    ("LOG_LLM_CALL_DEBUG", "Log every LLM request/response to .jfi/llm_debug.jsonl (LOG_LLM_CALL_DEBUG)?"),
+    ("SHOW_STREAM_PROMPTS", "Print every prompt sent to the LLM (SHOW_STREAM_PROMPTS)?"),
+]
+
+
+def _master_ws_url(answer: str) -> str:
+    """A full ws:// URL from a URL, `host:port` or a bare port. Observed: the
+    user answered `8765`, .env got MASTER_WS_URL=8765, and the session could
+    never reach the fleet master."""
+    answer = answer.strip()
+    if "://" in answer:
+        return answer
+    host, _, port = answer.rpartition(":") if ":" in answer else ("127.0.0.1", "", answer)
+    return f"ws://{host or '127.0.0.1'}:{port}/report"
+
+
+def _is_on(values: dict, name: str) -> bool:
+    return values.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _flag(values: dict, updates: dict, name: str, prompt: str, default: bool | None = None) -> bool:
+    """Writes 1 or 0 -- 0 overwrites an old 1, so answering no turns it off."""
+    on = _prompt_yes_no(prompt, default=_is_on(values, name) if default is None else default)
+    updates[name] = "1" if on else "0"
+    return on
+
+
+def _effective_episode_budget(values: dict, updates: dict) -> int:
+    """What budget.episode_token_budget will use: CONTEXT_SIZE x
+    CONTEXT_COMPRESSION_RATIO."""
+    def number(name, default, kind):
+        try:
+            return kind(updates.get(name) or values.get(name) or default)
+        except ValueError:
+            return kind(default)
+    return max(1_000, int(number("CONTEXT_SIZE", "32768", int) * number("CONTEXT_COMPRESSION_RATIO", "0.7", float)))
+
+
+def _configure_pipeline(values: dict, updates: dict, sizing: dict | None = None) -> None:
+    sizing = sizing or {}
+    print("\n--- Episodes (every LLM call is one short episode) ---")
+    for name, default, suffix in _EPISODE_KNOBS:
+        if name in sizing:
+            _ask(values, updates, sizing[name])
+        else:
+            updates[name] = _prompt_text(f"{name}{suffix}", values.get(name, default))
+    print(f"   -> each episode gets {_effective_episode_budget(values, updates):,} tokens "
+          "(CONTEXT_SIZE x CONTEXT_COMPRESSION_RATIO).")
+
+    print("\n--- Planner and Dev ---")
+    for name, default, suffix in _PLANNER_KNOBS:
+        updates[name] = _prompt_text(f"{name}{suffix}", values.get(name, default))
+
+    print("\n--- Planner judge ---")
+    if not _laya_installed():
+        print("   (the laya extra isn't installed: LAYA=1 does nothing until `uv sync --extra laya`)")
+    if _flag(values, updates, "LAYA",
+             "Add Laya's score to the rule judge (LAYA; needs `uv sync --extra laya`, not in the binary)?"):
+        if "LAYA_DEVICE" in sizing:
+            _ask(values, updates, sizing["LAYA_DEVICE"])
+        else:
+            updates["LAYA_DEVICE"] = _prompt_text("LAYA_DEVICE (cpu or cuda)", values.get("LAYA_DEVICE", "cpu"))
+        updates["LAYA_MIN_CONFIDENCE"] = _prompt_text(
+            "LAYA_MIN_CONFIDENCE (how sure Laya must be to send a disagreement to the LLM)",
+            values.get("LAYA_MIN_CONFIDENCE", "0.75"))
+        unload = sizing.get("UNLOAD_LLM_BEFORE_LAYA")
+        if unload:
+            print(f"   why: {unload.reason}")
+        _flag(values, updates, "UNLOAD_LLM_BEFORE_LAYA",
+              "Unload the LM Studio model while Laya runs (UNLOAD_LLM_BEFORE_LAYA; low-memory machines)?",
+              default=unload.value == "1" if unload else None)
+
+    print("\n--- Approvals and debugging ---")
+    for name, prompt in _FLAGS:
+        _flag(values, updates, name, prompt)
+    flaresolverr = _prompt_text("FLARESOLVERR_URL (blank = none; for fetching Cloudflare-protected pages)",
+                                values.get("FLARESOLVERR_URL", ""))
+    if flaresolverr:
+        updates["FLARESOLVERR_URL"] = flaresolverr
 
 
 def _next_versioned_env_path() -> Path:
@@ -449,13 +630,13 @@ def _next_versioned_env_path() -> Path:
 
 def run_setup_wizard(values: dict, write_target: Path | None = None) -> dict:
     """Interactively fills in .env: the shared LLM backend/key/model/
-    CONTEXT_SIZE, SESSION_MANAGER, every tuning knob (TEMPERATURE,
+    CONTEXT_SIZE, every tuning knob (TEMPERATURE,
     FREQUENCY_PENALTY, CONTEXT_COMPRESSION_RATIO, STREAM_OUTPUT_CAP,
     REASONING_OUTPUT_CAP, LLM_REQUEST_TIMEOUT, THEME), the web dashboard
     bridge (JFI_WEB_BRIDGE/JFI_WEB_PORT), the fleet dashboard connection
-    (MASTER_WS_URL), and -- opt-in, per phase -- a completely separate
-    backend/key/model/CONTEXT_SIZE for PLANNER/IMP/TESTING/REVIEWER/
-    CLEANUP. See the module docstring. Writes to `write_target` (defaults
+    (MASTER_WS_URL), the episode/planner/Dev knobs, the judge (LAYA and its
+    settings), the approval and debug flags, and -- opt-in, per phase -- a completely separate
+    backend/key/model/CONTEXT_SIZE for PLANNER/IMP/REVIEWER/CLEANUP. See the module docstring. Writes to `write_target` (defaults
     to ENV_PATH itself); `main` passes a versioned path instead whenever
     `.env` already existed before this run, so a save here never
     overwrites a config that predates it -- see `_next_versioned_env_path`.
@@ -463,21 +644,19 @@ def run_setup_wizard(values: dict, write_target: Path | None = None) -> dict:
     callers see exactly what ended up there."""
     print("\nLet's set up .env -- press Enter on any prompt to accept the default shown.")
 
+    system = _detect_system()
+    _print_system(system)
+
     print("\n--- Shared / default LLM settings ---")
     updates = {}
-    _configure_llm(values, updates, prefix="")
-
-    session_manager = _prompt_choice(
-        "SESSION_MANAGER (adaptive detects the goal's task type automatically; simple is one-size-fits-all)",
-        [("adaptive", "adaptive"), ("simple", "simple")],
-        default_index=0,
-    )
-    if session_manager != "adaptive":
-        updates["SESSION_MANAGER"] = session_manager
+    _, _, sizing = _configure_llm(values, updates, prefix="", system=system)
 
     print("\n--- Tuning ---")
     for name, default, suffix in _TUNING_KNOBS:
-        updates[name] = _prompt_text(f"{name}{suffix}", values.get(name, default))
+        if name in sizing:
+            _ask(values, updates, sizing[name])
+        else:
+            updates[name] = _prompt_text(f"{name}{suffix}", values.get(name, default))
     theme = _prompt_text("THEME (blank = auto-detect from your terminal)", values.get("THEME", ""))
     if theme:
         updates["THEME"] = theme
@@ -495,19 +674,22 @@ def run_setup_wizard(values: dict, write_target: Path | None = None) -> dict:
         "Report this session to a fleet dashboard (MASTER_WS_URL, e.g. jfi-master running elsewhere)?",
         default=bool(values.get("MASTER_WS_URL", "").strip()),
     ):
-        updates["MASTER_WS_URL"] = _prompt_text(
-            "MASTER_WS_URL", values.get("MASTER_WS_URL", "") or "ws://127.0.0.1:7776/report"
-        )
+        updates["MASTER_WS_URL"] = _master_ws_url(_prompt_text(
+            "MASTER_WS_URL (a URL, host:port or just the port)",
+            values.get("MASTER_WS_URL", "") or "ws://127.0.0.1:8765/report",
+        ))
+
+    _configure_pipeline(values, updates, sizing)
 
     print("\n--- Per-phase overrides (optional) ---")
     if _prompt_yes_no(
-        "Configure a completely separate backend/model for any phase (PLANNER/IMP/TESTING/REVIEWER/CLEANUP)?",
+        "Configure a completely separate backend/model for any phase (PLANNER/IMP/REVIEWER/CLEANUP)?",
         default=False,
     ):
         for phase in PHASE_PREFIXES:
             if _prompt_yes_no(f"Override the {phase} phase's backend/model?", default=False):
                 print(f"\n--- {phase} phase ---")
-                _configure_llm(values, updates, prefix=phase)
+                _configure_llm(values, updates, prefix=phase, system=system)
 
     write_target = write_target or ENV_PATH
     _write_env_values(write_target, updates)
@@ -599,19 +781,24 @@ def main() -> None:
     values = ensure_env_file()
     backend = values.get("LLM_BACKEND", "").strip().lower()
 
+    # Interactive runs always open the wizard (the user's call: it used to be
+    # skipped once .env was configured, unless --setup was passed).
     wizard_write_target = None
-    force_setup = "--setup" in sys.argv[1:]
-    if sys.stdin.isatty() and (force_setup or not _is_configured(values, backend)):
+    if sys.stdin.isatty():
         wizard_write_target = ENV_PATH if not env_existed_before else _next_versioned_env_path()
         values = run_setup_wizard(values, wizard_write_target)
         backend = values.get("LLM_BACKEND", "").strip().lower()
-    elif sys.stdin.isatty():
-        print(f"{CHECK} .env already has a model/key configured for LLM_BACKEND={backend or 'openai'!r} "
-              "-- skipping setup (rerun with `uv run create-env --setup` to reconfigure).")
     elif not _is_configured(values, backend):
         print(f"{WARN}Non-interactive session -- skipping the setup wizard, just checking what's already in .env.")
 
     model = values.get("MODEL", "")
+    url = values.get("OPENAI_URL", "") or _BACKEND_DEFAULTS.get(backend, {}).get("OPENAI_URL", "")
+    mismatch = None
+    if url and model and backend not in ("anthropic", "claude", "openai"):
+        loaded = detect.find_model(_detect_models(backend, url, values.get("OPENAI_API_KEY", "")), model)
+        mismatch = detect.context_mismatch(values.get("CONTEXT_SIZE"), loaded)
+        if mismatch:
+            print(f"{CROSS} {mismatch}")
 
     if not values:
         config_ok = False
@@ -621,14 +808,15 @@ def main() -> None:
         config_ok = _check_openai_compatible_backend(values, backend)
 
     print()
-    if python_ok and config_ok:
+    # A context mismatch isn't "ready": every long reply gets cut off.
+    if python_ok and config_ok and not mismatch:
         if wizard_write_target and wizard_write_target != ENV_PATH:
             print(
                 f"{CHECK} Looks ready in {wizard_write_target.name} -- rename or copy it over "
-                f"{ENV_PATH.name} (JFI's real config file) when you want to use it, then run ./JFI."
+                f"{ENV_PATH.name} (JFI's real config file) when you want to use it, then run `uv run jfi`."
             )
         else:
-            print(f"{CHECK} Looks ready. Run ./JFI (or `jfi` once installed) to start a session.")
+            print(f"{CHECK} Looks ready. Run `uv run jfi` (or `jfi` once installed) in your project folder.")
     else:
         print(f"{WARN}Not fully ready yet -- fix whichever check above failed, then run `uv run create-env` again.")
 

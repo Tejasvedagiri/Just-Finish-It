@@ -10,39 +10,35 @@ a later, unrelated review pass.
 """
 
 
-class TestImpPhasePrompt:
-    def test_mentions_notes_tool(self, manager):
-        from JFI.session.simple_session_manager import get_system_message
+class TestDevPrompt:
+    def test_mentions_notes_tool(self):
+        from JFI.imp.prompts import FINISH_RULE
 
-        msg = get_system_message("imp", manager.plan_path)
-        assert "add_reviewer_note" in msg
+        assert "add_reviewer_note" in FINISH_RULE
 
 
 class TestReviewerPhasePrompt:
-    def test_mentions_notes_tool(self, manager):
-        from JFI.session.simple_session_manager import get_system_message
+    def test_mentions_notes_tool(self):
+        from JFI.review.prompts import REVIEWER
 
-        msg = get_system_message("reviewer", manager.plan_path)
-        assert "get_reviewer_notes" in msg
+        assert "get_reviewer_notes" in REVIEWER
 
-    def test_instructs_treating_notes_as_something_to_recheck(self, manager):
-        from JFI.session.simple_session_manager import get_system_message
+    def test_instructs_treating_notes_as_something_to_recheck(self):
+        from JFI.review.prompts import REVIEWER
 
-        msg = get_system_message("reviewer", manager.plan_path)
-        assert "not something to accept" in msg or "re-check yourself" in msg
+        assert "Re-check each one yourself" in REVIEWER
 
 
 class TestCleanupPhaseProtectsNotes:
-    def test_cleanup_protects_the_shared_db_notes_live_in(self, manager):
-        """Reviewer notes are DB-backed now, inside the same shared .jfi/
-        database as everything else -- there is no separate
-        NotesForReviewer.md file left to name; the DB itself is the
-        thing cleanup must protect (see the .jfi/ protection block)."""
-        from JFI.session.simple_session_manager import get_system_message
+    def test_cleanup_protects_the_shared_db_notes_live_in(self):
+        """Reviewer notes are DB-backed, inside the same shared .jfi/ database
+        as everything else; that folder is what cleanup must never touch --
+        it looks like an unexplained folder when cleanup scans the project."""
+        from JFI.review.prompts import CLEANUP
 
-        msg = " ".join(get_system_message("cleanup", manager.plan_path).lower().split())
-        assert ".jfi" in msg
-        assert "shared sqlite database" in msg
+        text = " ".join(CLEANUP.split())
+        assert "NEVER delete, move or overwrite anything under .jfi/" in text
+        assert "it is not stray" in text
 
 
 class TestClearReviewerNotes:

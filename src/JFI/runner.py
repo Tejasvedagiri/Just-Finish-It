@@ -1,46 +1,38 @@
 import argparse
-import inspect
-import json
 import os
-import re
 import shutil
 import socket
 import subprocess
 import sys
-import time
-from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version as _package_version
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from dotenv import find_dotenv, load_dotenv
-from openai import APIConnectionError, APIStatusError
 
 # LLM and Console Management
 from JFI.llm.backend_select import make_llm_stream
 from JFI.llm.base_llm_stream import BaseLLMStream
-from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
+from JFI.manager.abstract_manager import AbstractManager
 from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
 from JFI.manager.web_bridge import WebBridge
 from JFI.manager.socket_reporter import SocketReporter, master_ws_url as _read_master_ws_url
 
 # Session Management
 from JFI.session.abstract_session_manager import SessionManager
-from JFI.session.adaptive_session_manager import AdaptiveSessionManager
+from JFI.create_env_detect import startup_warning
+from JFI.session.pipeline import session_pipeline
 from JFI.session.simple_session_manager import (
-    SessionInUseError, SimpleSessionManager, get_phase_trigger, _marker_present,
+    SessionInUseError, SimpleSessionManager, _marker_present,
 )
 
 # Tools and Schemas
-from JFI.tool.schemas import CORE_TOOLS, DEFERRED_TOOLS
 from JFI.tool.file_tools import write_file, read_file, append_to_file, replace_in_file
 from JFI.tool.cmd_tools import execute_command, make_gated_execute_command
 from JFI.tool.context_tools import make_context_tools
-from JFI.tool.deferred_tools import make_load_tool
-from JFI.tool.note_tools import clear_note, get_note, make_note_tools, PLAN_FEEDBACK, REVIEW_REPORT, REVIEWER_NOTES
+from JFI.tool.note_tools import clear_note, get_note, make_note_tools, REVIEW_REPORT, REVIEWER_NOTES
 from JFI.tool.image_tools import capture_screenshot, view_image
-from JFI.tool.llm_tools import make_ask_llm
-from JFI.tool.plan_db_tools import has_leaves, render_plan_markdown, top_level_leaf_ids
+from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.web_tools import fetch_webpage_images
 from JFI.tool.browser_tools import browse_webpage
 from JFI.tool.video_tools import extract_video_frames
@@ -49,26 +41,6 @@ from JFI.tool.process_tools import (
     clear_finished_processes, make_process_tools,
 )
 
-# Looked up by name at request time — see _tools_for_session.
-_DEFERRED_TOOLS_BY_NAME = {t["function"]["name"]: t for t in DEFERRED_TOOLS}
-
-
-def _tools_for_session(ssm: SessionManager) -> list:
-    """CORE_TOOLS (always sent) plus whichever DEFERRED_TOOLS `ssm` has
-    unlocked via load_tool — see tool/schemas.py's module docstring for why
-    this split exists (every request used to pay for all ~13 tools'
-    schemas, including 5 browser/media ones most sessions never touch).
-    A SessionManager without unlocked_tools() (shouldn't happen for either
-    concrete implementation today, see abstract_session_manager.py) just
-    gets CORE_TOOLS, same as a session that hasn't unlocked anything."""
-    if not hasattr(ssm, "unlocked_tools"):
-        return CORE_TOOLS
-    extra = [
-        _DEFERRED_TOOLS_BY_NAME[name]
-        for name in ssm.unlocked_tools()
-        if name in _DEFERRED_TOOLS_BY_NAME
-    ]
-    return CORE_TOOLS + extra if extra else CORE_TOOLS
 
 # Dynamic mapping of tool names to their python functions
 TOOL_MAP = {
@@ -99,379 +71,36 @@ TOOL_MAP = {
     "add_reviewer_note": lambda text="": "Error: add_reviewer_note is not available yet — no session is active.",
     "get_reviewer_notes": lambda: "Error: get_reviewer_notes is not available yet — no session is active.",
     "write_review_report": lambda text="": "Error: write_review_report is not available yet — no session is active.",
-    "write_plan_feedback": lambda text="": "Error: write_plan_feedback is not available yet — no session is active.",
-    # Rebound to the active phase's own LLM stream in run_phase (a phase can
-    # have its own model/endpoint — see PHASE_ENV_PREFIX) — this default
-    # only matters before any phase has run.
-    "ask_llm": lambda prompt="": "Error: ask_llm is not available yet — no phase is currently running.",
-    # Rebound to the actual session's SessionManager in _run_session, same
-    # as execute_command/context_save/context_lookup above — this default
-    # only matters before a session exists.
-    "load_tool": lambda name="": "Error: load_tool is not available yet — no session is active.",
     # Rebound to the actual session's DB engine in _run_session via
     # ssm.plan_db_tools() (see JFI.tool.plan_db_tools) — these defaults
     # only matter before a session exists.
     "get_plan": lambda: "Error: get_plan is not available yet — no session is active.",
-    "add_leaf": lambda phase="", description="", parent_id=0: "Error: add_leaf is not available yet — no session is active.",
-    "start_leaf": lambda leaf_id=0: "Error: start_leaf is not available yet — no session is active.",
-    "mark_leaf_done": lambda leaf_id=0, tokens=0: "Error: mark_leaf_done is not available yet — no session is active.",
-    "split_leaf": lambda leaf_id=0, into=(): "Error: split_leaf is not available yet — no session is active.",
-    "reorder_leaf": lambda leaf_id=0, after_leaf_id=0: "Error: reorder_leaf is not available yet — no session is active.",
+    "get_leaf": lambda leaf_id=0: "Error: get_leaf is not available yet — no session is active.",
 }
 
-PHASES = ["planner", "product_owner", "imp", "testing", "reviewer", "cleanup"]
+#: The phase keys are persisted in history (`<PHASE>_COMPLETE` markers drive
+#: resume) and mirrored by the fleet dashboard: never rename them. v1's
+#: `product_owner` and `testing` phases are gone -- the planner's judge settles
+#: every node (laya_plan.md D3) and every leaf carries its own unit test (D10).
+PHASES = ["planner", "imp", "reviewer", "cleanup"]
 
 # .env prefix each phase's model/endpoint override is read from (see
 # JFI.llm.base_llm_stream.phase_env) — e.g. PLANNER_MODEL, PLANNER_OPENAI_URL,
 # PLANNER_OPENAI_API_KEY, PLANNER_TEMPERATURE. Any that are unset fall back to
 # the shared MODEL/OPENAI_URL/OPENAI_API_KEY/TEMPERATURE, so a single model
 # for every phase (today's default) needs no per-phase vars at all.
-PHASE_ENV_PREFIX = {
-    "planner": "PLANNER", "product_owner": "PRODUCT_OWNER", "imp": "IMP", "testing": "TESTING",
-    "reviewer": "REVIEWER", "cleanup": "CLEANUP",
-}
+PHASE_ENV_PREFIX = {"planner": "PLANNER", "imp": "IMP", "reviewer": "REVIEWER", "cleanup": "CLEANUP"}
 
 EXIT_WORDS = {"exit", "done", "quit", "no", "nothing"}
-
-# How many times the same failing call is coached before we tell the model to
-# abandon that approach entirely.
-FAILURE_RETRY_LIMIT = 3
-
-# How many times a transient LLM-server failure (connection drop, 5xx) is
-# retried before giving up on this turn — see _is_retryable_llm_error.
-LLM_RETRY_LIMIT = 2
-LLM_RETRY_DELAY_SECONDS = 3.0
-
-# Defaults for _task_stuck_time_limit / _task_stuck_token_limit (see
-# _check_task_stuck) — how long the SAME plan leaf (ssm.current_task_title)
-# may stay current before run_phase forces a decomposition nudge instead of
-# letting it grind on one oversized leaf indefinitely. Observed in practice:
-# a leaf that turned out to hide real diagnose-and-fix work (not just a
-# quick check) ran for hours and 700k+ tokens of re-sent context without
-# ever splitting itself up, spawning a pile of throwaway scripts along the
-# way. Either threshold alone can fire; both are generous defaults meant to
-# catch genuine sprawl, not a normal multi-turn leaf.
-DEFAULT_TASK_STUCK_TIME_LIMIT_SECONDS = 300.0
-DEFAULT_TASK_STUCK_TOKEN_LIMIT = 150_000
 
 
 # ------------------------------------------------------------------ LLM errors
 
-def _is_retryable_llm_error(e: Exception) -> bool:
-    """
-    Worth retrying: a network-level failure (server down/restarting, a
-    dropped connection), a 5xx-class server error — both are typically
-    transient on a local LLM server — or a response that blew past
-    STREAM_OUTPUT_CAP (see ResponseTooLongError): the model was still
-    going, not finished, so re-sending the identical turn is worth another
-    shot. NOT a 4xx client error: retrying an identical request the server
-    already rejected (bad request, auth, context-length) won't produce a
-    different result.
-    """
-    if isinstance(e, (APIConnectionError, ResponseTooLongError)):
-        return True
-    if isinstance(e, APIStatusError):
-        return e.status_code >= 500
-    return False
-
-
-def _format_llm_error(e: Exception) -> str:
-    """
-    Turns an LLM call failure into a message worth reading.
-
-    The openai SDK embeds the raw response body verbatim into str(e) when a
-    server error isn't valid JSON (see its _make_status_error_from_response):
-    a server crash that falls back to a framework's generic HTML error page
-    — nginx, Flask, Werkzeug, whatever's fronting the model — dumps that
-    whole page into the exception message instead of a clean API error. That
-    HTML page is what a raw `f"...: {e}"` was printing verbatim. Detected via
-    status_code/response (present on openai.APIStatusError and its
-    subclasses), not by string-sniffing the message.
-    """
-    status_code = getattr(e, "status_code", None)
-    response = getattr(e, "response", None)
-    body_text = getattr(response, "text", None) if response is not None else None
-
-    if status_code is not None and body_text and body_text.strip()[:15].lower().lstrip().startswith(("<!doctype", "<html")):
-        preview = " ".join(body_text.split())[:200]
-        ellipsis = "…" if len(body_text) > 200 else ""
-        return (
-            f"HTTP {status_code} — the server returned an HTML error page instead of a "
-            f"proper API error. This is almost always a crash or restart on the LLM "
-            f"server's own side, not something this request caused; check its logs. "
-            f"Preview: {preview}{ellipsis}"
-        )
-    return str(e)
-
-
-def _interruptible_sleep(console: AbstractManager, seconds: float, poll: float = 0.2) -> None:
-    """time.sleep(seconds), but checks console.should_stop() every `poll`
-    seconds so Ctrl+C during a retry delay is responsive instead of waiting
-    out the full delay first."""
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline and not console.should_stop():
-        time.sleep(min(poll, max(0.0, deadline - time.monotonic())))
-
 
 # --------------------------------------------------------------- tool running
 
-def _is_failure(result: Any) -> bool:
-    """Every tool reports failure with a leading 'Error'."""
-    return str(result).lstrip().startswith("Error")
-
-
-def _expected_arguments(func_name: str) -> str:
-    try:
-        return f"{func_name}({', '.join(inspect.signature(TOOL_MAP[func_name]).parameters)})"
-    except (KeyError, ValueError, TypeError):
-        return func_name
-
-
-def _repair_directive(func_name: str, args: Dict[str, Any], result: str, attempt: int) -> str:
-    """
-    Concrete next action for a failed call, so the model corrects itself instead
-    of re-issuing the same call. Generic advice gets ignored; naming the exact
-    tool and argument to change does not.
-    """
-    if attempt >= FAILURE_RETRY_LIMIT:
-        return (
-            f"AUTO-RECTIFY: this identical {func_name} call has now failed {attempt} times. "
-            "Stop repeating it. Either solve the step a different way, or if it genuinely "
-            "cannot be done, leave its checkbox unticked, note the blocker in the plan file, "
-            "and move on to the next unchecked item."
-        )
-
-    lowered = str(result).lower()
-
-    if func_name == "replace_in_file":
-        if "not found" in lowered:
-            return (
-                "AUTO-RECTIFY: the file was NOT modified. read_file "
-                f"'{args.get('file_path', '')}' and copy the target line exactly as it appears, "
-                "including its leading '- ' and indentation, then call replace_in_file again."
-            )
-        if "appears" in lowered and "times" in lowered:
-            return (
-                "AUTO-RECTIFY: the file was NOT modified because old_string matched several "
-                "places. Extend old_string with the line above or below it so it matches once."
-            )
-
-    if func_name in ("read_file", "write_file", "append_to_file", "view_image", "extract_video_frames") \
-            and "does not exist" in lowered:
-        return (
-            "AUTO-RECTIFY: that path is wrong. Run execute_command with "
-            "'ls -la .' (or the parent directory) to find the real path, then retry."
-        )
-
-    if func_name == "extract_video_frames":
-        if "not installed" in lowered:
-            return (
-                "AUTO-RECTIFY: no video processing capability in this environment (the "
-                "'ffmpeg' binary is missing) — retrying will not help. Skip this step, note "
-                "the blocker in the plan, and continue without extracted frames."
-            )
-        if "no distinct frames" in lowered:
-            return (
-                "AUTO-RECTIFY: retry the same call with a lower threshold (e.g. 0.1) to catch "
-                "subtler scene changes."
-            )
-
-    if func_name == "execute_command":
-        if "timed out after" in lowered:
-            current_timeout = args.get("timeout", 300)
-            next_timeout = max(int(current_timeout) * 2, 900)
-            return (
-                f"AUTO-RECTIFY: the command did not fail — it simply needed more than "
-                f"{current_timeout}s (no STDERR is shown because nothing went wrong, it just "
-                f"wasn't finished yet). This is normal for package installs/downloads and "
-                f"builds. Re-run the SAME command again, this time passing "
-                f"timeout={next_timeout} to execute_command. Do not add flags or change the "
-                "command to work around this — a longer timeout is the fix."
-            )
-        return (
-            "AUTO-RECTIFY: the command failed — read the STDERR above and fix the cause "
-            "(missing dependency, wrong path, syntax error) before re-running it. Do not "
-            "re-run the identical command unchanged."
-        )
-
-    if func_name == "capture_screenshot" and ("no display" in lowered or "not installed" in lowered):
-        return (
-            "AUTO-RECTIFY: no screenshot capability in this environment (no display, or the "
-            "'mss' package is missing) — retrying will not help. Skip this step, note the "
-            "blocker in the plan, and continue without a screenshot."
-        )
-
-    return (
-        f"AUTO-RECTIFY: the {func_name} call failed and nothing was changed. Diagnose the "
-        "message above and issue a corrected call."
-    )
-
-
-def _announce_context_lookup_hit(console: AbstractManager, result: str) -> None:
-    """
-    Surfaces a successful context_lookup as its own system line — "found
-    this, cost that" — separate from the raw tool-result dump, the same way
-    a history compression gets its own "Context compressed: ..." line
-    instead of being buried in the turn. Silent for the two no-content
-    cases (empty cache, no keyword match): both lack a "- key: ..." line,
-    which is what every real hit (the blank-keyword index listing included)
-    always has, so this needs no separate success/failure signal from
-    context_lookup itself.
-    """
-    keys = re.findall(r"^- (.+?):", result, re.M)
-    if not keys:
-        return
-    tokens_estimate = (len(result) + 3) // 4
-    console.display_system(
-        f"🔎  Found context → {', '.join(keys)} (loaded ~{tokens_estimate} tokens)"
-    )
-
-
-def execute_tool_call(console: AbstractManager, ssm: SessionManager,
-                      tool_call: Dict[str, Any], failures: Dict[tuple, int]) -> tuple[str, Optional[str]]:
-    """
-    Runs one tool call and turns any failure into actionable guidance.
-
-    Every error path returns a string rather than raising, so a bad call costs a
-    turn instead of killing the run. Returns (tool_result_text, image_data_url):
-    image_data_url is non-None only for a successful view_image call — the
-    caller appends it as a follow-up message so the model actually sees the
-    image (a tool result itself must be plain text on the wire).
-    """
-    func_name = tool_call["function"]["name"]
-    args_str = tool_call["function"]["arguments"]
-
-    # --- arguments that aren't valid JSON (usually a truncated payload) ---
-    try:
-        args = json.loads(args_str or "{}")
-    except json.JSONDecodeError as e:
-        console.display_tool_call(func_name)
-        # Keep the transcript valid: an oversized broken payload would be
-        # replayed on every later turn.
-        tool_call["function"]["arguments"] = json.dumps(
-            {"error": "malformed json stripped to prevent server crash"}
-        )
-        ssm.save_history()
-        return (
-            f"Error: the arguments for {func_name} were not valid JSON ({e}). Nothing ran. "
-            "This usually means you emitted too much text in one call. AUTO-RECTIFY: split the "
-            "work up — write_file the first chunk, then append_to_file the rest, or use "
-            "replace_in_file for a small edit."
-        ), None
-
-    if not isinstance(args, dict):
-        console.display_tool_call(func_name)
-        return (
-            f"Error: the arguments for {func_name} must be a JSON object, got "
-            f"{type(args).__name__}. AUTO-RECTIFY: retry as {_expected_arguments(func_name)}."
-        ), None
-
-    # --- a tool that doesn't exist ---
-    if func_name not in TOOL_MAP:
-        console.display_tool_call(func_name, args)
-        return (
-            f"Error: there is no tool called '{func_name}'. AUTO-RECTIFY: use one of "
-            f"{', '.join(sorted(TOOL_MAP))} instead."
-        ), None
-
-    console.display_tool_call(func_name, args)
-
-    # --- wrong or missing arguments ---
-    image_data_url: Optional[str] = None
-    try:
-        raw_result = TOOL_MAP[func_name](**args)
-    except TypeError as e:
-        raw_result = (
-            f"Error: wrong arguments for {func_name} ({e}). "
-            f"AUTO-RECTIFY: the signature is {_expected_arguments(func_name)}."
-        )
-    except Exception as e:
-        raw_result = f"Error executing tool {func_name}: {e}"
-
-    # view_image is the one tool that returns (status_text, data_url) instead
-    # of a plain string; every other tool's result is used as-is.
-    if isinstance(raw_result, tuple):
-        result, image_data_url = raw_result
-    else:
-        result = raw_result
-
-    # --- coach, then escalate, on repeated identical failures ---
-    signature = (func_name, args_str)
-    if _is_failure(result):
-        failures[signature] = failures.get(signature, 0) + 1
-        attempt = failures[signature]
-        console.display_error(f"{func_name} failed (attempt {attempt})")
-        result = f"{result}\n\n{_repair_directive(func_name, args, result, attempt)}"
-        image_data_url = None
-    else:
-        failures.pop(signature, None)
-        if func_name in ("write_file", "append_to_file", "replace_in_file"):
-            ssm.track_file(args.get("file_path"))
-        elif func_name == "context_lookup":
-            _announce_context_lookup_hit(console, result)
-
-    return result, image_data_url
-
 
 # ------------------------------------------------------------------ the queue
-
-def drain_forced_input(console: AbstractManager, ssm: SessionManager) -> None:
-    """
-    Folds forced input ('!something') into the AI's very next turn, mid-phase.
-    Plain queued input is left alone for :func:`collect_next_iteration`.
-    """
-    for note in console.drain_forced_input():
-        ssm.add_message(
-            "user",
-            f"USER INTERJECTION (apply this from here on):\n{note}"
-        )
-
-
-def handle_skip_request(console: AbstractManager, ssm: SessionManager, phase: str) -> None:
-    """
-    Ctrl+K: skips the current checklist item outright, independent of
-    whatever the model is doing right now — marks it "- [○]" in the plan
-    (see SimpleSessionManager.skip_current_task) rather than waiting for the
-    model to agree to move on. Only imp/testing have an item to skip;
-    anywhere else (or with nothing pending) this is a no-op.
-    """
-    if not console.drain_skip_request():
-        return
-    skipped = ssm.skip_current_task(phase)
-    if skipped is None:
-        console.display_system("Nothing to skip right now.")
-        return
-    console.display_system(f"⏭  Skipped: {skipped}")
-    ssm.add_message(
-        "user",
-        "USER ACTION: the current task was skipped (marked \"- [○]\" in the plan) — "
-        "it is done with, not something you should redo or revert. Move on to the "
-        "next unchecked item."
-    )
-
-
-def handle_skip_all_request(console: AbstractManager, ssm: SessionManager, phase: str) -> None:
-    """
-    Ctrl+Q: skips every remaining checklist item in the current phase in one
-    go (see SimpleSessionManager.skip_remaining_tasks), then tells the model
-    directly to wrap the phase up — marking the items alone doesn't end the
-    phase, since completion is still driven by the model emitting its exact
-    "<PHASE>_COMPLETE" phrase.
-    """
-    if not console.drain_skip_all_request():
-        return
-    skipped = ssm.skip_remaining_tasks(phase)
-    if not skipped:
-        console.display_system("Nothing to skip right now.")
-        return
-    console.display_system(f"⏭  Skipped {skipped} remaining item(s) in this phase.")
-    ssm.add_message(
-        "user",
-        f"USER ACTION: every remaining item in this phase's checklist was skipped "
-        f"(marked \"- [○]\" in the plan) — they are done with, not something you "
-        f"should redo or revert. Finish up now and output the exact phrase "
-        f"'{phase.upper()}_COMPLETE' on its own line."
-    )
 
 
 def _clear_reviewer_notes(ssm: SessionManager) -> None:
@@ -491,129 +120,13 @@ def _clear_reviewer_notes(ssm: SessionManager) -> None:
         clear_note(ssm.db_engine, ssm.session_id, REVIEWER_NOTES)
 
 
-def _read_plan_markdown(ssm: SessionManager) -> str:
-    """Text for AbstractManager.set_status's plan_markdown param -- a
-    fleet-dashboard viewer has no filesystem access to read plan.md (or
-    query a DB) itself, so the full checklist rides along in the status
-    snapshot as plain text.
-
-    Prefers the DB (see JFI.tool.plan_db_tools) the same way
-    SimpleSessionManager's own plan_progress/phase_progress/etc. do once a
-    session has leaves there -- render_plan_markdown renders it in
-    plan.md's OLD bullet syntax byte-for-byte, so
-    Just-Finish-It-Fleet's src/main.js's existing parsePlanLines/buildPlanTree keeps
-    working completely unchanged; no frontend changes needed for a
-    DB-backed session's checklist to show up there. Falls back to reading
-    plan.md directly for a session that predates the DB migration. Empty
-    string before either exists yet (no session ever starts implementation
-    without one, so this is transient)."""
-    if hasattr(ssm, "db_engine") and has_leaves(ssm.db_engine, ssm.session_id):
-        return render_plan_markdown(ssm.db_engine, ssm.session_id)
-    try:
-        return Path(ssm.plan_path).read_text(encoding="utf-8")
-    except OSError:
-        return ""
-
-
-def _run_product_owner_loop(console: AbstractManager, llms: Dict[str, BaseLLMStream],
-                             ssm: SessionManager, initial_goal: str) -> bool:
-    """
-    The planner<->product_owner cycle: a SEPARATE, tighter loop from the
-    reviewer's own planner->imp->testing->reviewer restart, living entirely
-    between the planner's first pass and implementation ever starting (see
-    PHASES -- "product_owner" sits right after "planner"). Nothing has been
-    implemented yet at this point, so a round trip here costs one planner
-    turn and one product_owner turn, not a whole pipeline re-run.
-
-    Called once the outer phase loop in _run_session reaches "product_owner"
-    -- by then "planner" has already had its own first run via that same
-    loop's generic path, so this function's own first iteration is
-    product_owner's first run, not a second planner run.
-
-    Returns True to let the outer loop continue on to "imp"; False means
-    the whole run should stop (mirrors every other "if not run_phase(...):
-    return" call site in _run_session).
-    """
-    rounds = 0
-
-    while True:
-        trigger = get_phase_trigger("product_owner", initial_goal, ssm.plan_path)
-        last_user_msg = next((m.get("content", "") for m in reversed(ssm.history) if m.get("role") == "user"), "")
-        if trigger not in last_user_msg:
-            ssm.add_message("user", trigger)
-        if not run_phase(console, llms, ssm, "product_owner"):
-            return False
-
-        feedback = product_owner_feedback_outcome(ssm.db_engine, ssm.session_id)
-        # Cleared immediately and unconditionally, whether or not there was
-        # feedback to act on -- this row's presence is a one-shot signal
-        # for THIS round only; a stale copy must never resurface in a later,
-        # unrelated round. Never deferred to cleanup or any later pass.
-        clear_note(ssm.db_engine, ssm.session_id, PLAN_FEEDBACK)
-
-        if feedback is None:
-            console.display_rule("✅ PRODUCT OWNER APPROVED — proceeding to implementation")
-            return True
-
-        rounds += 1
-        console.display_rule(f"🔁 PRODUCT OWNER REQUESTED CHANGES #{rounds}/{MAX_PRODUCT_OWNER_ITERATIONS}")
-        if rounds >= MAX_PRODUCT_OWNER_ITERATIONS:
-            console.display_rule(
-                f"⛔ PRODUCT OWNER LOOP CAP REACHED ({MAX_PRODUCT_OWNER_ITERATIONS} rounds) — "
-                f"ending the run so a plan that can't satisfy review is visible here instead of "
-                f"looping forever. Fix the plan by hand, or queue a request to keep going."
-            )
-            return False
-
-        ssm.add_message("user", feedback)
-        planner_trigger = get_phase_trigger("planner", initial_goal, ssm.plan_path, po_feedback_given=True)
-        ssm.add_message("user", planner_trigger)
-        if not run_phase(console, llms, ssm, "planner"):
-            return False
-        # Loop back to the top: product_owner reviews the updated plan again.
-
-
 MAX_REVIEW_ITERATIONS = 3
-
-# How many planner<->product_owner rounds this LOCAL loop (see
-# _run_product_owner_loop) allows before giving up and stopping the run --
-# a bad plan that never satisfies Product Owner needs a human, not more
-# rounds. Deliberately its own cap, separate from MAX_REVIEW_ITERATIONS:
-# this loop runs entirely before implementation even starts, so a low cap
-# here costs far less than one on the reviewer's loop (which is guarding a
-# much more expensive planner->imp->testing->reviewer full pass).
-MAX_PRODUCT_OWNER_ITERATIONS = 3
-
-
-def product_owner_feedback_outcome(engine, session_id: str) -> Optional[str]:
-    """
-    Mirrors review_outcome() for the planner<->product_owner loop: a
-    SessionNote(kind=PLAN_FEEDBACK) row means Product Owner found a real
-    problem with the plan and wants the planner to fix it before
-    implementation starts. No row means the plan was approved as-is —
-    return None.
-
-    The returned feedback embeds the report's full content, so the planner
-    sees every point even after the row is cleared away.
-    """
-    report = get_note(engine, session_id, PLAN_FEEDBACK)
-    if report is None:
-        return None
-    return (
-        f"PRODUCT OWNER FEEDBACK: the plan was reviewed against the real repo state before "
-        f"implementation and found wanting. Its feedback:\n\n"
-        f"{report}\n\n"
-        f"Update the plan with new '- [ ]' items (continuing the existing numbering), or adjust "
-        f"existing un-ticked items, to address every point raised above — nothing is ticked yet "
-        f"at this stage, so there is no '- [x]' line to preserve a distinction against."
-    )
-
 
 def review_outcome(engine, session_id: str) -> Optional[str]:
     """
     Post-review decision (1): a SessionNote(kind=REVIEW_REPORT) row means
     the reviewer found issues and wants another full iteration (planner →
-    imp → testing → reviewer). No row means the review was good — return
+    imp → reviewer). No row means the review was good — return
     None to end the run normally.
 
     The returned feedback embeds the report's full content, so the next
@@ -625,9 +138,8 @@ def review_outcome(engine, session_id: str) -> Optional[str]:
     return (
         f"REVIEW FAILED: the reviewer found issues in the finished work. Its report:\n\n"
         f"{report}\n\n"
-        f"Update the plan with new '- [ ]' items (continuing the existing numbering) to fix "
-        f"every issue listed above — do NOT touch any already-ticked '- [x]' lines. Then "
-        f"implement and test those fixes."
+        f"Plan a fix for every issue listed above. Never change or delete a leaf that is "
+        f"already done."
     )
 
 
@@ -687,35 +199,6 @@ def collect_next_iteration(console: AbstractManager, engine=None, session_id: Op
 
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
-
-
-_SESSION_MANAGER_CLASSES = {"simple": SimpleSessionManager, "adaptive": AdaptiveSessionManager}
-
-
-def _session_manager_class(console: AbstractManager):
-    """SESSION_MANAGER=simple|adaptive in .env selects which SessionManager
-    drives a session. Defaults to "adaptive": task-type-specific planning
-    rules (python/javascript/story -- see JFI.session.task_rules) instead
-    of one generic rule block for every goal, which both cuts context cost
-    for smaller models (a javascript task no longer pays for python/story
-    guidance it'll never use, and vice versa) and adds architecture
-    guidance the generic rules never gave (componentization for frontend
-    work, dispatch tables over near-duplicate leaves for python, beat-based
-    decomposition for prose) -- see adaptive_session_manager.py for the
-    real run that motivated this. "simple" opts back into the original
-    one-size-fits-all rules. An unrecognized value logs a hint and falls
-    back to the default, same never-crash-on-a-typo convention as THEME."""
-    raw = os.environ.get("SESSION_MANAGER", "").strip().lower()
-    if not raw:
-        return AdaptiveSessionManager
-    cls = _SESSION_MANAGER_CLASSES.get(raw)
-    if cls is None:
-        console.display_system(
-            f"⚠️  Unknown SESSION_MANAGER={raw!r} in .env (expected 'simple' or "
-            f"'adaptive') — falling back to 'adaptive'."
-        )
-        return AdaptiveSessionManager
-    return cls
 
 
 def _web_bridge_enabled() -> bool:
@@ -848,421 +331,195 @@ def _review_loop_approval_required() -> bool:
     return _env_flag("REVIEW_LOOP_APPROVAL")
 
 
-def _planner_single_pass() -> bool:
-    """PLANNER_SINGLE_PASS=1: escape hatch back to the original one-pass
-    planner (today's combined instructions, one PLANNER_COMPLETE marker)
-    instead of the default 4-stage Architect -> Team Lead -> Journeyman ->
-    Function Breakdown sequence (see run_phase's planner branch and
-    get_system_message's planner_stage param). Off by default: tiering
-    roughly quadruples the planner phase's own LLM-call count in exchange
-    for catching compound leaves (and un-decomposed code leaves) a single
-    pass was observed letting through -- worth it by default, but some runs
-    may prefer the cheaper single pass."""
-    return _env_flag("PLANNER_SINGLE_PASS")
-
-
-def _task_stuck_time_limit() -> float:
-    """TASK_STUCK_TIME_LIMIT_SECONDS override (default
-    DEFAULT_TASK_STUCK_TIME_LIMIT_SECONDS) — see _check_task_stuck. Read
-    fresh each call, same reasoning as _show_stream_prompts."""
-    try:
-        return float(os.environ.get("TASK_STUCK_TIME_LIMIT_SECONDS", DEFAULT_TASK_STUCK_TIME_LIMIT_SECONDS))
-    except ValueError:
-        return DEFAULT_TASK_STUCK_TIME_LIMIT_SECONDS
-
-
-def _task_stuck_token_limit() -> int:
-    """TASK_STUCK_TOKEN_LIMIT override (default DEFAULT_TASK_STUCK_TOKEN_LIMIT)
-    — see _check_task_stuck."""
-    try:
-        return int(os.environ.get("TASK_STUCK_TOKEN_LIMIT", DEFAULT_TASK_STUCK_TOKEN_LIMIT))
-    except ValueError:
-        return DEFAULT_TASK_STUCK_TOKEN_LIMIT
-
-
-def _show_stream_prompts() -> bool:
-    """SHOW_STREAM_PROMPTS=1 (or true/yes/on) in .env: dump the exact
-    messages sent to the LLM every turn — see dump_prompt. Read fresh each
-    call rather than cached: it's checked once per turn at most, never in a
-    hot loop, and a live .env edit (e.g. via Ctrl+N into a fresh process)
-    should still take effect without a restart being required."""
-    return os.environ.get("SHOW_STREAM_PROMPTS", "").strip().lower() in ("1", "true", "yes", "on")
-
-
-def dump_prompt(console: AbstractManager, phase: str, messages: List[Dict[str, Any]]) -> None:
-    """
-    SHOW_STREAM_PROMPTS=1: prints every message about to be sent to the LLM
-    this turn, in full — deliberately untruncated, unlike
-    display_tool_result's 8-line/width-capped preview elsewhere in the
-    console. Meant for prompt-engineering and context-compression
-    debugging, where seeing exactly what the model is about to see (all of
-    it) is the entire point.
-    """
-    console.display_rule(f"PROMPT SENT — {phase_display_name(phase).upper()} ({len(messages)} message(s))")
-    for i, message in enumerate(messages, 1):
-        header = f"[{i}] {message.get('role', '?')}"
-        tool_calls = message.get("tool_calls") or []
-        if tool_calls:
-            names = ", ".join(tc.get("function", {}).get("name", "?") for tc in tool_calls)
-            header += f"  (tool_calls: {names})"
-        if message.get("tool_call_id"):
-            header += f"  (tool_call_id: {message['tool_call_id']})"
-        console.display_system(header)
-
-        content = message.get("content")
-        if isinstance(content, list):
-            # Multimodal content (view_image's follow-up user turn): show the
-            # text parts in full, note images without dumping raw base64.
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") == "text":
-                    console.display_system(str(part.get("text") or ""))
-                elif part.get("type") == "image_url":
-                    console.display_system("(image attached)")
-        elif content:
-            console.display_system(str(content))
-    console.display_rule("END PROMPT")
-
-
-def _log_llm_call_debug() -> bool:
-    """LOG_LLM_CALL_DEBUG=1 (or true/yes/on) in .env: append every LLM
-    request/response pair to .jfi/llm_debug.jsonl -- one JSON
-    object per line, full request (messages + tools) and full response
-    (content + tool_calls), no truncation. Unlike SHOW_STREAM_PROMPTS
-    (console/TUI-only, meant for watching a run live), this persists to
-    disk so a run can be inspected afterward without having had the flag's
-    console output scrolling past at the time. Read fresh each call, same
-    reasoning as _show_stream_prompts."""
-    return _env_flag("LOG_LLM_CALL_DEBUG")
-
-
-def log_llm_call(ssm: SessionManager, phase: str, messages: List[Dict[str, Any]],
-                  tools: Optional[List[Dict[str, Any]]], parsed_response: Dict[str, Any]) -> None:
-    """
-    Appends one JSON-line record of this turn's exact request and response
-    to .jfi/llm_debug.jsonl. Gated by LOG_LLM_CALL_DEBUG -- see
-    _log_llm_call_debug. The log is a debugging aid, not part of the
-    pipeline's contract, so any I/O error here is swallowed rather than
-    interrupting the run (same tradeoff pt_console_manager's own _log
-    makes for run.log).
-    """
-    record = {
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "phase": phase,
-        "request": {"messages": messages, "tools": tools},
-        "response": parsed_response,
-    }
-    try:
-        with open(ssm.session_path / "llm_debug.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-    except OSError:
-        pass
-
-
-def _stuck_task_directive(task_title: str, elapsed_seconds: float, tokens_spent: int) -> str:
-    """Forced message for when the same plan leaf has stayed "current" too
-    long (see _task_stuck_time_limit/_task_stuck_token_limit in run_phase) —
-    tells the model to stop and split THIS leaf into numbered sub-leaves
-    (a leaf numbered 3.1 becomes parent 3.1 with children 3.1.1, 3.1.2,
-    3.1.3, ...) instead of continuing to grind on one oversized item.
-    Reported facts (elapsed minutes / tokens spent) are included so the
-    model doesn't have to guess why it's being interrupted."""
-    return (
-        f"AUTO-RECTIFY: the current task has stayed the same for {elapsed_seconds / 60:.1f} "
-        f"minutes and ~{tokens_spent:,} tokens of re-sent context without being ticked off:\n"
-        f"  {task_title}\n"
-        f"That is a strong sign this leaf was never actually small enough — it hid more work "
-        f"than one focused step (a diagnose-then-fix, several distinct checks bundled together, "
-        f"a fix plus its own verification, ...). Stop whatever you were about to do next and "
-        f"instead, right now: edit the plan file to turn this ONE leaf into a parent with 2 or "
-        f"more numbered sub-leaves — e.g. a leaf numbered 3.1 becomes parent '- 3.1 <original "
-        f"description>' with children '- [ ] 3.1.1 ...', '- [ ] 3.1.2 ...', '- [ ] 3.1.3 ...' and "
-        f"so on (same nesting rule as everywhere else in this plan), each one small enough to "
-        f"finish and verify in a single focused step. The split itself is the required action "
-        f"this turn, before any further tool calls toward actually finishing the work."
-    )
-
-
-#: Architect: one pass, whole tree -- see todo_v1.md §1. Same 4-tuple shape
-#: as PLANNER_NODE_STAGES below (stage name for ssm.set_planner_stage/
-#: get_system_message's planner_stage, completion marker, display label,
-#: header/dashboard status tag) but run exactly once, never per-node --
-#: it's the one stage producing the top-level branches everything else
-#: below walks depth-first, so it can't itself be scoped to a branch yet.
-PLANNER_ARC_STAGE = ("architect", "ARCHITECT_STAGE_COMPLETE", "ARCHITECT", "Arc")
-
-#: The tiered planner's 3 per-branch stages, in order -- (stage name, this
-#: stage's completion marker BASE (node id gets appended, see
-#: _node_scoped_marker), the display label for its transition rule, a short
-#: tag for the header/dashboard's "stage" status field). Run once per
-#: top-level node (see runner.top_level_leaf_ids), each node's own Lead ->
-#: Dev -> Task Planner sequence fully resolved before the next node starts
-#: -- see todo_v1.md §1 for why (smaller context per turn, and Program
-#: Manager can review a branch's tickets as soon as they exist instead of
-#: waiting for the whole tree). "journeyman" (Dev) walks its assigned
-#: node's subtree down to genuinely atomic leaves; "function_breakdown"
-#: (Task Planner) then takes EVERY atomic leaf under that same node --
-#: code-writing or not, see todo_v1.md §3 -- and reduces it to one
-#: mechanically-executable ticket.
-PLANNER_NODE_STAGES = [
-    ("team_lead", "LEAD_STAGE_COMPLETE", "LEAD", "Lead"),
-    ("journeyman", "DEV_STAGE_COMPLETE", "DEV", "Dev"),
-    ("function_breakdown", "TICKETS_STAGE_COMPLETE", "TASK PLANNER", "Tickets"),
-]
-
-#: Bare marker synthetically appended to history (never asked of the model
-#: -- see run_phase) once every top-level node has cleared all of
-#: PLANNER_NODE_STAGES, so phase_completed/get_remaining_phases' own
-#: resumability scan (which looks for exactly f"{phase.upper()}_COMPLETE")
-#: keeps working unchanged even though no single turn ever says this
-#: phrase anymore.
+#: Appended to history once the planner finishes (never asked of the model),
+#: so get_remaining_phases' resume scan, which looks for exactly
+#: f"{phase.upper()}_COMPLETE", moves past the planner.
 PLANNER_PHASE_COMPLETE_MARKER = "PLANNER_COMPLETE"
 
 
-def _node_scoped_marker(base_keyword: str, node_id: int) -> str:
-    """Turns a PLANNER_NODE_STAGES marker BASE (e.g. "LEAD_STAGE_COMPLETE")
-    into the one this specific top-level branch's model turn must say
-    (e.g. "LEAD_STAGE_COMPLETE_NODE_7") -- see todo_v1.md §1. A bare base
-    marker alone can't distinguish "Lead finished node 1" from "Lead
-    finished node 2"; every per-node stage needs its own."""
-    return f"{base_keyword}_NODE_{node_id}"
-
-#: Stage tag shown when PLANNER_SINGLE_PASS=1 opts out of tiering (see
-#: _planner_single_pass) -- the counterpart to PLANNER_ARC_STAGE/
-#: PLANNER_NODE_STAGES' own tags for the one case where "planner" runs as
-#: a single, undifferentiated pass.
-PLANNER_SINGLE_PASS_STAGE_TAG = "Task"
+#: How _run_session records the goal in history, and how _session_goal
+#: finds it again on resume.
+GOAL_PREFIX = "My goal is:"
 
 
-def _drive_turn_loop(console: AbstractManager, llm: BaseLLMStream, ssm: SessionManager,
-                     phase: str, completion_keyword: str, failures: Dict[tuple, int]) -> bool:
-    """
-    Runs turns for one phase (or, for the tiered planner, one STAGE for one
-    top-level BRANCH within "planner" -- see PLANNER_ARC_STAGE/
-    PLANNER_NODE_STAGES/run_phase) until `completion_keyword` appears as a
-    stand-alone marker in the assistant's own content, or the
-    run should stop. Returns True on completion, False if the run should
-    stop early (user interrupt or unrecoverable LLM failure) -- same
-    contract this loop had inline in run_phase before it was extracted to
-    let a tiered planner call it 3x with 3 different markers instead of
-    once with the phase's fixed f"{phase.upper()}_COMPLETE".
+def _session_goal(history: List[Dict[str, Any]]) -> str:
+    """The goal the user typed, from the "My goal is: ..." message. Sessions
+    created while the v1 pipeline existed have its planner instruction
+    after the goal; that's cut off."""
+    for m in history:
+        content = m.get("content")
+        if m.get("role") == "user" and isinstance(content, str) and content.startswith(GOAL_PREFIX):
+            return content[len(GOAL_PREFIX):].rsplit("\n\nBuild the step-by-step plan", 1)[0].strip()
+    return ""
 
-    Callers own everything that happens BEFORE the first turn (status/rule
-    display) and AFTER a True return (marking the phase/stage done) --
-    this only drives the turn-by-turn loop itself.
-    """
-    # Tracks how long/how many re-sent tokens the SAME leaf (current_task)
-    # has stayed current, so a leaf that turns out to hide far more work
-    # than one focused step gets forced to split itself up instead of
-    # grinding indefinitely — see _stuck_task_directive. Local to this one
-    # loop run (like `failures` above): a manual restart, or a new tiered-
-    # planner stage, earns a fresh window, same tradeoff already made for
-    # the failure-retry counter.
-    stuck_task_title = ""
-    stuck_since = time.monotonic()
-    stuck_tokens = 0
-    # Wall-clock (time.time(), not the monotonic stuck_since above) start of
-    # the CURRENT leaf -- rides set_status's task_started_at every turn so a
-    # live viewer can show "running Xm" for the in-progress leaf, and is
-    # handed to record_task_tokens as the just-finished leaf's start once
-    # the NEXT leaf becomes current (see AbstractManager.record_task_tokens'
-    # started_at/ended_at params).
-    task_started_at = time.time()
 
-    while not console.should_stop():
-        # Ctrl+P: hold here, between turns, so an in-flight tool call or LLM
-        # response is never interrupted mid-way.
-        console.wait_while_paused()
-        if console.should_stop():
+ITERATION_FEEDBACK_PREFIX = "USER FEEDBACK FOR ITERATION:\n"
+ITERATION_FEEDBACK_TAIL = "\n\nCall get_plan(), leave every done leaf"
+
+
+def _replan_feedback(history: List[Dict[str, Any]]) -> str:
+    """The iteration feedback (a failed review, queued requests) since the
+    last finished planning round, or "" on the first planning pass. Only the
+    session loop's own feedback messages count -- the phase triggers in
+    between are instructions to the v1 phases, not something the user
+    asked for."""
+    last_done = max((i for i, m in enumerate(history) if m.get("role") == "assistant"
+                     and _marker_present(m.get("content") or "", PLANNER_PHASE_COMPLETE_MARKER)), default=None)
+    if last_done is None:
+        return ""
+    texts = [m["content"][len(ITERATION_FEEDBACK_PREFIX):].rsplit(ITERATION_FEEDBACK_TAIL, 1)[0].strip()
+             for m in history[last_done + 1:]
+             if m.get("role") == "user" and isinstance(m.get("content"), str)
+             and m["content"].startswith(ITERATION_FEEDBACK_PREFIX)]
+    return "\n\n".join(texts)
+
+
+def _role_llms() -> Callable[[str], BaseLLMStream]:
+    """One model client per v2 role, built on first use from its env chain
+    (e.g. ARCHITECT_MODEL, else PLANNER_MODEL, else MODEL)."""
+    from JFI.episode.roles import ROLE_ENV_PREFIXES
+
+    cache: Dict[str, BaseLLMStream] = {}
+
+    def llm_for_role(role: str) -> BaseLLMStream:
+        if role not in cache:
+            cache[role] = make_llm_stream(ROLE_ENV_PREFIXES[role])
+        return cache[role]
+    return llm_for_role
+
+
+#: One judge per session (LAYA in .env), so Laya's checkpoints load once and
+#: stay loaded across planning rounds and imp's re-plans (laya_plan.md D21).
+_JUDGES: Dict[str, Any] = {}
+
+
+def _pool_tools(llm_for_role):
+    """The optional tools (JFI.episode.roles.OPTIONAL_POOL) every episode can
+    load_tool, bound to this session (TOOL_MAP is rebound in _run_session)
+    and, for ask_llm, to the episode's own role model. Before this, no
+    episode was given them, so load_tool had nothing to load."""
+    from JFI.episode.roles import OPTIONAL_POOL
+    from JFI.tool.llm_tools import make_ask_llm
+
+    def tools(role: str) -> Dict[str, Callable]:
+        pool = {name: TOOL_MAP[name] for name in OPTIONAL_POOL if name in TOOL_MAP and name != "ask_llm"}
+        pool["ask_llm"] = make_ask_llm(llm_for_role(role))
+        return pool
+    return tools
+
+
+def _v2_planner(console: AbstractManager, ssm: SessionManager, llm_for_role, feedback: str = ""):
+    from JFI.planner.judge import make_judge
+    from JFI.planner.loop import Planner
+
+    goal = _session_goal(ssm.history)
+    if ssm.session_id not in _JUDGES:
+        _JUDGES[ssm.session_id] = make_judge(goal, llm=llm_for_role("architect"), log=console.display_system)
+    return Planner(console, ssm.db_engine, ssm.session_id, goal, Path(ssm.session_path).parent, llm_for_role,
+                   _JUDGES[ssm.session_id], feedback=feedback, pool_tools=_pool_tools(llm_for_role))
+
+
+def _run_planner(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: SessionManager) -> bool:
+    """The planner (laya_plan.md §2): Architect -> judge -> Lead -> judge ->
+    Task -> judge. Completion is recorded both as DB state (every node GOOD)
+    and as the PLANNER_COMPLETE marker the phase-level resume reads."""
+    console.set_status(phase="planner", state="thinking")
+    console.display_rule("PHASE: PLANNER")
+    result = _v2_planner(console, ssm, _role_llms(), _replan_feedback(ssm.history)).run()
+    if not result.complete:
+        console.display_error(f"Planning did not finish: {result.reason or 'stopped'}.")
+        return False
+    ssm.add_message("assistant", PLANNER_PHASE_COMPLETE_MARKER)
+    console.display_system(f"✅ Phase 'planner' completed ({result.episodes} planner episodes).")
+    console.mark_phase_done("planner")
+    return True
+
+
+#: The shared file/shell tools a Dev episode reuses as they are; everything
+#: else Dev gets comes from the episode tool modules (JFI.imp.dev).
+DEV_V1_TOOLS = ("write_file", "replace_in_file", "execute_command")
+
+
+def _imp(console: AbstractManager, ssm: SessionManager, llm_for_role):
+    from JFI.imp.dev import Imp
+
+    return Imp(console, ssm.db_engine, ssm.session_id, Path(ssm.session_path).parent, llm_for_role("dev"),
+               {**_pool_tools(llm_for_role)("dev"), **{name: TOOL_MAP[name] for name in DEV_V1_TOOLS}},
+               replan=lambda: _v2_planner(console, ssm, llm_for_role).run()).run()
+
+
+def _run_imp(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: SessionManager) -> bool:
+    """Implementation (laya_plan.md §6): one short Dev episode per leaf.
+    IMP_COMPLETE is written from DB state -- every leaf finished (D27) --
+    never from model text."""
+    console.set_status(phase="imp", state="thinking")
+    console.display_rule("PHASE: IMPLEMENTATION")
+    result = _imp(console, ssm, _role_llms())
+    if not result.complete:
+        console.display_error(f"Implementation did not finish: {result.reason or 'stopped'}.")
+        return False
+    ssm.add_message("assistant", "IMP_COMPLETE")
+    console.display_system(f"✅ Phase 'imp' completed ({result.episodes} dev episodes).")
+    console.mark_phase_done("imp")
+    return True
+
+
+#: The session-bound tools the reviewer episode reuses (see JFI.review).
+REVIEWER_BASE_TOOLS = ("execute_command", "start_background_process", "stop_background_process", "get_plan",
+                       "get_reviewer_notes", "write_review_report")
+
+
+def _run_reviewer(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: SessionManager) -> bool:
+    """The reviewer (laya_plan.md §7, G8): one e2e episode. A bug in built
+    code re-opens the leaf that owns it, Dev fixes just that leaf, and the
+    reviewer runs again -- up to MAX_REVIEW_ITERATIONS rounds, then what's
+    still failing becomes a review report. Missing work is a review report
+    straight away; the run's next iteration takes it to the Architect."""
+    from JFI.review import Reviewer
+    from JFI.tool.note_tools import write_review_report
+
+    llm_for_role = _role_llms()
+    console.set_status(phase="reviewer", state="thinking")
+    console.display_rule("PHASE: REVIEWER")
+    reviewer = Reviewer(console, ssm.db_engine, ssm.session_id, Path(ssm.session_path).parent,
+                        llm_for_role("reviewer"), {**_pool_tools(llm_for_role)("reviewer"),
+                                                   **{name: TOOL_MAP[name] for name in REVIEWER_BASE_TOOLS}})
+    for round_no in range(1, MAX_REVIEW_ITERATIONS + 1):
+        result = reviewer.run()
+        if result.verdict == "stopped":
+            console.display_error("The review did not finish (stopped, or the model stopped responding).")
+            return False
+        if result.verdict != "fix":
             break
+        console.display_rule(f"🔁 REVIEW: {len(result.reopened)} leaf(s) re-opened for Dev "
+                             f"(round {round_no}/{MAX_REVIEW_ITERATIONS})")
+        if not _imp(console, ssm, llm_for_role).complete:
+            console.display_error("The fixes did not finish.")
+            return False
+    else:
+        write_review_report(ssm.db_engine, ssm.session_id,
+                            f"The reviewer re-opened leaves for {MAX_REVIEW_ITERATIONS} rounds and the e2e still "
+                            f"fails; see the reviewer notes and the last fix notes.")
+    ssm.add_message("assistant", "REVIEWER_COMPLETE")
+    console.display_system(f"✅ Phase 'reviewer' completed ({result.verdict}).")
+    console.mark_phase_done("reviewer")
+    return True
 
-        drain_forced_input(console, ssm)
-        handle_skip_request(console, ssm, phase)
-        handle_skip_all_request(console, ssm, phase)
-        current_task = ssm.current_task_title(phase) or ""
-        console.set_status(plan=ssm.plan_progress(), phase_plan=ssm.phase_progress(phase),
-                           task=current_task, plan_markdown=_read_plan_markdown(ssm),
-                           task_started_at=task_started_at)
 
-        if current_task != stuck_task_title:
-            # Progress since last turn (ticked a box, or a fresh phase) —
-            # this is a new leaf's own window now. Record what the leaf
-            # that just finished cost before resetting the counter (free
-            # data: stuck_tokens was already being accumulated for the
-            # stuck-task-split trigger below) — see
-            # AbstractManager.record_task_tokens.
-            now = time.time()
-            console.record_task_tokens(stuck_task_title, stuck_tokens,
-                                       started_at=task_started_at, ended_at=now, phase=phase)
-            stuck_task_title = current_task
-            stuck_since = time.monotonic()
-            task_started_at = now
-            stuck_tokens = 0
-        elif current_task:
-            elapsed = time.monotonic() - stuck_since
-            if elapsed > _task_stuck_time_limit() or stuck_tokens > _task_stuck_token_limit():
-                ssm.add_message(
-                    "user", _stuck_task_directive(current_task, elapsed, stuck_tokens)
-                )
-                # Give it a fresh window to actually act on the split rather
-                # than firing again next turn while it's busy doing so; if
-                # it's ignored, the same leaf staying current re-trips this
-                # after another full window.
-                stuck_since = time.monotonic()
-                stuck_tokens = 0
+def _run_cleanup(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: SessionManager) -> bool:
+    """Cleanup (laya_plan.md G12): one episode tidying the working directory."""
+    from JFI.review import run_cleanup
 
-        messages = ssm.get_messages(phase)
-        # get_messages() is what actually runs compress_history() and updates
-        # ssm's last-sent-tokens figure — push it to the header now, not just
-        # when this turn happens to produce tool calls (see the tokens=
-        # set_status calls below): a run of plain-content turns (a model
-        # thinking out loud, an auto-nudge reply, ...) would otherwise leave
-        # ctx showing a stale figure from several turns back.
-        console.set_status(tokens=ssm.token_usage(phase))
-        stuck_tokens += ssm.token_usage(phase)[0]
-        if _show_stream_prompts():
-            dump_prompt(console, phase, messages)
-        turn_tools = _tools_for_session(ssm)
-        attempt = 0
-        while True:
-            try:
-                response = llm.send_message(messages, tools=turn_tools)
-                parsed_response = console.print_agent_response(
-                    response, prompt_tokens_estimate=ssm.estimate_request_tokens(messages)
-                )
-                if _log_llm_call_debug():
-                    log_llm_call(ssm, phase, messages, turn_tools, parsed_response)
-                break
-            except Exception as e:
-                attempt += 1
-
-                if isinstance(e, ResponseTooLongError):
-                    # Blindly resending the identical `messages` after this
-                    # specific failure just invites the same overly-long
-                    # reasoning again (observed in practice: several
-                    # STREAM_OUTPUT_CAP hits in a row on the same turn, with
-                    # no forward progress). This only touches the local copy
-                    # for this retry -- ssm's real history is untouched, so a
-                    # later, unrelated turn starts clean again.
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "AUTO-RECTIFY: your last response was discarded for exceeding the "
-                            "reasoning budget (STREAM_OUTPUT_CAP) before producing a real answer "
-                            "or tool call. Re-sending the identical request risks the identical "
-                            "outcome. This time: skip the lengthy internal debate and commit to "
-                            "ONE concrete action immediately — call a tool, or state the required "
-                            "phase-complete phrase — with minimal deliberation."
-                        ),
-                    })
-
-                if _is_retryable_llm_error(e) and attempt <= LLM_RETRY_LIMIT and not console.should_stop():
-                    console.display_error(
-                        f"LLM request failed (attempt {attempt}/{LLM_RETRY_LIMIT + 1}): "
-                        f"{_format_llm_error(e)} — retrying in {LLM_RETRY_DELAY_SECONDS:.0f}s..."
-                    )
-                    _interruptible_sleep(console, LLM_RETRY_DELAY_SECONDS)
-                    continue
-
-                # Automatic retries are exhausted (or this wasn't a retryable
-                # error at all, e.g. a bad request) -- don't give up and end
-                # the run on the model's/network's say-so. The run only
-                # actually stops now if the user asks it to, either from
-                # this menu or with Ctrl+C; anything else just retries for
-                # as long as it takes.
-                console.display_error(f"LLM request failed: {_format_llm_error(e)}")
-                if console.should_stop():
-                    return False
-                choice = console.get_user_choice(
-                    "LLM request failed. Retry, or stop the run?",
-                    [("r", "Retry now"), ("s", "Stop (progress is saved)")],
-                )
-                if choice == "s" or console.should_stop():
-                    console.request_stop()
-                    return False
-                attempt = 0  # a deliberate manual retry earns a fresh automatic-retry budget
-                continue
-
-        content = parsed_response.get("content")
-        tool_calls = parsed_response.get("tool_calls")
-
-        # An assistant message with neither content nor tool calls is rejected
-        # by most servers when it is replayed, so it must not enter the history.
-        if content or tool_calls:
-            assistant_message: Dict[str, Any] = {"role": "assistant"}
-            if content:
-                assistant_message["content"] = content
-            if tool_calls:
-                assistant_message["tool_calls"] = tool_calls
-            ssm.append_raw(assistant_message)
-
-        # --- HANDLE TOOL CALLS ---
-        if tool_calls:
-            console.set_status(state="running tools")
-
-            for tool_call in tool_calls:
-                tool_result, image_data_url = execute_tool_call(console, ssm, tool_call, failures)
-                console.display_tool_result(tool_result)
-
-                ssm.append_raw({
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "name": tool_call["function"]["name"],
-                    "content": str(tool_result)
-                })
-
-                # view_image succeeded: the tool result above is plain text
-                # (a tool message can't carry image content), so the actual
-                # picture goes in as a follow-up user turn instead — that's
-                # what puts it in front of the model on its next inference.
-                if image_data_url:
-                    ssm.append_raw({
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "(image attached — see the view_image result above for its path)"},
-                            {"type": "image_url", "image_url": {"url": image_data_url}},
-                        ],
-                    })
-
-            console.set_status(state="thinking", plan=ssm.plan_progress(),
-                               phase_plan=ssm.phase_progress(phase), tokens=ssm.token_usage(phase),
-                               task=ssm.current_task_title(phase) or "")
-
-        # --- CHECK FOR COMPLETION ---
-        # Checked even alongside tool calls: ticking the last box and signing
-        # off usually arrive in the same message.
-        if _marker_present(content, completion_keyword):
-            return True
-
-        if tool_calls:
-            continue
-
-        # --- AUTO-NUDGE (STALL PREVENTION) ---
-        if parsed_response.get("had_reasoning") and not content:
-            # The model deliberated but never committed to an action -- and
-            # that deliberation left no trace in history (nothing gets
-            # appended when both content and tool_calls are empty), so next
-            # turn it has zero memory of having just reasoned this through.
-            # A generic "please continue" invites re-deriving the identical
-            # reasoning again; naming the actual failure (thought, didn't
-            # act) is what breaks that loop.
-            ssm.add_message(
-                "user",
-                "AUTO-RECTIFY: your last turn was entirely reasoning — it never produced a real "
-                "reply or a tool call, so nothing was recorded and that reasoning is now lost. "
-                "Stop re-deliberating the same decision. This turn, take exactly ONE concrete "
-                "action (call a tool, or state the required phrase) — do not just think about it "
-                "again."
-            )
-        else:
-            ssm.add_message(
-                "user",
-                f"Please continue your work. Remember, when you are entirely finished with this "
-                f"step, you MUST output the exact phrase: '{completion_keyword}'."
-            )
-
-    return False
+    console.set_status(phase="cleanup", state="thinking")
+    console.display_rule("PHASE: CLEANUP")
+    if not run_cleanup(console, ssm.db_engine, ssm.session_id, Path(ssm.session_path).parent,
+                       _role_llms()("cleanup"), {"execute_command": TOOL_MAP["execute_command"]}):
+        if console.should_stop():
+            return False
+        console.display_error("Cleanup did not finish; the working directory may still have stray files.")
+    ssm.add_message("assistant", "CLEANUP_COMPLETE")
+    console.mark_phase_done("cleanup")
+    return True
 
 
 def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: SessionManager,
@@ -1270,109 +527,19 @@ def run_phase(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: Ses
     """
     Drives one phase to completion. Returns False if the run should stop early
     (user interrupt or LLM failure), True when the phase finished cleanly.
-
-    `llms` maps each phase to its own stream (see PHASE_ENV_PREFIX) — every
-    key resolves to the same shared model/endpoint unless .env sets a
-    per-phase override, so this indexing is a no-op in the common case.
-
-    "planner" runs as 4 internal stages by default -- Architect (top-level
-    shape, one pass) -> then, depth-first per top-level branch: Lead
-    (feature breakdown) -> Dev (genuinely atomic leaves) -> Task Planner
-    (mechanical tickets) -- instead of one combined pass or a breadth-first
-    whole-tree sweep per stage, because both were observed producing
-    compound leaves and/or an enormous per-stage context (see
-    PLANNER_ARC_STAGE/PLANNER_NODE_STAGES and get_system_message's
-    planner_stage docstring, and todo_v1.md §1 for the full rationale).
-    PLANNER_SINGLE_PASS=1 (see _planner_single_pass) opts back into the
-    original one-pass behavior. Every other phase is unaffected either
-    way.
+    Every phase runs as scoped episodes (JFI.planner, JFI.imp, JFI.review);
+    each writes its <PHASE>_COMPLETE marker from DB state, never from model
+    text.
     """
-    llm = llms[phase]
-    # ask_llm delegates to whatever model this phase itself is using — a
-    # phase with its own .env override (PLANNER_MODEL, etc.) gets an ask_llm
-    # backed by that same model, not always the shared default.
-    TOOL_MAP["ask_llm"] = make_ask_llm(llm, console)
-    console.set_status(phase=phase, state="thinking", plan=ssm.plan_progress(),
-                       phase_plan=ssm.phase_progress(phase), tokens=ssm.token_usage(phase),
-                       task=ssm.current_task_title(phase) or "", stage="")
-    console.display_rule(f"PHASE: {phase_display_name(phase).upper()}")
-
-    failures: Dict[tuple, int] = {}
-    tiered_planner = (
-        phase == "planner" and hasattr(ssm, "set_planner_stage") and not _planner_single_pass()
-    )
-
-    if tiered_planner:
-        def _marker_already_in_history(keyword: str) -> bool:
-            return any(
-                m.get("role") == "assistant" and _marker_present(m.get("content") or "", keyword)
-                for m in ssm.history
-            )
-
-        # Architect: one pass, whole tree, unscoped -- same bare-marker
-        # resume check this always used (self._planner_stage is in-memory
-        # only, reset on every fresh process, so nothing else remembers
-        # whether this already ran).
-        arc_stage, arc_keyword, _arc_label, arc_tag = PLANNER_ARC_STAGE
-        if not _marker_already_in_history(arc_keyword):
-            ssm.set_planner_stage(arc_stage)
-            console.set_status(stage=arc_tag)
-            if not _drive_turn_loop(console, llm, ssm, phase, arc_keyword, failures):
-                return False
-
-        # Depth-first per branch (see PLANNER_NODE_STAGES/todo_v1.md §1):
-        # Lead -> Dev -> Task Planner, one top-level node's ENTIRE sequence
-        # resolved before the next node starts -- never a breadth-first
-        # sweep of one stage across the whole tree. Node-scoped markers
-        # (see _node_scoped_marker) make the SAME resume-by-history-scan
-        # approach work per (node, stage) instead of just per stage: a
-        # session stopped mid-branch resumes at the first node+stage pair
-        # whose own marker isn't in history yet, every earlier branch left
-        # untouched.
-        for node_id in top_level_leaf_ids(ssm.db_engine, ssm.session_id):
-            for stage, base_keyword, label, tag in PLANNER_NODE_STAGES:
-                node_keyword = _node_scoped_marker(base_keyword, node_id)
-                if _marker_already_in_history(node_keyword):
-                    continue
-                ssm.set_planner_stage(stage)
-                ssm.set_planner_node(node_id)
-                console.set_status(stage=tag)
-                console.display_rule(f"PLANNER STAGE: {label} — node {node_id}")
-                if not _drive_turn_loop(console, llm, ssm, phase, node_keyword, failures):
-                    return False
-        ssm.set_planner_node(None)
-
-        # Every branch has cleared every stage -- the phase itself is done.
-        # Synthetic (no LLM turn spent on it): phase_completed/
-        # get_remaining_phases' own resumability scan just needs the bare
-        # f"{phase.upper()}_COMPLETE" marker somewhere in history, and
-        # nothing downstream needs to know node-scoped intermediate stages
-        # exist at all -- see PLANNER_PHASE_COMPLETE_MARKER's own
-        # docstring.
-        if not _marker_already_in_history(PLANNER_PHASE_COMPLETE_MARKER):
-            ssm.append_raw({"role": "assistant", "content": PLANNER_PHASE_COMPLETE_MARKER})
-    else:
-        if phase == "planner" and hasattr(ssm, "set_planner_stage"):
-            ssm.set_planner_stage(None)  # PLANNER_SINGLE_PASS=1: today's original combined prompt
-            console.set_status(stage=PLANNER_SINGLE_PASS_STAGE_TAG)
-        completion_keyword = f"{phase.upper()}_COMPLETE"
-        if not _drive_turn_loop(console, llm, ssm, phase, completion_keyword, failures):
-            return False
-
-    console.display_system(f"✅ Phase '{phase}' completed successfully.")
-    console.mark_phase_done(phase)
-    if phase == "planner":
-        ssm.ensure_plan_file()
-    console.set_status(plan=ssm.plan_progress(), phase_plan=ssm.phase_progress(phase),
-                       tokens=ssm.token_usage(phase), task=ssm.current_task_title(phase) or "",
-                       stage="")
-    return True
+    runners = {"planner": _run_planner, "imp": _run_imp, "reviewer": _run_reviewer,
+               "cleanup": _run_cleanup}
+    return runners[phase](console, llms, ssm)
 
 
 def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> None:
     """
     Runs exactly one session end-to-end: gather its name/goal, then drive
-    planner -> imp -> testing -> reviewer -> cleanup, looping on failed
+    planner -> imp -> reviewer -> cleanup, looping on failed
     reviews or queued follow-ups, until the review passes and the idle queue
     stays empty. Returns either because the run should stop for good
     (Ctrl+C, an unrecoverable LLM failure, the review-loop cap) or because
@@ -1388,18 +555,22 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
         if not session_name or console.should_stop():
             return
         try:
-            ssm = _session_manager_class(console)(console, session_name)
+            ssm = SimpleSessionManager(console, session_name)
         except SessionInUseError as e:
             console.display_error(str(e))
     console.set_status(session=session_name)
-    # Optional hook (SimpleSessionManager only, not part of the required
-    # SessionManager interface): lets compress_history's digest tier
-    # LLM-summarize aged-out history using each phase's own configured
-    # model instead of only recording tool/file/command names. A session
-    # manager that doesn't define it just keeps the cheap metadata digest.
-    if hasattr(ssm, "set_llm_streams"):
-        ssm.set_llm_streams(llms)
-
+    if ssm.is_resuming and session_pipeline(ssm.db_engine, ssm.session_id) != "v2":
+        # The v1 pipeline (tiered planner, Program Manager, testing phase) was
+        # removed; its sessions can't be resumed, only exported.
+        console.display_error(f"Session '{session_name}' was created by the old v1 pipeline, which JFI no "
+                              f"longer has. Start a new session (`uv run export-db` still reads the old one).")
+        ssm.release_session_lock()
+        return
+    # The server can reload a model after create-env ran: the first calc run
+    # died with LM Studio at 4,096 tokens while .env said 38,000.
+    context_warning = startup_warning(os.environ)
+    if context_warning:
+        console.display_error(context_warning)
     web_bridge: Optional[WebBridge] = None
     socket_reporter: Optional[SocketReporter] = None
     try:
@@ -1410,16 +581,8 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
         TOOL_MAP.update(make_context_tools(ssm.db_engine, ssm.session_id))
         TOOL_MAP.update(make_process_tools(ssm.db_engine, ssm.session_id))
         TOOL_MAP.update(make_note_tools(ssm.db_engine, ssm.session_id))
-        TOOL_MAP["load_tool"] = make_load_tool(ssm)
-        # DB-backed plan tools (get_plan/add_leaf/start_leaf/mark_leaf_done/
-        # split_leaf/reorder_leaf) -- see JFI.tool.plan_db_tools and SimpleSessionManager.
-        # plan_db_tools(). A manager that doesn't define it (a future
-        # non-DB-backed SessionManager) just leaves these at their
-        # "not available yet" placeholders below.
-        if hasattr(ssm, "plan_db_tools"):
-            TOOL_MAP.update(ssm.plan_db_tools())
-        if hasattr(ssm, "db_engine"):
-            console.start_session_db_log(ssm.db_engine, ssm.session_id)
+        TOOL_MAP.update(ssm.plan_db_tools())  # get_plan / get_leaf, for the reviewer
+        console.start_session_db_log(ssm.db_engine, ssm.session_id)
         if _web_bridge_enabled():
             web_bridge = WebBridge(console, ssm.session_path)
             web_bridge.start()
@@ -1442,12 +605,12 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
             initial_goal = console.safe_get_user_input("What is your goal? (Be as detailed as possible):", multiline=True)
             if not initial_goal or console.should_stop():
                 return
+            ssm.add_message("user", f"{GOAL_PREFIX} {initial_goal}")
 
         # 3. Resumed sessions pick up at the first phase that never completed
         iteration = 1
         console.start_iteration(iteration, PHASES)
-        console.set_status(plan=ssm.plan_progress(), tokens=ssm.token_usage(),
-                           plan_markdown=_read_plan_markdown(ssm))
+        console.set_status(**plan_status_fields(ssm.db_engine, ssm.session_id))
         active_phases = ssm.get_remaining_phases(PHASES)
         skipped = [p for p in PHASES if p not in active_phases]
         for phase in skipped:
@@ -1463,23 +626,6 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
                 console.display_system("All phases have already been completed for this session.")
 
             for phase in active_phases:
-                if phase == "product_owner":
-                    # A separate, tighter loop than the rest of this
-                    # for-loop drives -- see _run_product_owner_loop's own
-                    # docstring for why it owns its own trigger/run_phase
-                    # calls instead of the generic ones below.
-                    if not _run_product_owner_loop(console, llms, ssm, initial_goal):
-                        return
-                    continue
-
-                trigger_message = get_phase_trigger(phase, initial_goal, ssm.plan_path, iteration,
-                                                    review_failed=review_failed)
-
-                # Avoid inserting duplicate trigger if already present in history
-                last_user_msg = next((m.get("content", "") for m in reversed(ssm.history) if m.get("role") == "user"), "")
-                if trigger_message not in last_user_msg:
-                    ssm.add_message("user", trigger_message)
-
                 if not run_phase(console, llms, ssm, phase):
                     return
 
@@ -1515,10 +661,9 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
 
             ssm.add_message(
                 "user",
-                f"USER FEEDBACK FOR ITERATION:\n{feedback}\n\n"
-                f"{ssm.get_project_state_summary()}\n\n"
-                f"The plan file is {ssm.plan_path}. Keep its completed '- [x]' items, add new "
-                f"'- [ ]' items for this request, then implement and test them."
+                f"{ITERATION_FEEDBACK_PREFIX}{feedback}\n\n"
+                f"{ssm.get_project_state_summary()}{ITERATION_FEEDBACK_TAIL} as it is and plan only the new "
+                f"work."
             )
             # Fresh pass: the header rewinds to planner and counts the loop.
             iteration += 1
@@ -1605,7 +750,10 @@ def main():
     # Load the project's .env from an explicit path (searched upward from the
     # current working directory) BEFORE any console/theme code runs, so a user
     # setting THEME=... in their .env is honored no matter how JFI was launched.
-    load_dotenv(find_dotenv())
+    # usecwd=True: without it, find_dotenv searches upward from THIS file's
+    # folder when run from source, so `uv run jfi` in a project never saw that
+    # project's .env (the frozen binary already used the cwd).
+    load_dotenv(find_dotenv(usecwd=True))
 
     console = PromptToolkitConsoleManager()
     # One stream per phase (see PHASE_ENV_PREFIX) — each falls back to the

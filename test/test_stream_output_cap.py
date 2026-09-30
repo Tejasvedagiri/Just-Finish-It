@@ -77,6 +77,6 @@ def test_non_numeric_env_value_falls_back_to_the_default(monkeypatch):
 
 
 def test_is_retryable_llm_error_treats_response_too_long_as_retryable():
-    from JFI.runner import _is_retryable_llm_error
+    from JFI.llm.retry import is_retryable as _is_retryable_llm_error
 
     assert _is_retryable_llm_error(ResponseTooLongError("too long")) is True

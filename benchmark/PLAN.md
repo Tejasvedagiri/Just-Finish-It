@@ -5,7 +5,7 @@ local models. The context-size mismatch described below (the original reason for
 was found and fixed; a full 9-task run against `google/gemma-4-12b` (correctly reloaded at
 80128 context) completed with real crash-loop/recovery behavior observed and self-healed via
 `STREAM_OUTPUT_CAP`/`REASONING_OUTPUT_CAP`. A second full run against
-`qwen3.8-27b-ultra-uncensored-heretic-native-mtp-preserved` (40000 context) passed all 9
+`qwen/qwen3.8-27b` (40000 context) passed all 9
 tasks cleanly -- 0 plan rewrites, 0 stalls, 0 crashes across every task. Since then the
 benchmark has been substantially expanded: `polyglot` now spans Python + JavaScript (10
 tasks, up from 3), and two new tiers were added -- `webapp` (React via CDN + jsdom behavioral

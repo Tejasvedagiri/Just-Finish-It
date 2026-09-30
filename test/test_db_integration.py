@@ -18,7 +18,6 @@ from datetime import timedelta
 from sqlmodel import select
 
 from JFI.models import (
-    ActivityEvent,
     BackgroundProcess,
     ContextEntry,
     DonePhase,
@@ -87,7 +86,6 @@ def _seed_dummy_session(engine, session_id: str) -> None:
         ))
         db.add(LogEvent(session_id=session_id, seq=2, tag="rule", text="PHASE: IMPLEMENT"))
         db.add(LogEvent(session_id=session_id, seq=4, tag="assistant", text="Building the OPERATORS table."))
-        db.add(ActivityEvent(session_id=session_id, severity="good", text="ticked 1/2"))
         db.commit()
 
         root = Leaf(session_id=session_id, parent_id=None, phase=Phase.IMP, sort_key=10, description="Core arithmetic")
@@ -136,7 +134,6 @@ class TestDummySessionEndToEnd:
             done_phases = list(db.exec(select(DonePhase).where(DonePhase.session_id == session_id)))
             messages = list(db.exec(select(HistoryMessage).where(HistoryMessage.session_id == session_id)))
             log_events = list(db.exec(select(LogEvent).where(LogEvent.session_id == session_id)))
-            activity_events = list(db.exec(select(ActivityEvent).where(ActivityEvent.session_id == session_id)))
             leaves = list(db.exec(select(Leaf).where(Leaf.session_id == session_id)))
 
         # SessionRecord
@@ -162,9 +159,6 @@ class TestDummySessionEndToEnd:
         assistant_msg = next(m for m in messages if m.role == "assistant")
         assert assistant_msg.tool_calls[0]["function"]["name"] == "write_file"
         assert log_events[0].text == "PHASE: IMPLEMENT"
-
-        # ActivityEvent
-        assert activity_events[0].text == "ticked 1/2"
 
         # Leaf tree + display numbering
         assert len(leaves) == 3

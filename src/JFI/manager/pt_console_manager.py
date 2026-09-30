@@ -7,7 +7,6 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from prompt_toolkit.application import Application
@@ -27,7 +26,7 @@ from JFI.tool.process_tools import snapshot_processes
 from JFI.manager.abstract_manager import AbstractManager, ResponseTooLongError, phase_display_name
 from JFI.manager.key_bindings import add_shift_enter_newline, teach_terminal_shift_enter
 from JFI.manager.theme_env import resolve_explicit_theme, theme_label
-from JFI.text_sanitize import strip_leaked_special_tokens
+from JFI.utils.text_sanitize import strip_leaked_special_tokens
 
 teach_terminal_shift_enter()
 
@@ -386,7 +385,8 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._iteration = 1
         self._plan = None  # (ticked, total) checkbox progress, whole plan
         self._phase_plan = None  # (ticked, total) checkbox progress, current phase's section only
-        self._plan_markdown: Optional[str] = None  # raw plan.md text, for a remote checklist view
+        self._plan_markdown: Optional[str] = None  # the plan as checklist markdown, for a remote view
+        self._plan_detail: Optional[dict] = None  # Task | Judge rows, runbook, design -- see set_status
         self._task: Optional[str] = None  # current plan item's text (imp/testing only)
         self._task_started_at: Optional[float] = None  # wall-clock start of the current task
         self._stage: str = ""  # short sub-phase tag, e.g. planner's Arc/Lead/Journy/Func/Task
@@ -419,12 +419,6 @@ class PromptToolkitConsoleManager(AbstractManager):
         # Ctrl+P (pause/resume): checked between turns in runner.run_phase,
         # never mid-turn, so an in-flight LLM call/tool always finishes first.
         self._paused = threading.Event()
-        # Ctrl+K (skip one item) / Ctrl+Q (skip the rest of this phase):
-        # edit the plan file directly instead of asking the model to comply
-        # (see SimpleSessionManager.skip_current_task/skip_remaining_tasks),
-        # so the skip is guaranteed rather than merely requested.
-        self._skip_requested = threading.Event()
-        self._skip_all_requested = threading.Event()
         self._app: Optional[Application] = None
         self._worker_error: Optional[BaseException] = None
 
@@ -560,17 +554,6 @@ class PromptToolkitConsoleManager(AbstractManager):
                 self._paused.set()
                 self._line("class:out.system", " ⏸  Paused — will hold before the next turn.")
             self._invalidate()
-
-        # No prompt_toolkit binding for c-k reuses this app's "delete to end
-        # of line" binding — deliberate: this app has no use for kill/yank,
-        # and Ctrl+K reads naturally as "skip this one".
-        @kb.add("c-k", filter=phase_active)
-        def _skip_one(event):
-            self._skip_requested.set()
-
-        @kb.add("c-q", filter=phase_active)
-        def _skip_all(event):
-            self._skip_all_requested.set()
 
         return kb
 
@@ -833,7 +816,7 @@ class PromptToolkitConsoleManager(AbstractManager):
             if idle_wait:
                 hint += " · Ctrl+N new session"
             else:
-                hint += " · Ctrl+K skip task · Ctrl+P pause · Ctrl+Q skip all"
+                hint += " · Ctrl+P pause"
         frags.append(("class:status", hint))
         return frags
 
@@ -950,27 +933,10 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._line("class:out.user", f"🧑 you ▸ {text}")
         self._log("USER", text)
 
-    def display_assistant(self, text: str) -> None:
-        self._line("class:out.assistant", f"🤖 {text}")
-        self._log("ASSISTANT", text)
-
     def display_system(self, text: str) -> None:
         for line in str(text).splitlines() or [""]:
             self._line("class:out.system", f" ⚙  {line}")
         self._log("SYSTEM", text)
-
-    def display_stream(self, text: str) -> None:
-        """Real live streaming, same primitive print_agent_response uses for
-        the main turn's own response (`_write` merges into the current
-        block instead of starting a new timestamped line) -- deliberately
-        NOT logged per-chunk (no `_log` call here, unlike display_system):
-        callers stream chunk-by-chunk as they arrive, then log the
-        complete text once via a separate display_system/display_rule call
-        once it's fully assembled (see _summarize_with_llm)."""
-        self._write("class:out.assistant", text)
-
-    def log_stream_result(self, tag: str, text: str) -> None:
-        self._log(tag, text)
 
     def display_error(self, text: str) -> None:
         self._line("class:out.error", f" ✗  {text}")
@@ -1095,8 +1061,9 @@ class PromptToolkitConsoleManager(AbstractManager):
         this request's messages (plus tool schemas) cost — used for the
         read/written header counters only when the server never reports real
         ``usage`` (most OpenAI-compatible servers omit it in streaming mode
-        unless ``stream_options.include_usage`` was requested, which isn't
-        universally supported, so we don't require it).
+        unless ``stream_options.include_usage`` was requested -- which
+        OpenAICompatableStream now does, falling back to no request on
+        servers that reject the option).
 
         Raises :class:`ResponseTooLongError` if the running char/4 estimate
         of what's streamed so far crosses ``STREAM_OUTPUT_CAP`` (default
@@ -1113,6 +1080,7 @@ class PromptToolkitConsoleManager(AbstractManager):
         reasoning_started = False
         tool_calls_dict: Dict[int, Dict[str, Any]] = {}
         usage_seen = False
+        reported_usage = None
         streamed_chars = 0
         reasoning_chars = 0
         cap = self._stream_output_cap()
@@ -1128,6 +1096,8 @@ class PromptToolkitConsoleManager(AbstractManager):
             usage = getattr(chunk, "usage", None)
             if usage is not None:
                 usage_seen = True
+                reported_usage = {"prompt_tokens": usage.prompt_tokens or 0,
+                                  "completion_tokens": usage.completion_tokens or 0}
                 with self._lock:
                     self._tokens_read += usage.prompt_tokens or 0
                     self._tokens_written += usage.completion_tokens or 0
@@ -1259,6 +1229,11 @@ class PromptToolkitConsoleManager(AbstractManager):
             # reasoning near-verbatim turn after turn. Surfacing this lets
             # runner.py give a pointed nudge instead of the generic one.
             "had_reasoning": reasoning_started,
+            # The server's own token counts for this request when it sent them
+            # (OpenAICompatableStream asks via stream_options.include_usage);
+            # None when it didn't. The v2 episode budget prefers these over
+            # the chars/4 estimate, which can be 20-30% off on code.
+            "usage": reported_usage,
         }
 
     # ------------------------------------------------------- queue & status
@@ -1277,18 +1252,6 @@ class PromptToolkitConsoleManager(AbstractManager):
     def drain_forced_input(self) -> List[str]:
         """Lines the user pushed to the front; belong in the AI's next turn."""
         return self._drain(self._forced)
-
-    def drain_skip_request(self) -> bool:
-        if self._skip_requested.is_set():
-            self._skip_requested.clear()
-            return True
-        return False
-
-    def drain_skip_all_request(self) -> bool:
-        if self._skip_all_requested.is_set():
-            self._skip_all_requested.clear()
-            return True
-        return False
 
     def drain_queued_input(self) -> List[str]:
         """The default queue, replayed as a new iteration after the review phase."""
@@ -1383,7 +1346,7 @@ class PromptToolkitConsoleManager(AbstractManager):
                    plan: Optional[tuple] = None, phase_plan: Optional[tuple] = None,
                    tokens: Optional[tuple] = None, task: Optional[str] = None,
                    stage: Optional[str] = None, plan_markdown: Optional[str] = None,
-                   task_started_at: Optional[float] = None) -> None:
+                   task_started_at: Optional[float] = None, plan_detail: Optional[dict] = None) -> None:
         with self._lock:
             if plan is not None:
                 self._plan = plan
@@ -1391,6 +1354,8 @@ class PromptToolkitConsoleManager(AbstractManager):
                 self._phase_plan = phase_plan
             if plan_markdown is not None:
                 self._plan_markdown = plan_markdown
+            if plan_detail is not None:
+                self._plan_detail = plan_detail
             if tokens is not None:
                 self._tokens = tokens
             if task is not None:
@@ -1496,11 +1461,12 @@ class PromptToolkitConsoleManager(AbstractManager):
                 # tasks-vs-tokens heatmap and a live log tail.
                 "task_history": list(self._task_history),
                 "log_tail": list(self._log_tail),
-                # Raw plan.md text -- a remote fleet-dashboard viewer has no
-                # filesystem access to this machine, so the full checklist
-                # (not just the [done, total] counts above) has to ride
-                # along in the snapshot too. See set_status's plan_markdown.
+                # The plan itself -- a remote fleet-dashboard viewer can't
+                # read this machine's DB, so the checklist and the Task |
+                # Judge rows (not just the [done, total] counts above) ride
+                # along in the snapshot. See set_status.
                 "plan_markdown": self._plan_markdown,
+                "plan_detail": self._plan_detail,
             }
 
     def submit_external_answer(self, key: str) -> None:

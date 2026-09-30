@@ -62,7 +62,7 @@ def test_main_builds_one_llm_stream_per_phase_honoring_overrides(monkeypatch):
     assert reviewer.temperature == "0.2"
     assert reviewer.stream_service.base_url.host == "reviewer.example"
 
-    for phase in ("planner", "imp", "testing", "cleanup"):
+    for phase in ("planner", "imp", "cleanup"):
         stream = llms[phase]
         assert stream.model == "shared-model"
         assert stream.temperature == "0.7"

@@ -13,7 +13,7 @@ never could be.
 `awaiting_prompt`/`awaiting_options` stay fields here rather than their own
 table: there is only ever ONE current awaiting prompt per session (never a
 history worth separate rows -- once answered it's just cleared, and the
-transition itself is already captured as a LogEvent/ActivityEvent), so a
+transition itself is already captured as a LogEvent), so a
 table would model something with no multi-row shape.
 """
 
@@ -40,6 +40,9 @@ class SessionRecord(SQLModel, table=True):
     state: Optional[str] = None  # "streaming"/"thinking"/"running tools"/"idle · queue empty"/...
 
     iteration: int = 1
+    # "v1" = the original pipeline, "v2" = laya_plan.md's. Sessions created
+    # before v2 existed read as v1 and keep the old code path (G16a).
+    pipeline_version: str = "v1"
     queue_size: int = 0
     is_paused: bool = False
 
