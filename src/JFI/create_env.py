@@ -589,7 +589,7 @@ def _configure_pipeline(values: dict, updates: dict, sizing: dict | None = None)
     if not _laya_installed():
         print("   (the laya extra isn't installed: LAYA=1 does nothing until `uv sync --extra laya`)")
     if _flag(values, updates, "LAYA",
-             "Add Laya's score to the rule judge (LAYA; needs `uv sync --extra laya`, not in the binary)?"):
+             "Add Laya's score to the rule judge (LAYA; from source needs `uv sync --extra laya`)?"):
         if "LAYA_DEVICE" in sizing:
             _ask(values, updates, sizing["LAYA_DEVICE"])
         else:

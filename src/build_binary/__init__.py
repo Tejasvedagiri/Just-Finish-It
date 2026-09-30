@@ -1,8 +1,12 @@
-"""Builds a standalone `jfi` binary with PyInstaller — no Python install
-needed on the machine that runs it, unlike the `./JFI` launcher (which still
-needs a system Python to bootstrap its own venv).
+"""Builds a standalone `jfi` binary with PyInstaller — no Python or uv
+needed on the machine that runs it.
 
-Usage: `uv run build` (wired up via [project.scripts] in pyproject.toml).
+It bundles everything, the optional parts included: the Streamlit dashboard
+(`jfi-web`), Laya for the planner's judge (`LAYA=1`: torch + transformers,
+several GB), and websockets for the fleet dashboard. The build refuses to run
+without them rather than silently shipping a binary that lacks them.
+
+Usage: `uv sync --extra web --extra laya --group dev`, then `uv run build`.
 Output lands at dist/jfi (or dist/jfi.exe on Windows).
 """
 
@@ -14,7 +18,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ENTRY_POINT = PROJECT_ROOT / "src" / "JFI" / "runner.py"
 DASHBOARD_SRC = PROJECT_ROOT / "src" / "JFI" / "web" / "dashboard.py"
 BINARY_NAME = "jfi"
-EXCLUDED_MODULES = ("laya", "torch", "transformers")
+# Optional parts the binary must carry: module -> the extra that installs it.
+# The user: "Make sure you bundle laya and websocket" / "I need streamlit too".
+REQUIRED = {"streamlit": "web", "laya": "laya"}
+# Laya's checkpoints are ModernBERT encoders; transformers imports a model's
+# code by name when the checkpoint loads, which static analysis can't see.
+LAYA_MODEL_PACKAGES = ("transformers.models.modernbert",)
+
+
+def _missing_extras() -> list[str]:
+    import importlib.util
+    return [extra for module, extra in REQUIRED.items() if importlib.util.find_spec(module) is None]
 
 
 def main() -> None:
@@ -30,6 +44,16 @@ def main() -> None:
 
     if not ENTRY_POINT.exists():
         print(f"Entry point not found: {ENTRY_POINT}", file=sys.stderr)
+        raise SystemExit(1)
+
+    missing = _missing_extras()
+    if missing:
+        print(
+            f"The binary bundles the {', '.join(missing)} extra(s), which aren't installed here. Run\n"
+            "  uv sync --extra web --extra laya --group dev\n"
+            "(every extra in one command: uv sync drops any extra it isn't told about), then build again.",
+            file=sys.stderr,
+        )
         raise SystemExit(1)
 
     build_dir = PROJECT_ROOT / "build" / "pyinstaller"
@@ -55,35 +79,20 @@ def main() -> None:
         "--collect-all", "prompt_toolkit",
         "--collect-all", "openai",
         "--collect-all", "playwright",
+        # Imported lazily inside the fleet reporter's thread.
+        "--collect-all", "websockets",
+        # Laya and its model code; torch and transformers come in through
+        # their own PyInstaller hooks.
+        "--collect-all", "laya",
     ]
-    # Laya (the `laya` extra) pulls in torch + transformers -- gigabytes -- so
-    # the binary never bundles it, even when the extra is synced in this build
-    # environment. JFI.planner.judge imports it lazily and falls back to its
-    # fixed rule when it's missing (laya_plan.md D22).
-    for module in EXCLUDED_MODULES:
-        args += ["--exclude-module", module]
+    for package in LAYA_MODEL_PACKAGES:
+        args += ["--collect-submodules", package]
 
-    # Bundling streamlit makes the standalone binary self-sufficient for the
-    # web dashboard too: runner._launch_web_dashboard re-invokes this same
-    # binary with a hidden --internal-web-dashboard flag when no separate
-    # `jfi-web` is on PATH (see JFI.web.launcher._dashboard_path), so
-    # JFI_WEB_BRIDGE=1 "just works" with nothing else installed. Only done
-    # when streamlit is actually present in THIS build environment (the
-    # `web` extra is optional -- `uv sync --extra web` before building);
-    # skipped otherwise so a build without it still succeeds, just without
-    # that self-contained dashboard (falls back to needing `jfi-web`
-    # installed separately, exactly as before this existed).
-    try:
-        import streamlit  # noqa: F401
-    except ImportError:
-        print(
-            "Note: 'streamlit' isn't installed in this environment, so the built binary "
-            "won't be able to serve the web dashboard on its own (JFI_WEB_BRIDGE=1 will still "
-            "write status files, but auto-launching jfi-web needs it installed separately). "
-            "Run 'uv sync --extra web' first to bundle it in.",
-        )
-    else:
-        args += ["--collect-all", "streamlit", "--add-data", f"{DASHBOARD_SRC}:JFI/web"]
+    # Bundling streamlit makes the binary self-sufficient for the web
+    # dashboard: runner._launch_web_dashboard re-invokes this same binary with
+    # a hidden --internal-web-dashboard flag when no separate `jfi-web` is on
+    # PATH (see JFI.web.launcher._dashboard_path).
+    args += ["--collect-all", "streamlit", "--add-data", f"{DASHBOARD_SRC}:JFI/web"]
 
     args += [
         "--distpath", str(PROJECT_ROOT / "dist"),

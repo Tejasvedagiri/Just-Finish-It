@@ -66,7 +66,7 @@ every node gets two scores:
 | disagree, Laya less sure | the rule | `rule` |
 
 REDO can only come from Laya, through the tie-break. Without `LAYA=1`, or
-without the `laya` extra (including in the binary), the rule decides alone
+without the `laya` extra (a source install that didn't sync it; the binary always has it), the rule decides alone
 and the judge says so once. Laya runs on `LAYA_DEVICE` (cpu by default), loaded
 once per session.
 

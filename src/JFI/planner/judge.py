@@ -280,7 +280,7 @@ def _tiebreak(llm, goal: str, disputed: List[tuple]) -> Dict[int, str]:
 def make_judge(goal: str, llm=None, log: Callable[[str], None] = print):
     """The planner's judge: the rule alone, or with LAYA=1 in .env the rule
     and Laya, tie-broken by `llm`. Laya is the optional `laya` extra; without
-    it -- e.g. in the jfi.exe binary, which never bundles it -- the rule
+    it (a source install without `uv sync --extra laya`) the rule
     decides, and the judge says so once."""
     if not _env_flag("LAYA"):
         log("Planner judge: the rule (LAYA=1 in .env adds Laya).")

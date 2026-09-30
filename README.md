@@ -120,11 +120,11 @@ Answer two prompts — a **session name** and your **goal** (be as detailed as y
 ### 6. Build a standalone binary (optional)
 
 ```bash
-uv sync --extra web --group dev
+uv sync --extra web --extra laya --group dev
 uv run build        # -> dist/jfi  (dist/jfi.exe on Windows)
 ```
 
-`dist/jfi` runs without Python or uv installed. Put it on your `PATH`, then in your project folder (with its `.env`) just run `jfi`. It bundles whichever extras were synced when you built it — except Laya, which is never bundled (too large), so the binary's judge is always the rule. See [`uv run build`](#uv-run-build--standalone-binary).
+`dist/jfi` runs without Python or uv installed. Put it on your `PATH`, then in your project folder (with its `.env`) just run `jfi`. It bundles everything, the optional parts included: the Streamlit dashboard, Laya for `LAYA=1` (torch + transformers, so the binary is several GB), and websockets for the fleet. The build stops with the `uv sync` command to run if any of them is missing. See [`uv run build`](#uv-run-build--standalone-binary).
 
 ### Configuration (`.env`)
 
@@ -282,7 +282,7 @@ The dashboard also shows `plan.md`'s checklist progress and the latest `review.m
 `jfi-web` needs a shared filesystem between the session and the dashboard. The fleet dashboard doesn't: its master is a small Node WebSocket server meant to run on its own machine (or just a different terminal) and watch *multiple* sessions, anywhere, over the network — a session and the master only ever talk over one socket, never files. The master lives in its own standalone repo, `Just-Finish-It-Fleet`, not this one and not Python — JFI (Python) sessions are pure WebSocket clients of it, so the wire protocol (plain WebSocket + JSON) is all that connects the two; nothing on the Python side cares what language the master is written in, or where its code lives.
 
 ```bash
-uv sync --extra master                              # pulls in websockets, for the Python client side
+# websockets is a base dependency: nothing extra to sync for the fleet client
 git clone https://github.com/Tejasvedagiri/Just-Finish-It-Fleet.git ../Just-Finish-It-Fleet
 cd ../Just-Finish-It-Fleet && npm install && npm run build   # build the fleet UI once
 npm run master                                      # serves it on :8765 (MASTER_PORT to change)
@@ -314,11 +314,11 @@ A theme dropdown top-right switches the whole palette — the same 20 presets `T
 Builds a single native `jfi` executable with PyInstaller — the machine that runs it needs no Python or uv at all.
 
 ```bash
-uv sync --group dev   # pulls in pyinstaller
+uv sync --extra web --extra laya --group dev   # everything the binary bundles, plus pyinstaller
 uv run build          # -> dist/jfi
 ```
 
-The binary is a onefile build of `src/JFI/runner.py`, bundling prompt_toolkit, the openai client, and every other dependency — plus the optional extras that were synced when you built it (Streamlit for `jfi-web`, `websockets` for the fleet), but never Laya. It reads the `.env` in the folder it's started from, like `uv run jfi`. Build logic lives in `src/build_binary/__init__.py`.
+The binary is a onefile build of `src/JFI/runner.py`, bundling prompt_toolkit, the openai client, and every other dependency — including the optional ones: Streamlit (for `jfi-web`), Laya with torch and transformers (for `LAYA=1`), and websockets (for the fleet). `uv run build` refuses to run without them. Laya's checkpoint itself isn't bundled: it downloads from Hugging Face the first time `LAYA=1` runs. It reads the `.env` in the folder it's started from, like `uv run jfi`. Build logic lives in `src/build_binary/__init__.py`.
 
 ---
 

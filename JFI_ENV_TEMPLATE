@@ -212,7 +212,7 @@ MODEL=qwen3:8b
 # and loaded once per session). They agree: that's the verdict. They disagree and
 # Laya is at least LAYA_MIN_CONFIDENCE sure: one short LLM call (the Architect's
 # model) breaks the tie. Otherwise the rule decides. Without the `laya` extra
-# -- including in the `uv run build` binary, which never bundles it -- the rule
+# (a source install without `uv sync --extra laya`; the binary always bundles it) the rule
 # decides alone. See laya_plan.md §5.
 
 # 1: the rule + Laya (+ the LLM tie-break). Unset (default): the rule alone.

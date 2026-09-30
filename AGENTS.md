@@ -209,11 +209,13 @@ venv, not system Python. If you're unsure a command is right, try
 
 ## `uv sync --extra` — list every extra you want, every time
 
-`uv sync --extra web` **removes** any other extra (e.g. `master`,
+`uv sync --extra web` **removes** any other extra (e.g. `laya`,
 `anthropic`) that was previously synced but isn't named in that exact
 command — it's not additive across separate invocations. Always list every
-extra you need together: `uv sync --extra web --extra master --extra
-anthropic --group dev`.
+extra you need together: `uv sync --extra web --extra laya --extra
+anthropic --group dev`. (`websockets`, once the `master` extra, is a base
+dependency now for exactly this reason. `uv run build` needs `web` and
+`laya` and refuses to run without them.)
 
 ## Testing philosophy observed in this repo
 
