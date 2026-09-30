@@ -4,7 +4,7 @@ capped preview elsewhere in the console."""
 
 import pytest
 
-from JFI.runner import _show_stream_prompts, dump_prompt
+from JFI.episode.engine import _show_stream_prompts, dump_prompt
 
 
 class _RecordingConsole:

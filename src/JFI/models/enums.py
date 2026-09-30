@@ -10,8 +10,9 @@ from enum import Enum
 
 
 class Phase(str, Enum):
-    """Mirrors PHASES in Just-Finish-It-Fleet's src/main.js and PHASE_SECTION's keys in
-    simple_session_manager.py -- keep all three in sync if this ever changes."""
+    """Every phase a session has ever had. runner.PHASES (and PHASES in
+    Just-Finish-It-Fleet's src/main.js) are the v2 four; PRODUCT_OWNER and
+    TESTING stay so export-db can still read v1 sessions."""
 
     PLANNER = "planner"
     PRODUCT_OWNER = "product_owner"
@@ -22,9 +23,8 @@ class Phase(str, Enum):
 
 
 class LeafStatus(str, Enum):
-    """Mirrors plan.md's three checkbox markers today: "- [ ]" (TODO),
-    "- [x]" (DONE), "- [○]" (SKIPPED, Ctrl+K) -- see PLAN_FORMAT_RULES in
-    simple_session_manager.py for the markdown-era equivalents this replaces."""
+    """A leaf's progress, rendered as the checklist's three markers:
+    "- [ ]" (TODO), "- [x]" (DONE), "- [○]" (SKIPPED)."""
 
     TODO = "todo"
     DONE = "done"

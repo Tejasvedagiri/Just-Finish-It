@@ -1,5 +1,5 @@
-"""Session lifecycle tests: folder creation, resume, metadata round-trip,
-file tracking, and history persistence across manager instances."""
+"""Session lifecycle tests: folder creation, resume, the queued-requests
+round-trip, and history persistence across manager instances."""
 
 
 def test_constructor_creates_jfi_session_folder(manager):
@@ -30,52 +30,26 @@ def test_resume_flag_reflects_existing_history(make_manager, manager):
     assert len(resumed.history) == 1
 
 
-def test_metadata_round_trip(make_manager):
+def test_queued_requests_round_trip(make_manager):
     first = make_manager("meta")
-    assert first.metadata["implemented_files"] == []
+    assert first.load_queued_requests() == []
 
-    first.track_file("src/a.py")
-    first.save_metadata()
+    first.save_queued_requests(["add a dark mode", "fix the footer"])
 
-    # Metadata is DB-backed now (JFI.session.metadata_store) -- a second
-    # manager for the same session_id reads it back from the shared
-    # project-root .JFI.db, not from a metadata.json file on disk.
-    second = make_manager("meta")
-    loaded = second.load_metadata()
-    assert "src/a.py" in loaded["implemented_files"]
+    # Metadata is DB-backed (JFI.session.metadata_store): a second manager
+    # for the same session_id reads it back from the project's .jfi/JFI.db.
+    assert make_manager("meta").load_queued_requests() == ["add a dark mode", "fix the footer"]
 
 
-def test_track_file_dedupes_and_persists(make_manager):
-    ssm = make_manager("track")
-    ssm.track_file("x.py")
-    ssm.track_file("y.py")
-    ssm.track_file("x.py")  # duplicate must not be appended again
-    assert ssm.metadata["implemented_files"] == ["x.py", "y.py"]
-
-    reloaded = make_manager("track").load_metadata()
-    assert reloaded["implemented_files"] == ["x.py", "y.py"]
-
-
-def test_track_file_empty_path_is_ignored(make_manager):
-    ssm = make_manager("empty")
-    ssm.track_file("")
-    assert ssm.metadata["implemented_files"] == []
-
-
-def test_get_project_state_summary_lists_tracked_files(make_manager):
-    ssm = make_manager("summary")
-    assert "No files have been tracked yet." in ssm.get_project_state_summary()
-
-    ssm.track_file("src/b.py")
-    summary = ssm.get_project_state_summary()
-    assert "- src/b.py" in summary
-    assert "CURRENT PROJECT FILES:" in summary
+def _append(ssm, message):
+    ssm.history.append(message)
+    ssm.save_history()
 
 
 def test_history_persistence_across_instances(make_manager):
     first = make_manager("hist")
     first.add_message("user", "turn one")
-    first.append_raw({"role": "assistant", "content": "turn two"})
+    _append(first, {"role": "assistant", "content": "turn two"})
 
     second = make_manager("hist")
     assert [m["content"] for m in second.history] == ["turn one", "turn two"]
@@ -101,7 +75,7 @@ def test_save_history_appends_instead_of_rewriting(make_manager, monkeypatch):
     ssm = make_manager("append-only")
     ssm.add_message("user", "one")
     ssm.add_message("user", "two")
-    ssm.append_raw({"role": "assistant", "content": "three"})
+    _append(ssm, {"role": "assistant", "content": "three"})
 
     assert [b[0]["content"] for b in seen_batches] == ["one", "two", "three"]
     # No call ever saw more than the single new message that triggered it.
@@ -147,7 +121,7 @@ class TestDanglingToolCallRepair:
     def test_repairs_assistant_message_with_zero_recorded_results(self, make_manager):
         ssm = make_manager("crash1")
         ssm.add_message("user", "goal")
-        ssm.append_raw({
+        _append(ssm, {
             "role": "assistant", "content": "",
             "tool_calls": [{"id": "call_1", "type": "function",
                              "function": {"name": "write_file", "arguments": "{}"}}],
@@ -165,14 +139,14 @@ class TestDanglingToolCallRepair:
         the already-recorded result untouched."""
         ssm = make_manager("crash2")
         ssm.add_message("user", "goal")
-        ssm.append_raw({
+        _append(ssm, {
             "role": "assistant", "content": "",
             "tool_calls": [
                 {"id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": "{}"}},
                 {"id": "call_2", "type": "function", "function": {"name": "read_file", "arguments": "{}"}},
             ],
         })
-        ssm.append_raw({"role": "tool", "tool_call_id": "call_1", "name": "write_file", "content": "Success"})
+        _append(ssm, {"role": "tool", "tool_call_id": "call_1", "name": "write_file", "content": "Success"})
         # Crash here — call_2's result never recorded.
 
         resumed = make_manager("crash2")
@@ -184,7 +158,7 @@ class TestDanglingToolCallRepair:
     def test_repair_is_idempotent_across_repeated_resumes(self, make_manager):
         ssm = make_manager("crash3")
         ssm.add_message("user", "goal")
-        ssm.append_raw({
+        _append(ssm, {
             "role": "assistant", "content": "",
             "tool_calls": [{"id": "call_1", "type": "function",
                              "function": {"name": "write_file", "arguments": "{}"}}],
@@ -198,12 +172,12 @@ class TestDanglingToolCallRepair:
     def test_no_repair_needed_when_last_turn_completed_normally(self, make_manager):
         ssm = make_manager("clean")
         ssm.add_message("user", "goal")
-        ssm.append_raw({
+        _append(ssm, {
             "role": "assistant", "content": "",
             "tool_calls": [{"id": "call_1", "type": "function",
                              "function": {"name": "write_file", "arguments": "{}"}}],
         })
-        ssm.append_raw({"role": "tool", "tool_call_id": "call_1", "name": "write_file", "content": "Success"})
+        _append(ssm, {"role": "tool", "tool_call_id": "call_1", "name": "write_file", "content": "Success"})
         ssm.add_message("assistant", "all done")
 
         resumed = make_manager("clean")
@@ -217,91 +191,3 @@ class TestDanglingToolCallRepair:
 
         resumed = make_manager("nomessages")
         assert [m.get("content") for m in resumed.history] == ["goal"]
-
-
-def test_add_messages_appends_batch(make_manager):
-    ssm = make_manager("batch")
-    ssm.add_messages([{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}])
-    assert len(ssm.history) == 2
-
-    reloaded = make_manager("batch")
-    assert [m["content"] for m in reloaded.history] == ["a", "b"]
-
-
-def test_get_messages_returns_system_plus_history(manager):
-    manager.add_message("user", "hello there")
-    messages = manager.get_messages("imp")
-    assert messages[0]["role"] == "system"
-    assert "Implementation Agent" in messages[0]["content"]
-    # The user turn is carried through.
-    contents = [m.get("content") for m in messages]
-    assert "hello there" in contents
-
-
-def test_compress_history_keeps_plan_agent_instructions(manager):
-    from JFI.session.simple_session_manager import _estimate_tokens
-
-    manager.add_message(
-        "system",
-        f"You are the Plan Agent. Your single task: write a step-by-step plan to "
-        f"{manager.plan_path} now, using the mandated '- [ ]' format.",
-    )
-    for i in range(12):
-        manager.add_message("user", f"question number {i}")
-        manager.add_message(
-            "assistant", ("answer body " * 80) + f"part {i}"
-        )
-
-    # A reserve bigger than the context budget pushes the effective cap to its
-    # floor (512 tokens), which forces compression of the middle blocks. The
-    # manager's default budget is CONTEXT_SIZE * ratio, so use the actual one.
-    total = _estimate_tokens(manager.history)
-    compressed = manager.compress_history(reserve=total + manager.context_budget() + 1024)
-
-    assert _estimate_tokens(compressed) < total
-    system_texts = [m.get("content") or "" for m in compressed if m["role"] == "system"]
-    # The plan agent's instructions must survive compression verbatim.
-    original = next(
-        m["content"] for m in manager.history
-        if m["role"] == "system" and "Plan Agent" in str(m.get("content") or "")
-    )
-    assert any(original in text for text in system_texts)
-
-
-def test_compress_history_keeps_goal_user_message(manager):
-    from JFI.session.simple_session_manager import _estimate_tokens
-
-    goal = "My goal is: add a status bar that shows plan progress."
-    manager.add_message("user", goal)
-    for i in range(6):
-        manager.add_message("assistant", ("filler response body " * 40) + f" {i}")
-
-    budget = _estimate_tokens(manager.history) // 2
-    compressed = manager.compress_history(reserve=budget)
-
-    flat = [m.get("content") or "" for m in compressed]
-    assert any(goal in text for text in flat), (
-        "the goal message must survive compression verbatim"
-    )
-
-
-def test_compress_history_keeps_nudges(manager):
-    from JFI.session.simple_session_manager import _estimate_tokens
-
-    manager.add_message("user", "My goal is: do the thing.")
-    for i in range(6):
-        manager.add_message("assistant", ("filler answer text " * 40) + f" {i}")
-    # Match the marker phrase that _is_nudge looks for, verbatim and lowercase.
-    nudge = (
-        "Continue working. when you are entirely finished with this phase, stop "
-        "and say PHASE_COMPLETE."
-    )
-    manager.add_message("user", nudge)
-
-    budget = _estimate_tokens(manager.history) // 2
-    compressed = manager.compress_history(reserve=budget)
-
-    flat = [m.get("content") or "" for m in compressed]
-    assert any("entirely finished with this phase" in text for text in flat), (
-        "the nudge must survive compression verbatim"
-    )

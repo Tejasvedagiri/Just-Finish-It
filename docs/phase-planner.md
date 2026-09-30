@@ -1,177 +1,111 @@
-# Phase: `planner`
+# Phase: planner
 
-Turns the user's goal into the plan tree (see [plan-tree.md](plan-tree.md)).
-It writes no deliverable code. Its output is `Leaf` rows only, plus facts
-saved with `context_save` for later stages and phases.
+Code: `src/JFI/planner/` (`loop.py` the loop, `nodes.py` the plan tree and its
+tools, `judge.py` the judge, `prompts.py` the role prompts). `runner._run_planner`
+hands the phase to `Planner.run()`. The design and every decision behind it are
+in [`laya_plan.md`](laya_plan.md).
 
-- **Code:** `runner.run_phase` (the `tiered_planner` branch),
-  `PLANNER_ARC_STAGE`, `PLANNER_NODE_STAGES`, `_node_scoped_marker`,
-  `PLANNER_PHASE_COMPLETE_MARKER`.
-- **Prompts:** `get_system_message(phase="planner", planner_stage=...,
-  planner_node_id=...)` and `get_phase_trigger("planner", ...)`.
-- **Tests:** `test/test_tiered_planner.py`.
+## Shape
 
-## Two modes
+Three roles, each working in short, scoped **episodes**
+([`JFI.episode`](../src/JFI/episode/__init__.py)): one small conversation about
+one node, with a never-trimmed scope anchor, pulling everything else through
+tools, ended by the role's `finish` tool (or the token budget / turn cap).
 
-| Mode | When | Shape |
-|------|------|-------|
-| **Tiered** (default) | `PLANNER_SINGLE_PASS` unset | Arc once, then Lead → Dev → Task Planner per top-level branch |
-| **Single pass** | `PLANNER_SINGLE_PASS=1` | one prompt, one `PLANNER_COMPLETE` marker |
+| Role | Writes | Level of its nodes |
+|------|--------|--------------------|
+| **Architect** | The whole map once: components, the runbook (`setup`, `run`, `test`, `test_one`, `build`, `e2e`) and design contracts | `architect` |
+| **Lead** | One component broken into files | `lead` |
+| **Task** | One file broken into functions (or copies, config lines, ...) | `task` |
 
-The planner is tiered because one combined pass let compound leaves through
-("GET /x happy paths: empty → …; seeded → …; bad input → …" as one leaf).
-A breadth-first sweep of the whole tree per stage was also rejected: its
-context per turn grew too large.
+After each layer the **judge** labels every new node:
 
-## Tiered flow
+- **GOOD**: one small, clear job. It goes straight to Dev.
+- **BREAKDOWN**: several jobs. The next role splits it.
+- **REDO**: operational ("run the app") or too vague. It goes back to the role that wrote it.
+
+## The loop (`Planner.run`)
+
+Each step takes the first pending action, re-reading the DB every time, so resume
+is just "run again":
 
 ```
-Arc (whole tree, once)                     marker: ARCHITECT_STAGE_COMPLETE
-for node_id in top_level_leaf_ids():       every top-level leaf, imp AND testing, created_at order
-    Lead  (node's subtree only)            marker: LEAD_STAGE_COMPLETE_NODE_<id>
-    Dev   (node's subtree only)            marker: DEV_STAGE_COMPLETE_NODE_<id>
-    Task Planner (node's subtree only)     marker: TICKETS_STAGE_COMPLETE_NODE_<id>
-append synthetic assistant message "PLANNER_COMPLETE"   (no LLM turn)
+for level in architect, lead, task:
+    judge      the level's unjudged nodes        (one batch)
+    redo       the level's REDO nodes            (one episode each, by their creator)
+    break down the level's BREAKDOWN nodes       (one episode each, by the next role)
+               that have no children yet
 ```
 
-- **Depth-first:** one branch goes through all three per-node stages
-  before the next branch starts.
-- **Driving each stage:** `ssm.set_planner_stage(stage)` and
-  `ssm.set_planner_node(node_id)` pick the system prompt, then
-  `_drive_turn_loop` runs until that stage's marker appears.
-- **Shared history:** all stages share one history, so a later stage sees
-  earlier stages' turns (compressed). Only the system prompt changes.
-- **Top-level list:** `top_level_leaf_ids` is re-read after Arc finishes,
-  so it contains whatever Arc added.
-- **Resume:** the stage and node live in memory only. Resume works by
-  scanning history for each marker: Arc is skipped if its marker exists,
-  and each (node, stage) pair is skipped if its node-scoped marker exists.
-  A crash midway through node 2's Dev stage resumes exactly there.
-- **Completion:** `PLANNER_COMPLETE` is appended so the generic
-  `get_remaining_phases` resume scan sees the phase as done. No per-node
-  prompt ever asks the model to say it.
-- **After the phase:** `ssm.ensure_plan_file()` runs.
+A level's judging and redos come before its breakdowns, and each level before
+the next, so nothing reaches Lead while an Architect node is unjudged or REDO
+(the gates). A broken-down node becomes GOOD once it has children. Planning is
+done when every live node is GOOD; then `PLANNER_COMPLETE` is appended to
+history for the phase-level resume.
 
-### Stage 1: Arc (`architect`)
+The Architect's `finish` is refused until the runbook has every required entry,
+the stack names a test framework, and a plan with 3+ components has at least one
+design contract. Its conversation may be continued up to `ARCHITECT_CONTINUATIONS`
+times.
 
-**Job:** the top-level shape only.
+## The judge (`LAYA`)
 
-- `get_plan()` first.
-- `add_leaf(phase="imp"|"testing", description=...)` with **no parent_id**,
-  one call per major piece.
-- No `start_leaf` or `mark_leaf_done` calls.
-- `context_save` architecture notes, the data model and constraints. This
-  replaces the old "Context and Prerequisites" section.
-- If a plan already exists, extend it and never re-add existing items.
+By default every node is judged by the rule alone. With `LAYA=1` in `.env`,
+every node gets two scores:
 
-The order Arc adds items in is the walk order for every later stage.
+- **the rule** (`fallback_status`): Architect and Lead nodes are BREAKDOWN (a
+  Lead node naming exactly one function is GOOD); Task nodes are GOOD. Never
+  REDO.
+- **Laya** ([laya](https://github.com/NandhaKishorM/laya)'s published `english`
+  checkpoint), asked one question per level, with a confidence.
 
-### Stage 2: Lead (`team_lead`), one node
+| Rule and Laya | Verdict | `decided_by` |
+|---|---|---|
+| agree | that answer | `agree` |
+| disagree, Laya confidence >= `LAYA_MIN_CONFIDENCE` (0.75) | one LLM call (the Architect's model) picks one of the two, for every disagreement of the step at once | `llm` |
+| disagree, Laya less sure | the rule | `rule` |
 
-**Job:** give node `[id=N]` feature-sized children.
+REDO can only come from Laya, through the tie-break. Without `LAYA=1`, or
+without the `laya` extra (including in the binary), the rule decides alone
+and the judge says so once. Laya runs on `LAYA_DEVICE` (cpu by default), loaded
+once per session.
 
-- **Scope:** only node N's subtree. Other branches are off limits.
-- **No source reading:** no `read_file`, no grep/cat. Lead decides from
-  the description, `get_plan` / `get_leaf` and `context_lookup` alone.
-  Finding the right file is Dev's job.
-- **At least 2 children per parent.** The top-level node itself never
-  becomes a leaf.
-- **Leave the node as Arc wrote it:** no rename, merge or reorder.
-- **Anything not clearly atomic stays a bare item** for Dev.
+Why the base checkpoint and not a fine-tune: fine-tunes on this project's own
+plan nodes scored well on held-out data but overfitted to the node's level --
+on stui run 14 one answered BREAKDOWN at 0.98 for every Architect and Lead node
+and GOOD at 0.98 for every Task node, whatever the text said.
 
-### Stage 3: Dev (`journeyman`), one node
+Every verdict is stored as a `PlannerVerdict` row.
 
-**Job:** walk node N's subtree down to genuinely atomic leaves, each naming
-the **file** it touches.
+## Rules enforced in code (`nodes.py`)
 
-The prompt names five failures seen in real runs:
+- A node's `level` comes from the calling role, never the model; a role only
+  updates or deletes nodes it created (REDO goes back to the creator).
+- Lead and Task add nodes only under the node their episode is about.
+- Descriptions are capped at `PLANNER_ITEM_MAX_CHARS` (200): the judge reads them.
+- `depends_on` must name existing nodes and stay acyclic.
+- Depth is capped at `MAX_LEAF_DEPTH` (5); a function that already exists in the
+  plan, or a file another component owns, is refused as a duplicate.
 
-1. A bundled multi-scenario test leaf → one leaf per case.
-2. "kill server, start, request, inspect DB" → one leaf per action.
-3. "write a check and fix whatever it finds" → write harness / run+fix /
-   re-run until clean (then remove the harness).
-4. Reasoning over many items in one turn blew the reasoning cap and the
-   server's context limit. The rule: **one item per turn**, decide, then
-   make at most one tool call.
-5. Recursive splitting of investigation work (30+ leaves, 7 levels deep).
-   The rule: split at most once. `MAX_INVESTIGATION_DEPTH` enforces this in
-   code.
+## Guards
 
-It also has to:
+- `PLANNER_REDO_CAP` (2): redos per node before it's escalated.
+- `MAX_PLANNER_EPISODES` (200): the whole phase's episode budget.
+- `MAX_EPISODE_TURNS`: per episode; the token budget is `CONTEXT_SIZE ×
+  CONTEXT_COMPRESSION_RATIO`.
 
-- fix ordering bugs with `reorder_leaf`: nothing may use a package, file
-  or table before the leaf that creates it;
-- make sure there's at least one concrete, command-named Testing leaf
-  (per `VERIFICATION_RULES`).
+## Later iterations
 
-### Stage 4: Task Planner (`function_breakdown`), one node
+A failed review or queued request is recorded as a `USER FEEDBACK FOR ITERATION`
+message. `runner._replan_feedback` hands the feedback since the last finished
+planning round to the Architect, which extends the plan; finished leaves are left
+alone.
 
-**Job:** make every leaf under node N **one mechanically-executable
-ticket**.
+## Cut-off episodes
 
-- **Code leaves:** one child per function/method, with real names and
-  signatures where they're already decided, e.g. "implement
-  collect_news(held: list[str]) -> list[dict]: …".
-- **Non-code leaves** (setup, config, shell, curl+assert): get the same
-  one-action test and are split if they bundle more than one action.
-- **Context cache:** `context_lookup` before opening any file,
-  `context_save` what each file contains after reading it. This stops
-  re-reading the same file for every leaf.
-- **One leaf per turn**, same as Dev.
-
-## Single-pass prompt
-
-`get_system_message("planner", planner_stage=None)` is the original
-combined prompt:
-
-- build the whole tree with `add_leaf`, top-level first, then children;
-- recurse until every leaf is one step;
-- include ≥1 mechanical Testing leaf;
-- extend an existing plan without touching done leaves.
-
-It ends with `PLANNER_COMPLETE`.
-
-## Triggers (`get_phase_trigger("planner", ...)`)
-
-- **First iteration:** `"My goal is: <goal>\n\nBuild the step-by-step plan
-  now..."`. `AdaptiveSessionManager` parses the goal back out of this exact
-  prefix to detect the task type, so don't change the prefix casually.
-- **Iteration > 1, review failed, or Program Manager feedback:** "Update the
-  plan so it covers the request above. Call get_plan() first, leave every
-  already-done leaf untouched, and add_leaf new items…". A paragraph is
-  added for a failed review and/or for Program Manager feedback.
-
-## Per-phase model
-
-The `PLANNER_*` env overrides (`PLANNER_MODEL`, ...) apply to every stage.
-There are no per-stage model overrides.
-
-## Known gaps
-
-**1. (Fixed) Re-planning used to be a no-op in tiered mode.** Every later
-planner run found round one's `ARCHITECT_STAGE_COMPLETE` and `*_NODE_<id>`
-markers in history and skipped every stage (0 LLM calls), so Program
-Manager rework, failed reviews and queued follow-ups were never planned.
-Stage markers are now scoped to a **planning round**:
-- `run_phase` appends a synthetic `PLANNER_ROUND_START` when the previous
-  round already finished (`PLANNER_COMPLETE` after its start);
-- it only looks for stage markers after the latest round start
-  (`_planning_round_start`);
-- an interrupted round resumes instead of restarting;
-- pre-fix sessions behave as before.
-
-Pinned by the "Planning rounds" tests in `test/test_tiered_planner.py`.
-
-**2. The planner prompts don't mention `update_leaf`.** Program Manager's
-rework loop expects `update_leaf` (it clears the circuit breaker), but
-`PLAN_FORMAT_RULES` lists nine tools without it. The Lead prompt even says
-"there's no rename tool".
-
-**3. Walk order ignores `reorder_leaf`.** `top_level_leaf_ids` sorts by
-`created_at`, not `sort_key`.
-
-**4. (Fixed) Feedback wording was from the markdown era.**
-`product_owner_feedback_outcome`, `review_outcome`, the iteration message,
-`_stuck_task_directive` and the AUTO-RECTIFY give-up message now point at
-`add_leaf` / `update_leaf` / `split_leaf` / `add_reviewer_note`, not
-"`- [ ]` items in the plan file".
+- **Turn cap:** a Lead or Task episode that runs out of turns is continued once,
+  told which nodes it already added, whether it added some or none (on the stui
+  runs, Task episodes cut off after some functions left files incomplete).
+  Still out of turns with no nodes: the node goes back to its creator as too big.
+- **LLM error:** retried once; still failing with no nodes, the node stays
+  BREAKDOWN and planning stops (an error says nothing about the node's size).

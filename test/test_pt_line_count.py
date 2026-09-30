@@ -45,7 +45,7 @@ def test_display_helpers_add_one_line_each():
     console._output_fragments()
     baseline = console._logical_line_count()
 
-    console.display_assistant("a line of output")
+    console.display_user("a line of output")
     console._output_fragments()
     assert console._logical_line_count() == baseline + 1
 
@@ -58,7 +58,7 @@ def test_display_helpers_add_one_line_each():
 def test_cursor_position_tracks_last_line():
     console = _new_manager()
     for i in range(5):
-        console.display_assistant(f"output {i}")
+        console.display_user(f"output {i}")
 
     # prompt_toolkit's create_content() always fetches fragments before the
     # cursor position within one render pass.
@@ -78,7 +78,7 @@ def test_cursor_position_ignores_writes_after_the_content_snapshot():
     still land inside the *frozen* content, never past it.
     """
     console = _new_manager()
-    console.display_assistant("line one")
+    console.display_user("line one")
     console._output_fragments()  # freezes the snapshot prompt_toolkit will draw
     frozen_last = console._logical_line_count() - 1
 

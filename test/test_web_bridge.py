@@ -4,6 +4,9 @@ documented in web_bridge.py's module docstring), and staying safe against
 stale/late writes.
 """
 
+import threading
+
+from JFI.manager.pt_console_manager import PromptToolkitConsoleManager
 from JFI.manager.web_bridge import WebBridge, atomic_write_json
 
 
@@ -12,6 +15,7 @@ class FakeConsole:
         self._awaiting = awaiting
         self.answers: list[str] = []
         self.queued: list[str] = []
+        self.pauses: list[bool] = []
 
     def get_status_snapshot(self):
         return {"awaiting": self._awaiting}
@@ -21,6 +25,9 @@ class FakeConsole:
 
     def submit_external_queue_item(self, text: str) -> None:
         self.queued.append(text)
+
+    def submit_external_pause(self, paused: bool) -> None:
+        self.pauses.append(paused)
 
 
 AWAITING = {"prompt": "What is your goal?", "options": []}
@@ -116,3 +123,37 @@ class TestQueueRelay:
         bridge._relay_answer(console.get_status_snapshot())
 
         assert console.queued == []
+
+
+class TestPauseRelay:
+    """The dashboard's Pause / Resume button. Asked for after a run whose
+    terminal was owned by a driver script: Ctrl+P was the only pause, and
+    nothing outside that terminal could press it."""
+
+    def test_pause_and_resume_are_relayed_whether_or_not_anything_is_awaiting(self, tmp_path):
+        for awaiting in (None, AWAITING):
+            console = FakeConsole(awaiting=awaiting)
+            bridge = _bridge(tmp_path, console)
+            atomic_write_json(bridge._answer_path, {"type": "pause", "paused": True})
+            bridge._relay_answer(console.get_status_snapshot())
+            atomic_write_json(bridge._answer_path, {"type": "pause", "paused": False})
+            bridge._relay_answer(console.get_status_snapshot())
+
+            assert console.pauses == [True, False]
+            assert console.answers == [] and console.queued == []
+            assert not bridge._answer_path.exists()
+
+
+def test_the_real_console_pauses_and_resumes_from_the_web(tmp_path):
+    """Against the real TUI console, not a fake: the relayed state is what
+    is_paused() / the status snapshot report, and it's a target state, not a
+    toggle (a repeated click can't flip it back)."""
+    console = PromptToolkitConsoleManager.__new__(PromptToolkitConsoleManager)
+    console._paused = threading.Event()
+    console._line = lambda *a, **k: None
+    console._invalidate = lambda: None
+    console.submit_external_pause(True)
+    console.submit_external_pause(True)
+    assert console.is_paused()
+    console.submit_external_pause(False)
+    assert not console.is_paused()

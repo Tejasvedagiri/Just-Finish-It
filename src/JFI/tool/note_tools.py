@@ -1,23 +1,20 @@
-"""add_reviewer_note / get_reviewer_notes / write_review_report /
-write_plan_feedback -- DB-backed replacement (JFI.models.SessionNote) for
-the three harness-control-flow markdown files a session used to write:
-NotesForReviewer.md, review.md, feedback_to_plan.md. See SessionNote's own
-module docstring for why these are a separate model from ContextEntry
-(the model's own free-form scratchpad) despite the identical underlying
-shape: these three specifically drive runner.py's own
-review_outcome/product_owner_feedback_outcome control flow, not just
-facts the model might want to recall later.
+"""add_reviewer_note / get_reviewer_notes / write_review_report -- DB-backed
+replacement (JFI.models.SessionNote) for the harness-control-flow markdown
+files a session used to write (NotesForReviewer.md, review.md). See
+SessionNote's own module docstring for why these are a separate model from
+ContextEntry (the model's own free-form scratchpad) despite the identical
+underlying shape: they drive runner.py's review_outcome control flow, not
+just facts the model might want to recall later.
 
-Three `kind` values, one per file replaced -- each written by exactly one
-phase, read by at most one other:
-    REVIEWER_NOTES = "reviewer_notes"   -- imp writes (appends), reviewer reads
+Two `kind` values, each written by exactly one phase and read by one other:
+    REVIEWER_NOTES = "reviewer_notes"   -- Dev and the planner write (append), reviewer reads
     REVIEW_REPORT   = "review_report"   -- reviewer writes, runner.py reads+clears
-    PLAN_FEEDBACK   = "plan_feedback"   -- product_owner writes, runner.py reads+clears
 
 get_note/set_note/append_note/clear_note are the raw accessors underneath
-the four model-facing tool functions -- also what runner.py uses directly
-for the read+clear side of REVIEW_REPORT/PLAN_FEEDBACK (never exposed to
-the model as tools; only the harness itself consumes those two kinds).
+the model-facing tool functions -- also what runner.py uses directly for the
+read+clear side of REVIEW_REPORT. Sessions from the removed v1 pipeline may
+also hold "plan_feedback" rows (its Program Manager's); export-db still
+shows them.
 """
 
 from typing import Callable, Dict, Optional
@@ -29,7 +26,6 @@ from JFI.models._util import utcnow
 
 REVIEWER_NOTES = "reviewer_notes"
 REVIEW_REPORT = "review_report"
-PLAN_FEEDBACK = "plan_feedback"
 
 
 def get_note(engine, session_id: str, kind: str) -> Optional[str]:
@@ -95,22 +91,13 @@ def write_review_report(engine, session_id: str, text: str) -> str:
     return "Success: review report recorded — another full iteration will be scheduled."
 
 
-def write_plan_feedback(engine, session_id: str, text: str) -> str:
-    text = (text or "").strip()
-    if not text:
-        return "Error: write_plan_feedback needs a non-empty text."
-    set_note(engine, session_id, PLAN_FEEDBACK, text)
-    return "Success: plan feedback recorded — sent back to the planner."
-
-
 def make_note_tools(engine, session_id: str) -> Dict[str, Callable]:
-    """{"add_reviewer_note": ..., "get_reviewer_notes": ..., "write_review_report": ...,
-    "write_plan_feedback": ...} bound to one session's own DB engine -- the
+    """{"add_reviewer_note": ..., "get_reviewer_notes": ..., "write_review_report": ...}
+    bound to one session's own DB engine -- the
     same per-session rebinding pattern context_tools.make_context_tools/
     plan_db_tools.make_plan_db_tools use."""
     return {
         "add_reviewer_note": lambda text: add_reviewer_note(engine, session_id, text),
         "get_reviewer_notes": lambda: get_reviewer_notes(engine, session_id),
         "write_review_report": lambda text: write_review_report(engine, session_id, text),
-        "write_plan_feedback": lambda text: write_plan_feedback(engine, session_id, text),
     }

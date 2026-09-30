@@ -1,60 +1,53 @@
-# Phase: `imp` (Implementation)
+# Phase: imp
 
-Builds the deliverables, one pending `imp` leaf at a time, and keeps the
-plan's status honest while it works.
+Code: `src/JFI/imp/` (`dev.py` the phase, `queue.py` the work queue, `prompts.py`
+the Dev prompts). `runner._run_imp` hands the phase to `Imp.run()`.
 
-- **Code:** the generic path in `runner.run_phase` → `_drive_turn_loop`.
-  The completion marker is `IMP_COMPLETE`.
-- **Prompt:** `get_system_message("imp")`, plus the **work queue**
-  `_phase_system_message` adds: the currently pending `imp` leaves as
-  `[id=N] <number> <description>` lines (from `_pending_items` /
-  `render_pending_lines`). The queue is rebuilt every turn, so it shrinks as
-  leaves are marked done.
-- **Trigger:** "Begin implementation. Work through the pending imp leaves
-  one at a time…"
+One fresh, short **Dev episode** per GOOD leaf, never one long conversation:
 
-## The per-leaf loop the prompt asks for
+```
+setup      the runbook's `setup` runs once; if it fails, one Dev episode fixes it
+the queue  next_leaf(), one episode each
+finish-up  `build` once, plus the JFI: marker scan; one Dev episode for what's left,
+           the rest goes to the reviewer notes
+```
 
-1. **Pick the first leaf in the queue.** Use `get_plan()` only if the queue
-   looks stale.
-2. **`start_leaf(id)`,** then announce it as `**[CURRENT TASK: 1.1]**`.
-   `start_leaf` sets the session's current task, which drives the status
-   bar and the stuck-leaf timer.
-3. **Do the work** with `write_file` / `append_to_file` / `replace_in_file`
-   / `execute_command`. Prefer `read_file` over `cat`.
-   - For an **investigation leaf** ("investigate", "debug", …), don't
-     `add_leaf` each next step. Dig with ordinary tool calls and
-     `context_save` the findings.
-   - `add_leaf` is only for genuinely **new deliverable** work the digging
-     uncovered.
-4. **`add_reviewer_note`** when something needed a workaround, rested on an
-   assumption, or couldn't be fully verified. Skip it for clean steps. The
-   notes are appended to the `REVIEWER_NOTES` `SessionNote` and read by the
-   reviewer.
-5. **`mark_leaf_done(id)` immediately.** Never batch completions.
-6. **Repeat** until nothing is pending.
-7. **Run one whole-project build/typecheck** (`npm run build`,
-   `tsc --noEmit`, `go build ./...`, test collection, …) and fix anything it
-   reports. Per-leaf checks miss cross-file drift.
+`IMP_COMPLETE` is written from DB state (every leaf finished), never from model
+text.
 
-Testing leaves are left alone. The phase ends with `IMP_COMPLETE`.
+## The queue (`queue.py`)
 
-## Runtime help from `_drive_turn_loop`
+Every real leaf (no children) the planner settled as GOOD, in tree order. A leaf
+waits for its own `depends_on` (Task orders leaves inside one file) and for the
+`depends_on` of every ancestor (Lead orders files, Architect orders components),
+so `list_todos()` is never built before the `get_session()` it calls.
 
-- **Stuck leaf.** If the current leaf stays current longer than
-  `TASK_STUCK_TIME_LIMIT_SECONDS` (default 300) or spends more than
-  `TASK_STUCK_TOKEN_LIMIT` (default 150k) re-sent tokens,
-  `_stuck_task_directive` orders a split. Its wording still describes
-  editing a markdown plan file; the real action is `split_leaf`.
-- **Ctrl+K / Ctrl+Q.** These skip the current leaf, or all remaining leaves
-  (status → skipped, `[o]`), and tell the model to move on.
-- **`AUTO-RECTIFY`.** A tool result starting with `Error` triggers repair
-  coaching for that tool.
+## One episode
 
-## Things to know when editing
+Dev gets the leaf's scope (description, `done_when`, files), the runbook and
+design indexes, and a role prompt by kind (implement, integrate, modify, delete,
+fill, generic). Its tools include `read_symbol` / `replace_symbol`, `copy_lines`,
+`outline_file`, `execute_command` and `add_reviewer_note`.
 
-- **Mid-phase resume** needs nothing special. Done leaves are simply no
-  longer in the queue.
-- **An empty queue** (for example, after the planner re-plan gap in
-  [phase-planner.md](phase-planner.md#known-gaps)) makes the phase trivially
-  say `IMP_COMPLETE`.
+The episode ends with **`mark_leaf_done`**, which is gated: it runs the leaf's own
+unit test (the runbook's `test_one`) and refuses until it passes.
+
+## Recovery
+
+- The gate's test hit **another** stub's `NotImplementedError`: a missing
+  dependency, not a bug. The leaf is re-queued after the leaf that owns that
+  symbol (up to `MAX_DEFERRALS`).
+- An episode that ended without finishing (a crash, stop or restart) starts over
+  fresh, told a previous attempt may have partly edited its files. At
+  `MAX_DEV_ATTEMPTS` (3) it's treated as an overflow.
+- **Overflow** (the budget or turn cap ran out) means the leaf was too big. It
+  goes back to Task for a split, and the planner settles the pieces. A leaf the
+  split can't break up is skipped with a reviewer note, so every leaf reaches a
+  finished state.
+
+## Controls
+
+Ctrl+P pauses between turns. Forced input (`!text`) goes into the episode that's
+running, before its next LLM call, as a `USER INTERJECTION`, and is recorded as a
+`Directive` row delivered to that episode (`JFI.episode.engine`). There is no
+per-leaf skip key (v1's Ctrl+K / Ctrl+Q were removed with v1).

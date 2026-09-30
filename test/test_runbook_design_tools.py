@@ -59,9 +59,9 @@ def test_runbook_is_per_session(engine):
     with get_session(engine) as db:
         db.add(SessionRecord(session_id="other", repo_path="."))
         db.commit()
-    runbook_set(engine, "s", "run", "a")
-    runbook_set(engine, "other", "run", "b")
-    assert runbook_get(engine, "s", "run").endswith(": a")
+    runbook_set(engine, "s", "run", "npm run a")
+    runbook_set(engine, "other", "run", "npm run b")
+    assert runbook_get(engine, "s", "run").endswith(": npm run a")
 
 
 # ------------------------------------------------------------------ design
@@ -118,3 +118,28 @@ def test_runbook_listing_respects_the_cap(engine, monkeypatch):
     for i in range(40):
         runbook_set(engine, "s", f"step_{i}", "echo " + "y" * 60)
     assert "truncated" in runbook_get(engine, "s")
+
+
+def test_runbook_refuses_kill_by_name_and_a_browser_as_e2e(engine):
+    """Observed on the stui runs: `stop` was `taskkill /F /IM node.exe`
+    (kills every Node process on the machine) even after the prompt said not
+    to, and `e2e` was `start http://localhost:5173`, which checks nothing."""
+    from JFI.tool.runbook_tools import runbook_set
+    assert runbook_set(engine, "s", "stop", "taskkill /F /IM node.exe").startswith("Error")
+    assert runbook_set(engine, "s", "stop", "pkill -f vite").startswith("Error")
+    assert runbook_set(engine, "s", "e2e", "start http://localhost:5173").startswith("Error")
+    assert not runbook_set(engine, "s", "stop", "taskkill /PID 4242 /F").startswith("Error")
+    assert not runbook_set(engine, "s", "e2e", "npm run build && node scripts/check-dist.js").startswith("Error")
+
+
+def test_runbook_commands_must_start_with_a_program(engine):
+    """Observed on the stui run (gemma): e2e was the sentence "Compare current
+    view with portfolio-dashboard.html visually" -- the reviewer runs e2e and
+    reads its exit code, so prose can never pass or fail."""
+    from JFI.tool.runbook_tools import runbook_set
+    assert runbook_set(engine, "s", "e2e", "Compare current view with the original visually").startswith("Error")
+    assert runbook_set(engine, "s", "test", "Run all the tests").startswith("Error")
+    for name, command in (("e2e", "npm run build && node scripts/check.js"), ("test_one", "npx vitest run {test_id}"),
+                          ("setup", "uv sync"), ("build", "./build.sh"), ("run", "python -m app"),
+                          ("stop", "Ctrl+C in the dev server terminal"), ("view", "http://localhost:5173")):
+        assert not runbook_set(engine, "s", name, command).startswith("Error"), (name, command)

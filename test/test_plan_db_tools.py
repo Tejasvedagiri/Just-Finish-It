@@ -1,33 +1,17 @@
-"""JFI.tool.plan_db_tools -- the tool surface that replaces free-form
-write_file/append_to_file/replace_in_file text surgery on plan.md (see
-that module's own docstring, and /todo.md's "SQLite/Pydantic persistence
-rewrite" section). No LLM anywhere here: each tool function is called
-directly, the same way runner.py's execute_tool_call would, and the
-resulting DB state is asserted through a fresh query -- the same
-no-LLM-needed style as test_db_integration.py's dummy session.
+"""JFI.tool.plan_db_tools -- the read-only plan tools the reviewer uses
+(get_plan, get_leaf) and the markdown renderer the dashboards parse. The
+plan is written by the planner's node tools and Dev's gated mark_leaf_done
+(tested in test_planner.py / test_imp.py); here leaves are inserted
+directly, the same rows those tools write. No LLM anywhere.
 """
+
+from datetime import datetime, timezone
 
 import pytest
 from sqlmodel import select
 
-from JFI.models import Leaf, LeafStatus, SessionRecord, get_engine, get_session
-from JFI.tool.plan_db_tools import (
-    REVIEW_REJECTION_CIRCUIT_BREAKER,
-    add_leaf,
-    delete_leaf,
-    get_leaf,
-    get_plan,
-    make_plan_db_tools,
-    mark_leaf_done,
-    merge_leaf,
-    render_plan_markdown,
-    reorder_leaf,
-    review_leaf,
-    split_leaf,
-    start_leaf,
-    top_level_leaf_ids,
-    update_leaf,
-)
+from JFI.models import Leaf, LeafStatus, Phase, SessionRecord, get_engine, get_session
+from JFI.tool.plan_db_tools import get_leaf, get_plan, make_plan_db_tools, render_plan_markdown
 
 
 @pytest.fixture()
@@ -43,6 +27,26 @@ def engine_and_session(tmp_path):
 def _leaves(engine, session_id):
     with get_session(engine) as db:
         return list(db.exec(select(Leaf).where(Leaf.session_id == session_id)))
+
+
+def add_leaf(engine, session_id, phase, description, parent_id=None):
+    with get_session(engine) as db:
+        siblings = db.exec(select(Leaf).where(Leaf.session_id == session_id, Leaf.parent_id == parent_id)).all()
+        leaf = Leaf(session_id=session_id, parent_id=parent_id, phase=Phase(phase),
+                    sort_key=(len(siblings) + 1) * 10, description=description)
+        db.add(leaf)
+        db.commit()
+        return leaf.id
+
+
+def mark_leaf_done(engine, session_id, leaf_id, tokens=None):
+    with get_session(engine) as db:
+        leaf = db.get(Leaf, leaf_id)
+        leaf.status = LeafStatus.DONE
+        leaf.started_at = leaf.ended_at = datetime.now(timezone.utc)
+        leaf.tokens = tokens
+        db.add(leaf)
+        db.commit()
 
 
 class TestGetPlan:
@@ -67,7 +71,6 @@ class TestGetLeaf:
         engine, session_id = engine_and_session
         add_leaf(engine, session_id, "imp", "Core arithmetic")
         [leaf] = _leaves(engine, session_id)
-        start_leaf(engine, session_id, leaf.id)
         mark_leaf_done(engine, session_id, leaf.id, tokens=42)
 
         text = get_leaf(engine, session_id, leaf.id)
@@ -99,260 +102,6 @@ class TestGetLeaf:
     def test_rejects_a_nonexistent_leaf(self, engine_and_session):
         engine, session_id = engine_and_session
         assert "Error" in get_leaf(engine, session_id, 999)
-
-
-class TestAddLeaf:
-    def test_adds_a_root_leaf(self, engine_and_session):
-        engine, session_id = engine_and_session
-        result = add_leaf(engine, session_id, "imp", "Core arithmetic")
-        assert "Added leaf id=" in result
-        [leaf] = _leaves(engine, session_id)
-        assert leaf.description == "Core arithmetic"
-        assert leaf.parent_id is None
-        assert leaf.status == LeafStatus.TODO
-
-    def test_adds_a_child_under_a_given_parent(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [root] = _leaves(engine, session_id)
-        add_leaf(engine, session_id, "imp", "Add evaluate()", parent_id=root.id)
-
-        leaves = _leaves(engine, session_id)
-        child = next(leaf for leaf in leaves if leaf.parent_id == root.id)
-        assert child.description == "Add evaluate()"
-
-    def test_siblings_get_gap_numbered_sort_keys(self, engine_and_session):
-        """10, 20, 30, ... so a future split_leaf can insert between two
-        without renumbering anything -- see Leaf's own docstring."""
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "First")
-        add_leaf(engine, session_id, "imp", "Second")
-        add_leaf(engine, session_id, "imp", "Third")
-
-        leaves = sorted(_leaves(engine, session_id), key=lambda leaf: leaf.sort_key)
-        assert [leaf.sort_key for leaf in leaves] == [10, 20, 30]
-
-    def test_unknown_phase_is_rejected(self, engine_and_session):
-        engine, session_id = engine_and_session
-        result = add_leaf(engine, session_id, "bogus-phase", "x")
-        assert "Error" in result
-        assert _leaves(engine, session_id) == []
-
-    def test_nonexistent_parent_is_rejected(self, engine_and_session):
-        engine, session_id = engine_and_session
-        result = add_leaf(engine, session_id, "imp", "x", parent_id=999)
-        assert "Error" in result
-        assert _leaves(engine, session_id) == []
-
-    def test_cannot_parent_under_a_real_leaf_that_already_has_status(self, engine_and_session):
-        """A leaf that's already been started/finished is a REAL leaf, not
-        a parent -- see Leaf's docstring on the structural distinction.
-        Must be split_leaf'd first, not silently given a child."""
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Already done")
-        [leaf] = _leaves(engine, session_id)
-        mark_leaf_done(engine, session_id, leaf.id)
-
-        result = add_leaf(engine, session_id, "imp", "child", parent_id=leaf.id)
-        assert "Error" in result
-
-
-class TestStartAndMarkLeafDone:
-    def test_start_leaf_sets_started_at_and_updates_session_record(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-
-        start_leaf(engine, session_id, leaf.id)
-
-        [leaf] = _leaves(engine, session_id)
-        assert leaf.started_at is not None
-        with get_session(engine) as db:
-            record = db.get(SessionRecord, session_id)
-        assert record.current_task == "Core arithmetic"
-        assert record.current_task_started_at is not None
-
-    def test_mark_leaf_done_sets_status_and_ended_at_and_clears_current_task(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-        start_leaf(engine, session_id, leaf.id)
-
-        mark_leaf_done(engine, session_id, leaf.id, tokens=500)
-
-        [leaf] = _leaves(engine, session_id)
-        assert leaf.status == LeafStatus.DONE
-        assert leaf.ended_at is not None
-        assert leaf.tokens == 500
-        with get_session(engine) as db:
-            record = db.get(SessionRecord, session_id)
-        assert record.current_task is None
-
-    def test_mark_leaf_done_without_start_leaf_still_sets_started_at(self, engine_and_session):
-        """A leaf finished in one shot (no explicit start_leaf call) still
-        needs a non-null started_at -- timing math elsewhere assumes both
-        ends exist together."""
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-
-        mark_leaf_done(engine, session_id, leaf.id)
-
-        [leaf] = _leaves(engine, session_id)
-        assert leaf.started_at is not None
-        assert leaf.started_at == leaf.ended_at
-
-    def test_marking_a_parent_done_is_rejected(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [root] = _leaves(engine, session_id)
-        add_leaf(engine, session_id, "imp", "child", parent_id=root.id)
-
-        result = mark_leaf_done(engine, session_id, root.id)
-        assert "Error" in result
-        [root_after] = [leaf for leaf in _leaves(engine, session_id) if leaf.id == root.id]
-        assert root_after.status == LeafStatus.TODO
-
-    def test_marking_a_nonexistent_leaf_done_is_rejected(self, engine_and_session):
-        engine, session_id = engine_and_session
-        assert "Error" in mark_leaf_done(engine, session_id, 999)
-
-
-class TestSplitLeaf:
-    def test_turns_a_leaf_into_a_parent_with_new_children(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-
-        result = split_leaf(engine, session_id, leaf.id, ["Build OPERATORS table", "Write tests"])
-
-        assert "Split leaf" in result
-        leaves = _leaves(engine, session_id)
-        assert len(leaves) == 3
-        parent = next(leaf for leaf in leaves if leaf.id == leaf.id and leaf.parent_id is None)
-        assert parent.status == LeafStatus.TODO
-        children = [leaf for leaf in leaves if leaf.parent_id == parent.id]
-        assert {c.description for c in children} == {"Build OPERATORS table", "Write tests"}
-
-    def test_splitting_clears_any_existing_status_and_timing(self, engine_and_session):
-        """The original row stops being a real leaf once it has children --
-        see Leaf's own docstring: a parent never carries status/timing."""
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-        mark_leaf_done(engine, session_id, leaf.id, tokens=100)
-
-        split_leaf(engine, session_id, leaf.id, ["A", "B"])
-
-        [parent] = [leaf for leaf in _leaves(engine, session_id) if leaf.parent_id is None]
-        assert parent.status == LeafStatus.TODO
-        assert parent.started_at is None
-        assert parent.ended_at is None
-        assert parent.tokens is None
-
-    def test_splitting_into_fewer_than_two_children_is_rejected(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-
-        result = split_leaf(engine, session_id, leaf.id, ["Only one"])
-        assert "Error" in result
-        assert len(_leaves(engine, session_id)) == 1
-
-    def test_splitting_a_nonexistent_leaf_is_rejected(self, engine_and_session):
-        engine, session_id = engine_and_session
-        assert "Error" in split_leaf(engine, session_id, 999, ["A", "B"])
-
-
-class TestDepthGuardrails:
-    """MAX_LEAF_DEPTH / MAX_INVESTIGATION_DEPTH -- the structural backstop
-    for the runaway-recursive-splitting failure observed in a real run
-    (see plan_db_tools.py's own module-level docstring for the exact
-    numbers and the real plan it happened on). Prose guidance alone (the
-    Journeyman prompt's own version of this rule) didn't stop it, so these
-    are enforced mechanically here, independent of whether the model
-    reads/follows the prompt."""
-
-    def _chain(self, engine, session_id, n, description="step"):
-        """Builds a straight-line chain of `n` add_leaf calls, each
-        parented under the previous one, returning every call's result so
-        a test can see exactly which call in the chain first got
-        rejected."""
-        results = []
-        parent_id = 0
-        for i in range(n):
-            result = add_leaf(engine, session_id, "imp", f"{description} {i}", parent_id=parent_id)
-            results.append(result)
-            if "Added leaf id=" in result:
-                parent_id = int(result.split("id=")[1].split(" ")[0])
-            else:
-                break
-        return results
-
-    def test_ordinary_leaves_allowed_up_to_the_general_depth_cap(self, engine_and_session):
-        from JFI.tool.plan_db_tools import MAX_LEAF_DEPTH
-
-        engine, session_id = engine_and_session
-        results = self._chain(engine, session_id, MAX_LEAF_DEPTH, description="build the thing")
-        assert len(results) == MAX_LEAF_DEPTH
-        assert all("Added leaf id=" in r for r in results)
-
-    def test_ordinary_leaves_rejected_past_the_general_depth_cap(self, engine_and_session):
-        from JFI.tool.plan_db_tools import MAX_LEAF_DEPTH
-
-        engine, session_id = engine_and_session
-        results = self._chain(engine, session_id, MAX_LEAF_DEPTH + 1, description="build the thing")
-        assert len(results) == MAX_LEAF_DEPTH + 1
-        assert all("Added leaf id=" in r for r in results[:-1])
-        assert "Error" in results[-1]
-        assert "Stop splitting" in results[-1]
-
-    def test_investigation_leaf_capped_much_shallower(self, engine_and_session):
-        from JFI.tool.plan_db_tools import MAX_INVESTIGATION_DEPTH
-
-        engine, session_id = engine_and_session
-        results = self._chain(
-            engine, session_id, MAX_INVESTIGATION_DEPTH + 1, description="investigate the SectorPie bug"
-        )
-        assert len(results) == MAX_INVESTIGATION_DEPTH + 1
-        assert all("Added leaf id=" in r for r in results[:-1])
-        assert "Error" in results[-1]
-        assert "investigation" in results[-1].lower()
-
-    def test_investigation_cap_applies_to_descendants_even_without_the_keyword(self, engine_and_session):
-        """A child of an investigation leaf is investigation work too, even
-        if its own description doesn't repeat the keyword -- the keyword
-        check walks every ancestor, not just the immediate parent."""
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Investigate why the KPI cards stay empty")
-        [root] = _leaves(engine, session_id)
-        add_leaf(engine, session_id, "imp", "Check the fetch layer", parent_id=root.id)
-        check_leaf = next(leaf for leaf in _leaves(engine, session_id) if leaf.description == "Check the fetch layer")
-
-        result = split_leaf(engine, session_id, check_leaf.id, ["Probe A", "Probe B"])
-        assert "Error" in result
-
-    def test_non_investigation_keyword_leaf_gets_the_general_cap_not_the_strict_one(self, engine_and_session):
-        """Sanity check the OTHER direction: an ordinary implementation
-        leaf with no investigation wording is never held to the stricter
-        cap just because it's nested under something else."""
-        engine, session_id = engine_and_session
-        results = self._chain(engine, session_id, 3, description="wire up the API client")
-        assert all("Added leaf id=" in r for r in results)
-
-    def test_split_leaf_enforces_the_same_general_cap(self, engine_and_session):
-        from JFI.tool.plan_db_tools import MAX_LEAF_DEPTH
-
-        engine, session_id = engine_and_session
-        results = self._chain(engine, session_id, MAX_LEAF_DEPTH, description="build the thing")
-        deepest_id = int(results[-1].split("id=")[1].split(" ")[0])
-
-        result = split_leaf(engine, session_id, deepest_id, ["A", "B"])
-        assert "Error" in result
-        # Rejected split must not have mutated the leaf into a parent.
-        [deepest] = [leaf for leaf in _leaves(engine, session_id) if leaf.id == deepest_id]
-        assert deepest.status == LeafStatus.TODO
-        assert _leaves(engine, session_id).__len__() == MAX_LEAF_DEPTH  # no new children created
 
 
 class TestRenderPlanMarkdown:
@@ -436,384 +185,124 @@ class TestRenderPlanMarkdown:
         assert "## Testing" not in md
 
 
-class TestReorderLeaf:
-    def _add_three(self, engine, session_id):
-        add_leaf(engine, session_id, "imp", "First")
-        add_leaf(engine, session_id, "imp", "Second")
-        add_leaf(engine, session_id, "imp", "Third")
-        leaves = sorted(_leaves(engine, session_id), key=lambda leaf: leaf.sort_key)
-        return {leaf.description: leaf.id for leaf in leaves}
+class TestPlanJudgeRows:
+    """The dashboard's Task | Judge table: the rule ("Judge") and Laya side
+    by side, the LLM tie-break's pick, and what decided. Observed on stui run
+    12: an older row stored Laya's raw letter "A" -- the table must still read
+    GOOD / BREAKDOWN / REDO for those."""
 
-    def test_moving_to_the_front_with_no_after_leaf_id(self, engine_and_session):
+    def test_one_row_per_node_in_plan_order_with_both_scores(self, engine_and_session):
+        from JFI.models import PlannerVerdict
+
         engine, session_id = engine_and_session
-        ids = self._add_three(engine, session_id)
-
-        reorder_leaf(engine, session_id, ids["Third"])
-
-        ordered = sorted(_leaves(engine, session_id), key=lambda leaf: leaf.sort_key)
-        assert [leaf.description for leaf in ordered] == ["Third", "First", "Second"]
-
-    def test_moving_right_after_a_given_sibling(self, engine_and_session):
-        engine, session_id = engine_and_session
-        ids = self._add_three(engine, session_id)
-
-        reorder_leaf(engine, session_id, ids["First"], after_leaf_id=ids["Second"])
-
-        ordered = sorted(_leaves(engine, session_id), key=lambda leaf: leaf.sort_key)
-        assert [leaf.description for leaf in ordered] == ["Second", "First", "Third"]
-
-    def test_rebalances_sort_keys_to_a_fresh_gap_sequence(self, engine_and_session):
-        """Every sibling gets a new 10/20/30/... sort_key in the new order
-        -- not just the moved leaf -- so a later insert always has room."""
-        engine, session_id = engine_and_session
-        ids = self._add_three(engine, session_id)
-
-        reorder_leaf(engine, session_id, ids["Third"])
-
-        ordered = sorted(_leaves(engine, session_id), key=lambda leaf: leaf.sort_key)
-        assert [leaf.sort_key for leaf in ordered] == [10, 20, 30]
-
-    def test_reordering_a_nonexistent_leaf_is_rejected(self, engine_and_session):
-        engine, session_id = engine_and_session
-        assert "Error" in reorder_leaf(engine, session_id, 999)
-
-    def test_after_leaf_id_must_be_a_real_sibling(self, engine_and_session):
-        engine, session_id = engine_and_session
-        ids = self._add_three(engine, session_id)
-
-        result = reorder_leaf(engine, session_id, ids["First"], after_leaf_id=999)
-        assert "Error" in result
-        assert "not a sibling" in result
-
-    def test_after_leaf_id_must_share_the_same_parent(self, engine_and_session):
-        engine, session_id = engine_and_session
-        ids = self._add_three(engine, session_id)
-        add_leaf(engine, session_id, "testing", "Unrelated, different phase")
-        other_phase_id = next(leaf.id for leaf in _leaves(engine, session_id) if leaf.description == "Unrelated, different phase")
-
-        result = reorder_leaf(engine, session_id, ids["First"], after_leaf_id=other_phase_id)
-        assert "Error" in result
-
-
-def _split_down_to_one_child(engine, session_id, parent_id, keep_description):
-    """A single-child parent can't come from split_leaf directly (it
-    requires >= 2 descriptions -- see its own guard), so build the
-    realistic path that actually produces one in practice: split into two,
-    then delete_leaf the one that turned out wrong/unnecessary, leaving
-    exactly the one real child under the parent."""
-    split_leaf(engine, session_id, parent_id, [keep_description, "temp-to-delete"])
-    leaves = _leaves(engine, session_id)
-    kept = next(leaf for leaf in leaves if leaf.parent_id == parent_id and leaf.description == keep_description)
-    to_delete = next(leaf for leaf in leaves if leaf.parent_id == parent_id and leaf.description == "temp-to-delete")
-    delete_leaf(engine, session_id, to_delete.id)
-    return kept
-
-
-class TestMergeLeaf:
-    def test_folds_single_child_into_parent(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Parent stub")
-        [parent] = _leaves(engine, session_id)
-        child = _split_down_to_one_child(engine, session_id, parent.id, "placeholder")
-        add_leaf(engine, session_id, "testing", "Unrelated, different parent")  # noise
-
-        result = merge_leaf(engine, session_id, child.id)
-
-        assert "Merged" in result
-        remaining = _leaves(engine, session_id)
-        assert child.id not in [leaf.id for leaf in remaining]
-        [parent_after] = [leaf for leaf in remaining if leaf.id == parent.id]
-        assert parent_after.description == "placeholder"
-        assert parent_after.status == LeafStatus.TODO
-
-    def test_updates_current_task_if_the_merged_child_was_in_progress(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Parent stub")
-        [parent] = _leaves(engine, session_id)
-        child = _split_down_to_one_child(engine, session_id, parent.id, "do the thing")
-        start_leaf(engine, session_id, child.id)
-
-        merge_leaf(engine, session_id, child.id)
-
+        parent = add_leaf(engine, session_id, "imp", "Scaffold: package.json, index.html, .gitignore")
+        child = add_leaf(engine, session_id, "imp", "setRange()", parent_id=parent)
+        legacy = add_leaf(engine, session_id, "imp", "Range filter module")
         with get_session(engine) as db:
-            record = db.get(SessionRecord, session_id)
-        assert record.current_task == "do the thing"
+            for leaf_id, status in ((parent, "BREAKDOWN"), (child, "GOOD"), (legacy, "BREAKDOWN")):
+                leaf = db.get(Leaf, leaf_id)
+                leaf.plan_status = status
+                db.add(leaf)
+            db.add(PlannerVerdict(session_id=session_id, node_id=parent, level="architect", laya_model="english",
+                                  laya_verdict="GOOD", answer_confidence=0.95, rule_verdict="BREAKDOWN",
+                                  tiebreak_verdict="BREAKDOWN", decided_by="llm", final_status="BREAKDOWN"))
+            db.add(PlannerVerdict(session_id=session_id, node_id=child, level="lead", laya_model="english",
+                                  laya_verdict="GOOD", answer_confidence=0.6, rule_verdict="GOOD",
+                                  decided_by="agree", final_status="GOOD"))
+            db.add(PlannerVerdict(session_id=session_id, node_id=legacy, level="architect", laya_model="english",
+                                  laya_verdict="A", answer_confidence=0.64, fallback="low_confidence",
+                                  final_status="BREAKDOWN"))
+            db.commit()
 
-    def test_rejects_a_top_level_leaf(self, engine_and_session):
+        from JFI.tool.plan_db_tools import plan_judge_rows
+        rows = plan_judge_rows(engine, session_id)
+
+        assert [r["#"] for r in rows] == ["1", "1.1", "2"]
+        assert (rows[0]["Judge"], rows[0]["Laya"], rows[0]["LLM"], rows[0]["Final"], rows[0]["Decided by"]) == \
+            ("BREAKDOWN", "GOOD (0.95)", "BREAKDOWN", "BREAKDOWN", "llm")
+        assert rows[1]["Task"] == "· setRange()" and rows[1]["Decided by"] == "agree"
+        assert rows[1]["Status"] == "todo" and rows[0]["Status"] == ""
+        assert (rows[2]["Laya"], rows[2]["Decided by"]) == ("GOOD (0.64)", "rule")
+
+
+class TestPlanStatusForTheDashboards:
+    """Phase 10: the planner / Dev / reviewer push the plan fields as they
+    change the plan (during episodes the header and dashboards used to stand
+    still -- only the old turn loop pushed them). The plan text itself stays
+    plain; the judge's scores live in the Task | Judge table."""
+
+    FLEET_LINE = __import__("re").compile(r"^(\s*)- \[(.)\] ([\d.]+) (.*)$")  # parsePlanLines' leaf shape
+
+    def test_plan_lines_carry_no_status(self, engine_and_session):
+        """The user: "I don't need to know if it's GOOD or BREAKDOWN in the
+        Full plan. The table has it." """
         engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Root item")
-        [root] = _leaves(engine, session_id)
-
-        result = merge_leaf(engine, session_id, root.id)
-        assert "Error" in result
-
-    def test_rejects_when_parent_has_more_than_one_child(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Parent stub")
-        [parent] = _leaves(engine, session_id)
-        split_leaf(engine, session_id, parent.id, ["first", "second"])
-        [first] = [leaf for leaf in _leaves(engine, session_id) if leaf.description == "first"]
-
-        result = merge_leaf(engine, session_id, first.id)
-        assert "Error" in result
-        assert len(_leaves(engine, session_id)) == 3  # nothing removed
-
-    def test_rejects_when_the_child_itself_has_children(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Parent stub")
-        [parent] = _leaves(engine, session_id)
-        mid = _split_down_to_one_child(engine, session_id, parent.id, "mid")
-        split_leaf(engine, session_id, mid.id, ["grandchild-a", "grandchild-b"])
-
-        result = merge_leaf(engine, session_id, mid.id)
-        assert "Error" in result
-
-    def test_rejects_a_nonexistent_leaf(self, engine_and_session):
-        engine, session_id = engine_and_session
-        assert "Error" in merge_leaf(engine, session_id, 999)
-
-
-class TestDeleteLeaf:
-    def test_deletes_a_todo_leaf(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Whoops, wrong leaf")
-        [leaf] = _leaves(engine, session_id)
-
-        result = delete_leaf(engine, session_id, leaf.id)
-
-        assert "Deleted" in result
-        assert _leaves(engine, session_id) == []
-
-    def test_clears_current_task_if_the_deleted_leaf_was_in_progress(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Whoops, wrong leaf")
-        [leaf] = _leaves(engine, session_id)
-        start_leaf(engine, session_id, leaf.id)
-
-        delete_leaf(engine, session_id, leaf.id)
-
+        leaf_id = add_leaf(engine, session_id, "imp", "Core arithmetic")
+        mark_leaf_done(engine, session_id, leaf_id)
         with get_session(engine) as db:
-            record = db.get(SessionRecord, session_id)
-        assert record.current_task is None
+            leaf = db.get(Leaf, leaf_id)
+            leaf.plan_status, leaf.review_status = "GOOD", "passed"
+            db.add(leaf)
+            db.commit()
 
-    def test_rejects_a_leaf_with_children(self, engine_and_session):
+        line = render_plan_markdown(engine, session_id).splitlines()[1]
+        assert line == "- [x] 1 Core arithmetic"
+        assert self.FLEET_LINE.match(line).group(3) == "1"
+
+    def test_a_broken_down_node_shows_breakdown_not_good_in_the_table(self, engine_and_session):
+        """Observed on stui run 15: the planner marks a node GOOD once it has
+        been split (settled), so the CSS component the Lead had just split
+        into files read GOOD -- as if it were ready to build."""
+        from JFI.tool.plan_db_tools import plan_judge_rows
+        engine, session_id = engine_and_session
+        parent = add_leaf(engine, session_id, "imp", "Create the CSS files")
+        child = add_leaf(engine, session_id, "imp", "Fill variables.css", parent_id=parent)
+        with get_session(engine) as db:
+            for leaf_id in (parent, child):
+                leaf = db.get(Leaf, leaf_id)
+                leaf.plan_status = "GOOD"
+                db.add(leaf)
+            db.commit()
+
+        assert [r["Final"] for r in plan_judge_rows(engine, session_id)] == ["BREAKDOWN", "GOOD"]
+
+    def test_status_fields_are_what_set_status_takes(self, engine_and_session):
+        from JFI.tool.plan_db_tools import plan_status_fields
+        engine, session_id = engine_and_session
+        first = add_leaf(engine, session_id, "imp", "Core arithmetic")
+        add_leaf(engine, session_id, "imp", "Parse input")
+        mark_leaf_done(engine, session_id, first)
+
+        fields = plan_status_fields(engine, session_id)
+        assert (fields["plan"], fields["phase_plan"]) == ((1, 2), (1, 2))
+        assert fields["plan_markdown"].startswith("## Implementation")
+
+    def test_status_fields_carry_the_judge_table_for_the_fleet(self, engine_and_session):
+        """The fleet dashboard has no DB access: its Plan view showed only the
+        markdown checklist while Streamlit had the Task | Judge table, runbook
+        and design. The same rows now ride along in the status snapshot."""
+        from JFI.models import DesignEntry, RunbookEntry
+        from JFI.tool.plan_db_tools import plan_status_fields
         engine, session_id = engine_and_session
         add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [root] = _leaves(engine, session_id)
-        add_leaf(engine, session_id, "imp", "child", parent_id=root.id)
+        with get_session(engine) as db:
+            db.add(RunbookEntry(session_id=session_id, name="test", command="npx vitest run"))
+            db.add(DesignEntry(session_id=session_id, kind="stack", key="lang", text="JavaScript"))
+            db.commit()
 
-        result = delete_leaf(engine, session_id, root.id)
-        assert "Error" in result
-        assert len(_leaves(engine, session_id)) == 2  # nothing removed
-
-    def test_rejects_an_already_done_leaf(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Finished work")
-        [leaf] = _leaves(engine, session_id)
-        mark_leaf_done(engine, session_id, leaf.id)
-
-        result = delete_leaf(engine, session_id, leaf.id)
-        assert "Error" in result
-        assert len(_leaves(engine, session_id)) == 1  # nothing removed
-
-    def test_rejects_a_nonexistent_leaf(self, engine_and_session):
-        engine, session_id = engine_and_session
-        assert "Error" in delete_leaf(engine, session_id, 999)
-
-
-class TestUpdateLeaf:
-    def test_edits_description_and_clears_review_state(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Wrong text")
-        [leaf] = _leaves(engine, session_id)
-        review_leaf(engine, session_id, leaf.id, "rejected", "Say what it actually does")
-
-        result = update_leaf(engine, session_id, leaf.id, "Correct text")
-
-        assert "Updated" in result
-        [leaf_after] = _leaves(engine, session_id)
-        assert leaf_after.description == "Correct text"
-        assert leaf_after.review_status is None
-        assert leaf_after.review_note is None
-        assert leaf_after.rejection_count == 0
-
-    def test_rejects_a_parent(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [root] = _leaves(engine, session_id)
-        add_leaf(engine, session_id, "imp", "child", parent_id=root.id)
-
-        result = update_leaf(engine, session_id, root.id, "New text")
-        assert "Error" in result
-
-    def test_rejects_an_already_done_leaf(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Finished work")
-        [leaf] = _leaves(engine, session_id)
-        mark_leaf_done(engine, session_id, leaf.id)
-
-        result = update_leaf(engine, session_id, leaf.id, "New text")
-        assert "Error" in result
-
-    def test_rejects_a_nonexistent_leaf(self, engine_and_session):
-        engine, session_id = engine_and_session
-        assert "Error" in update_leaf(engine, session_id, 999, "text")
-
-
-class TestReviewLeaf:
-    def test_approves_a_leaf(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-
-        result = review_leaf(engine, session_id, leaf.id, "approved")
-
-        assert "Approved" in result
-        [leaf_after] = _leaves(engine, session_id)
-        assert leaf_after.review_status == "approved"
-        assert leaf_after.review_note is None
-        assert leaf_after.rejection_count == 0
-
-    def test_rejects_a_leaf_with_expected_changes(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-
-        result = review_leaf(engine, session_id, leaf.id, "rejected", "Name the actual function")
-
-        assert "Rejected" in result
-        [leaf_after] = _leaves(engine, session_id)
-        assert leaf_after.review_status == "rejected"
-        assert leaf_after.review_note == "Name the actual function"
-        assert leaf_after.rejection_count == 1
-
-    def test_rejection_requires_expected_changes(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-
-        result = review_leaf(engine, session_id, leaf.id, "rejected", "")
-        assert "Error" in result
-        [leaf_after] = _leaves(engine, session_id)
-        assert leaf_after.review_status is None  # nothing recorded
-
-    def test_rejects_an_invalid_verdict(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-
-        result = review_leaf(engine, session_id, leaf.id, "maybe", "x")
-        assert "Error" in result
-
-    def test_refuses_a_parent(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [root] = _leaves(engine, session_id)
-        add_leaf(engine, session_id, "imp", "child", parent_id=root.id)
-
-        result = review_leaf(engine, session_id, root.id, "approved")
-        assert "Error" in result
-
-    def test_circuit_breaker_trips_on_the_one_rejection_it_allows(self, engine_and_session):
-        """Same failure mode observed live: a whole-plan version of this
-        loop once burned ~2 hours re-reviewing a byte-identical, unfixed
-        plan (see todo_v1.md's "Why"). One call, one answer -- the SINGLE
-        rejection this tool allows already carries the circuit-breaker
-        warning; there is no multi-rejection "streak" to build up to it."""
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-
-        result = review_leaf(engine, session_id, leaf.id, "rejected", "still wrong")
-
-        assert "CIRCUIT BREAKER" in result
-        [leaf_after] = _leaves(engine, session_id)
-        assert leaf_after.rejection_count == REVIEW_REJECTION_CIRCUIT_BREAKER == 1
-
-    def test_circuit_breaker_refuses_a_second_rejection_in_a_row(self, engine_and_session):
-        """A mere warning wasn't enough to stop the real ~2-hour loop this
-        exists to prevent -- a SECOND rejection attempt on the same
-        still-unfixed leaf must be refused outright (an Error, nothing
-        recorded), not just warned about and allowed through."""
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-        review_leaf(engine, session_id, leaf.id, "rejected", "still wrong")
-
-        result = review_leaf(engine, session_id, leaf.id, "rejected", "yet another issue")
-
-        assert "Error" in result
-        assert "CIRCUIT BREAKER" in result
-        [leaf_after] = _leaves(engine, session_id)
-        # Nothing changed -- the refused call left count/note untouched.
-        assert leaf_after.rejection_count == 1
-        assert leaf_after.review_note == "still wrong"
-
-    def test_circuit_breaker_still_allows_approval_once_tripped(self, engine_and_session):
-        """The hard stop only refuses another REJECTION -- approving a
-        leaf that's already been rejected once must still work (that's
-        the escape hatch, not a dead end)."""
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-        review_leaf(engine, session_id, leaf.id, "rejected", "still wrong")
-
-        result = review_leaf(engine, session_id, leaf.id, "approved")
-
-        assert "Approved" in result
-        [leaf_after] = _leaves(engine, session_id)
-        assert leaf_after.review_status == "approved"
-        assert leaf_after.rejection_count == 0
-
-    def test_editing_the_leaf_resets_the_rejection_streak(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "Core arithmetic")
-        [leaf] = _leaves(engine, session_id)
-        review_leaf(engine, session_id, leaf.id, "rejected", "fix it")
-
-        update_leaf(engine, session_id, leaf.id, "Fixed description")
-        result = review_leaf(engine, session_id, leaf.id, "rejected", "one more issue")
-
-        # Recorded (not refused) -- the edit reset the one-rejection streak,
-        # even though this rejection ALSO carries its own circuit-breaker
-        # warning (every rejection does, by design -- see review_leaf).
-        assert "Error" not in result
-        assert "Rejected" in result
-        [leaf_after] = _leaves(engine, session_id)
-        assert leaf_after.rejection_count == 1
-
-    def test_rejects_a_nonexistent_leaf(self, engine_and_session):
-        engine, session_id = engine_and_session
-        assert "Error" in review_leaf(engine, session_id, 999, "approved")
-
-
-class TestTopLevelLeafIds:
-    def test_returns_only_top_level_ids_in_creation_order(self, engine_and_session):
-        engine, session_id = engine_and_session
-        add_leaf(engine, session_id, "imp", "First")
-        [first] = _leaves(engine, session_id)
-        add_leaf(engine, session_id, "imp", "child", parent_id=first.id)
-        add_leaf(engine, session_id, "testing", "Second top-level")
-
-        ids = top_level_leaf_ids(engine, session_id)
-
-        top_level = [leaf for leaf in _leaves(engine, session_id) if leaf.parent_id is None]
-        assert ids == [leaf.id for leaf in sorted(top_level, key=lambda leaf: leaf.id)]
-        assert len(ids) == 2  # the child is excluded
-
-    def test_empty_plan_returns_empty_list(self, engine_and_session):
-        engine, session_id = engine_and_session
-        assert top_level_leaf_ids(engine, session_id) == []
+        detail = plan_status_fields(engine, session_id)["plan_detail"]
+        assert [r["Task"] for r in detail["rows"]] == ["Core arithmetic"]
+        assert detail["runbook"] == [{"Name": "test", "Command": "npx vitest run", "Verified": ""}]
+        assert detail["design"] == [{"Kind": "stack", "Key": "lang", "Text": "JavaScript"}]
 
 
 class TestMakePlanDbTools:
-    def test_returns_bound_callables_for_every_tool(self, engine_and_session):
+    def test_only_the_read_tools_are_bound(self, engine_and_session):
+        """The v1 plan-editing tools (add_leaf, split_leaf, review_leaf, ...)
+        were removed with the v1 pipeline; the reviewer only reads."""
         engine, session_id = engine_and_session
+        add_leaf(engine, session_id, "imp", "Core arithmetic")
         tools = make_plan_db_tools(engine, session_id)
 
-        assert set(tools) == {
-            "get_plan", "get_leaf", "add_leaf", "start_leaf", "mark_leaf_done", "split_leaf",
-            "reorder_leaf", "merge_leaf", "delete_leaf", "update_leaf", "review_leaf",
-        }
-        assert "Added leaf" in tools["add_leaf"](phase="imp", description="Core arithmetic")
+        assert set(tools) == {"get_plan", "get_leaf"}
         assert "Core arithmetic" in tools["get_plan"]()

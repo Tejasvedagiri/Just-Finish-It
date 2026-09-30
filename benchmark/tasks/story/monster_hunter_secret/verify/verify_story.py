@@ -20,7 +20,7 @@ from pathlib import Path
 
 # A leaked chat-template/special token (</s>, <|channel|>, <tool_call|>, ...)
 # always has a '|' immediately touching a '<' or '>' -- real prose, markdown,
-# or HTML never does. Mirrors src/JFI/text_sanitize.py's own signature
+# or HTML never does. Mirrors src/JFI/utils/text_sanitize.py's own signature
 # exactly, deliberately conservative so it never flags legitimate punctuation.
 LEAKED_TOKEN_RE = re.compile(r"<\s*\||\|\s*>")
 

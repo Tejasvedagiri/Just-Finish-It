@@ -7,7 +7,7 @@ lets a user trade reload time for memory: snapshot `lms ps --json`, `lms
 unload --all`, run the step, then `lms load` each model back with the same
 key, context length, parallelism, identifier and TTL -- the settings JFI's
 own requests depend on (a model reloaded at LM Studio's default context
-would silently shrink the window the 20k episode budget is sized against).
+would silently shrink the window every episode budget is sized against).
 
 Reload keys are `modelKey`, never `selectedVariant`: observed with lms on
 this project's dev machine, `lms load qwen/qwen3.8-27b@4bit` fails to

@@ -1,21 +1,11 @@
-# tools/schemas.py
-#
-# CORE_TOOLS are sent with EVERY request (see runner._tools_for_session) --
-# the ones used almost every turn for real coding/verification work.
-# DEFERRED_TOOLS' full schemas are withheld by default and only added to a
-# session's own request once the model calls load_tool(name) to unlock one
-# (see tool/deferred_tools.py and DEFERRED_TOOLS_RULES below) -- this
-# mirrors this exact model's own experience of deferred tools it has to
-# fetch definitions for before calling. Measured cost at the time this was
-# added: ~2700 tokens total across 13 tools, resent unconditionally on
-# EVERY turn for the life of a session (hundreds to low thousands of turns
-# on a long-running one) regardless of whether that turn ever touches a
-# browser or a video file -- DEFERRED_TOOLS alone were ~1180 of those
-# tokens (browse_webpage/capture_screenshot/view_image/
-# fetch_webpage_images/extract_video_frames), paid on every single turn of
-# every session whether or not that session ever uses them.
+"""JSON schemas of the shared tools (files, shell, processes, browser and
+media, context cache, reviewer notes, plan reads, ask_llm). Episodes pick
+from TOOL_SCHEMAS by name (JFI.episode.tools): each role gets its core set,
+and the rarely-needed ones (roles.OPTIONAL_POOL) through that episode's own
+load_tool. The planner's node tools, the code tools and the runbook/design
+tools keep their schemas next to their implementations."""
 
-CORE_TOOLS = [
+TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
@@ -144,34 +134,9 @@ CORE_TOOLS = [
             }
         }
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "load_tool",
-            "description": (
-                "Unlocks one deferred tool's full schema starting on your NEXT turn, without "
-                "paying its schema cost on every turn until you actually need it. See SAVED "
-                "CONTEXT / the deferred-tools list in this system message for what's available "
-                "and each one's one-line purpose -- call this once per tool name, then use it "
-                "normally from then on for the rest of this session."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Exact deferred tool name, e.g. 'browse_webpage'."
-                    }
-                },
-                "required": ["name"]
-            }
-        }
-    },
 ]
 
-# Withheld by default -- see the module docstring above and
-# tool/deferred_tools.py's load_tool handler / DEFERRED_TOOLS_RULES text.
-DEFERRED_TOOLS = [
+TOOL_SCHEMAS += [
     {
         "type": "function",
         "function": {
@@ -459,10 +424,7 @@ DEFERRED_TOOLS = [
     },
 ]
 
-# These three were already defined after the deferred/media tools in this
-# file before the CORE/DEFERRED split -- still CORE_TOOLS (always sent),
-# just appended here rather than reordering everything above.
-CORE_TOOLS += [
+TOOL_SCHEMAS += [
     {
         "type": "function",
         "function": {
@@ -574,28 +536,6 @@ CORE_TOOLS += [
     {
         "type": "function",
         "function": {
-            "name": "write_plan_feedback",
-            "description": (
-                "Records that the plan has a real problem, checked against the ACTUAL repo state, "
-                "sending it back to the planner for one more pass before you review it again. Only "
-                "call this when the plan is genuinely not ready — an approved plan needs no call "
-                "here at all, just reply with a short 'Product Owner: APPROVED' summary instead."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": "Concrete, actionable feedback — one numbered item per concern, each naming the specific plan item number and/or file involved, plus what should change."
-                    }
-                },
-                "required": ["text"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "get_plan",
             "description": (
                 "Shows the current plan tree — every leaf's id, its display number "
@@ -628,227 +568,6 @@ CORE_TOOLS += [
     {
         "type": "function",
         "function": {
-            "name": "add_leaf",
-            "description": (
-                "Adds one new leaf (or root-level parent) to the plan. Replaces hand-editing a "
-                "markdown checklist — no numbering to get right, it's computed for display. "
-                "A leaf you plan to add children to later must be split_leaf'd once you do; "
-                "do not call add_leaf with parent_id pointing at a leaf that already has "
-                "status/timing of its own (get_plan shows you which ones do)."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "phase": {
-                        "type": "string",
-                        "enum": ["planner", "product_owner", "imp", "testing", "reviewer", "cleanup"],
-                        "description": "Which section this belongs under — almost always 'imp' or 'testing'."
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "The smallest doable piece of work this leaf represents."
-                    },
-                    "parent_id": {
-                        "type": "integer",
-                        "description": "The parent leaf's id from get_plan. Omit (or 0) for a top-level item."
-                    }
-                },
-                "required": ["phase", "description"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "start_leaf",
-            "description": (
-                "Marks a leaf as the one you're currently working on — records its start "
-                "time and shows it as the session's current task. Call this right before "
-                "you begin a leaf's real work; call mark_leaf_done when it's finished."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan."}
-                },
-                "required": ["leaf_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mark_leaf_done",
-            "description": (
-                "Marks a leaf complete — sets its status to done and records the end time. "
-                "Only ever call this on a genuine leaf (no children of its own); marking a "
-                "parent bullet done is rejected, same as ticking a markdown checklist's "
-                "parent checkbox was never allowed."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan."},
-                    "tokens": {
-                        "type": "integer",
-                        "description": "Optional: approximate context cost this leaf took, if worth recording."
-                    }
-                },
-                "required": ["leaf_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "split_leaf",
-            "description": (
-                "Turns an existing leaf into a parent with new child leaves under it — the "
-                "DB-backed replacement for plan_renumber.py's role: no renumbering needed, "
-                "since numbers are computed for display, not stored. Use this the moment you "
-                "realize a leaf is really more than one piece of work (e.g. it implies writing "
-                "a check AND then fixing whatever it finds), rather than attempting it as one "
-                "leaf first and only splitting after getting stuck."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan."},
-                    "into": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "At least 2 descriptions, one per new child leaf, in the order they should run."
-                    }
-                },
-                "required": ["leaf_id", "into"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "reorder_leaf",
-            "description": (
-                "Moves a leaf to sit right after another leaf among its OWN current "
-                "siblings (same parent, same phase) — the DB-backed replacement for "
-                "plan_renumber.py's role when you catch an ordering bug (e.g. a leaf verifies "
-                "something a LATER-numbered leaf is responsible for creating first). Every "
-                "sibling's display number recomputes automatically after the move — nothing "
-                "else to fix by hand."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan, to move."},
-                    "after_leaf_id": {
-                        "type": "integer",
-                        "description": "A SIBLING leaf's id to place it right after. Omit (or 0) to move it to the very front."
-                    }
-                },
-                "required": ["leaf_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "merge_leaf",
-            "description": (
-                "Folds a single child leaf back up into its parent, collapsing pointless "
-                "single-child nesting -- the undo for a split_leaf (or Journeyman/Function-"
-                "Breakdown pass) that left a parent with only one real child. The parent "
-                "absorbs the child's description and becomes a real, actionable leaf itself; "
-                "the child is removed. Only works when the parent has EXACTLY this one child "
-                "and the child itself has no children of its own -- if a single-child parent "
-                "is genuinely the smallest real task, call this instead of fabricating a fake "
-                "second child just to satisfy the 'at least 2 children' rule."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "leaf_id": {
-                        "type": "integer",
-                        "description": "The ONLY CHILD's leaf id (from get_plan) -- it gets folded up into its parent."
-                    }
-                },
-                "required": ["leaf_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_leaf",
-            "description": (
-                "Removes a genuinely wrong or duplicate leaf outright -- e.g. two byte-"
-                "identical leaves created by mistake, or one describing work that turned out "
-                "unnecessary. Refuses on a parent (has children -- merge_leaf/delete_leaf "
-                "those first) and on a leaf already marked done (that's a real completed-work "
-                "record, not a mistake to erase)."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan, to remove."}
-                },
-                "required": ["leaf_id"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_leaf",
-            "description": (
-                "Edits an existing genuine leaf's own description in place -- fixes a ticket "
-                "without losing its id or history (unlike delete_leaf + add_leaf). Use this to "
-                "rework a leaf review_leaf rejected. Refuses on a parent (no single description "
-                "to edit) or a leaf already marked done. Clears any prior review verdict/"
-                "rejection streak -- an edited ticket is ready for fresh review."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan, to edit."},
-                    "description": {"type": "string", "description": "The new, complete description text."}
-                },
-                "required": ["leaf_id", "description"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "review_leaf",
-            "description": (
-                "Program Manager's per-ticket verdict -- approve or reject ONE leaf, instead of "
-                "one whole-plan verdict for everything at once. Refused on a parent (review the "
-                "genuine leaves under it individually). A rejection REQUIRES expected_changes "
-                "(what should change, not just that it's wrong). ONE rejection per leaf, no "
-                "more: a SECOND rejection on the SAME leaf with no update_leaf edit in between "
-                "is refused outright -- approve it or escalate instead of rejecting again."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "leaf_id": {"type": "integer", "description": "The leaf's id, from get_plan, to review."},
-                    "verdict": {
-                        "type": "string",
-                        "enum": ["approved", "rejected"],
-                        "description": "Your verdict for this one leaf."
-                    },
-                    "expected_changes": {
-                        "type": "string",
-                        "description": "Required when verdict is 'rejected': concretely what should change."
-                    }
-                },
-                "required": ["leaf_id", "verdict"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "ask_llm",
             "description": (
                 "Asks a fresh, single-turn LLM call anything — write a description, brainstorm "
@@ -872,99 +591,3 @@ CORE_TOOLS += [
         }
     },
 ]
-
-# load_tool is the ONLY tool ever sent by default -- every other tool,
-# including the ones used almost every turn (write_file, execute_command,
-# read_file, ...), is unlocked on demand. This looks aggressive but the
-# economics favor it: unlocking a tool persists for the rest of the session
-# (SimpleSessionManager.unlock_tool), so each tool name costs its schema
-# exactly ONCE, ever, no matter how many hundreds of turns follow --
-# while the per-turn savings from not resending every OTHER tool's schema
-# compound for the entire rest of the session. A model that needs several
-# tools right away can call load_tool several times in the SAME turn (one
-# tool_call per name) to unlock everything it expects to need in one round
-# trip instead of paying the bootstrap cost tool-by-tool.
-_ALL_TOOLS_BEFORE_SPLIT = CORE_TOOLS + DEFERRED_TOOLS
-_load_tool_schema = next(t for t in _ALL_TOOLS_BEFORE_SPLIT if t["function"]["name"] == "load_tool")
-CORE_TOOLS = [_load_tool_schema]
-DEFERRED_TOOLS = [t for t in _ALL_TOOLS_BEFORE_SPLIT if t is not _load_tool_schema]
-
-# One-line purpose per deferred tool, shown in every system message (see
-# DEFERRED_TOOLS_RULES below) so the model knows these exist and roughly
-# what each is for WITHOUT paying their full parameter-schema cost until it
-# actually calls load_tool(name) to unlock one for real use.
-_DEFERRED_TOOL_SUMMARIES = {
-    "write_file": "write code/text to a file, creating directories as needed",
-    "execute_command": "run a shell command and get its output",
-    "read_file": "read an existing file's contents",
-    "append_to_file": "append a chunk to a file (build a long document in several smaller calls)",
-    "replace_in_file": "replace one exact substring in a file, leaving the rest untouched (tick a checkbox, patch a few lines)",
-    "context_save": "save one fact to your persistent context cache (survives history compression)",
-    "context_lookup": "search/list your persistent context cache",
-    "add_reviewer_note": "(imp) leave a short note for the Reviewer about a problem this step hit",
-    "get_reviewer_notes": "(reviewer) read whatever notes the Implementation agent left this pass",
-    "write_review_report": "(reviewer) record real problems found, triggering another full iteration",
-    "write_plan_feedback": "(product owner) record a real problem with the plan, sending it back to the planner",
-    "get_plan": "show the current plan tree (leaf ids, numbers, phase, status)",
-    "get_leaf": "show ONE leaf's full detail (description, phase, status, parent, children, timing), always complete, never truncated",
-    "add_leaf": "add one new leaf/parent to the plan -- the DB-backed replacement for hand-editing a markdown checklist",
-    "start_leaf": "mark a leaf as the one you're currently working on, recording its start time",
-    "mark_leaf_done": "mark a leaf complete, recording its end time -- rejected on a parent bullet",
-    "split_leaf": "turn a leaf into a parent with new child leaves -- no renumbering needed, unlike plan_renumber.py's old role",
-    "reorder_leaf": "move a leaf to sit right after another sibling -- fixes an ordering bug without any manual renumbering",
-    "merge_leaf": "fold a single child back into its parent -- the undo for a split_leaf that left a pointless single-child parent",
-    "delete_leaf": "remove a genuinely wrong/duplicate leaf outright (refused on a parent or an already-done leaf)",
-    "update_leaf": "edit an existing leaf's description in place -- fixes a ticket without losing its id/history",
-    "review_leaf": "Program Manager's per-ticket approve/reject verdict, with required expected_changes on a rejection",
-    "ask_llm": "a fresh, single-turn, STATELESS LLM call for a one-off text task (no file/conversation access)",
-    "capture_screenshot": "capture the primary monitor to a PNG (headless environments fail cleanly)",
-    "view_image": "attach an image file (a screenshot, a project asset, ...) so you can actually see it next turn",
-    "fetch_webpage_images": "plain-HTTP-GET a page and download the images it references (no JS execution)",
-    "browse_webpage": "load a URL in a real headless browser with JS execution, optionally click/wait/eval_js, and read the rendered page",
-    "extract_video_frames": "pull visually-distinct frames out of a video file as PNGs (needs ffmpeg)",
-    "start_background_process": "start a dev/test server (or any long-running command) in the background, tracked by a handle -- not a raw pid",
-    "list_processes": "list background processes THIS session started (not the whole OS) -- use instead of `ps`",
-    "stop_background_process": "stop a background process by its handle -- use instead of `pkill`/`kill` by guessed pid or pattern",
-    "clear_finished_processes": "prune exited processes' bookkeeping entries so list_processes/the dashboard only shows what's still relevant",
-}
-
-DEFERRED_TOOL_NAMES = frozenset(_DEFERRED_TOOL_SUMMARIES)
-assert DEFERRED_TOOL_NAMES == {t["function"]["name"] for t in DEFERRED_TOOLS}, (
-    "_DEFERRED_TOOL_SUMMARIES must list exactly the tools actually in DEFERRED_TOOLS"
-)
-
-def deferred_tools_rules(unlocked_tools=()) -> str:
-    """The TOOL ACCESS block for the system message -- lists only the
-    deferred tools NOT YET unlocked for this session, so it shrinks (and
-    disappears entirely once every tool this session ever needs has been
-    unlocked) instead of repeating the full 13-tool catalog on every turn
-    forever, including turns long after everything's already available.
-    """
-    remaining = {
-        name: summary for name, summary in _DEFERRED_TOOL_SUMMARIES.items()
-        if name not in unlocked_tools
-    }
-    if not remaining:
-        return ""
-    return (
-        "\n    TOOL ACCESS: only load_tool's own schema is available by default -- EVERY\n"
-        "    tool listed below is locked until you call load_tool(name) to unlock it.\n"
-        "    Unlocking persists for the rest of THIS session (you only ever pay for a given\n"
-        "    tool's schema once, no matter how many times you use it after that), so call\n"
-        "    load_tool once per name for every tool you expect to need soon (multiple\n"
-        "    load_tool calls in the SAME turn are fine and encouraged -- unlock several\n"
-        "    together rather than one per turn). Still locked:\n"
-        + "\n".join(f"    - {name}: {summary}" for name, summary in remaining.items())
-        + "\n"
-    )
-
-
-# Backward-compatible default (nothing unlocked yet) -- the one real caller
-# (simple_session_manager.get_system_message) always calls
-# deferred_tools_rules(...) with this session's own unlocked_tools() instead.
-DEFERRED_TOOLS_RULES = deferred_tools_rules()
-
-# Kept for any caller that wants the full combined list (e.g. offline
-# tooling/inspection) -- normal request traffic never sends this whole
-# thing at once; see runner._tools_for_session for what actually goes out.
-AVAILABLE_TOOLS = CORE_TOOLS + DEFERRED_TOOLS

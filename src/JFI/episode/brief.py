@@ -11,6 +11,8 @@ the one-line runbook and design indexes (pull, don't push).
 from dataclasses import dataclass, field
 from typing import Sequence
 
+from JFI.episode.environment import environment_line
+
 ROLE_LABEL = {
     "architect": "Architect (base and design)",
     "lead": "Lead (folders, files and stubs for one component)",
@@ -70,17 +72,13 @@ class ScopeAnchor:
 
 
 def build_system_message(anchor: ScopeAnchor, role_prompt: str, index_lines: Sequence[str] = ()) -> str:
-    parts = [anchor.render(), role_prompt.strip()]
+    parts = [anchor.render(), environment_line(), role_prompt.strip()]
     if index_lines:
         parts.append("AVAILABLE CONTEXT -- pull what you need with tools, only when you need it:\n"
                      + "\n".join(f"  {line}" for line in index_lines if line))
     return "\n\n".join(p for p in parts if p)
 
 
-def build_kickoff(anchor: ScopeAnchor, directives: Sequence[str] = ()) -> str:
-    text = f"Work on {'node ' + str(anchor.node_id) if anchor.node_id is not None else 'this'} now. " \
+def build_kickoff(anchor: ScopeAnchor) -> str:
+    return f"Work on {'node ' + str(anchor.node_id) if anchor.node_id is not None else 'this'} now. " \
            f"When it's complete, call {anchor.finish}."
-    if directives:
-        text += "\n\nThe user added these directives for this item -- follow them:\n" + \
-                "\n".join(f"- {d}" for d in directives)
-    return text

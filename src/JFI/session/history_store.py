@@ -1,7 +1,6 @@
 """DB-backed conversation history -- full cutover replacement for
-history.jsonl.gz (see /todo.md's Live validation section for why: once the
-plan itself moved to the DB, the remaining files -- history.jsonl.gz,
-context.json, metadata.json, run.log -- were the obvious next step rather
+history.jsonl.gz (once the plan itself moved to the DB, the remaining files
+-- history.jsonl.gz, context.json, metadata.json, run.log -- followed rather
 than leaving the migration half-done).
 
 `HistoryMessage.seq` is an explicit per-session incrementing counter (not
@@ -80,27 +79,3 @@ def append_history_to_db(engine, session_id: str, messages: list[dict], episode_
                 episode_id=episode_id,
             ))
         db.commit()
-
-
-def load_episode_messages(engine, session_id: str, episode_id: int) -> list[dict]:
-    """One v2 episode's conversation, rebuilt from exactly its own rows --
-    what keeps an episode isolated from every other (laya_plan.md §0)."""
-    with get_session(engine) as db:
-        rows = list(db.exec(
-            select(HistoryMessage)
-            .where(HistoryMessage.session_id == session_id, HistoryMessage.episode_id == episode_id)
-            .order_by(HistoryMessage.seq)
-        ))
-    messages = []
-    for row in rows:
-        message: dict = {"role": row.role}
-        if row.content is not None:
-            message["content"] = row.content
-        if row.tool_calls:
-            message["tool_calls"] = row.tool_calls
-        if row.tool_call_id is not None:
-            message["tool_call_id"] = row.tool_call_id
-        if row.name is not None:
-            message["name"] = row.name
-        messages.append(message)
-    return messages

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from JFI.text_sanitize import strip_leaked_special_tokens
+from JFI.utils.text_sanitize import strip_leaked_special_tokens
 
 
 def _get_safe_path(file_path: str) -> Path:

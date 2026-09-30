@@ -1,10 +1,11 @@
 """The per-episode token budget (laya_plan.md §0, D20).
 
-Every v2 episode must fit in EPISODE_TOKEN_BUDGET tokens (default 20,000):
-system prompt, brief, tool schemas, tool results and the model's own turns.
-JFI's models usually have a 32k-40k window; the budget is capped at
-CONTEXT_SIZE x CONTEXT_COMPRESSION_RATIO (the same two settings v1 uses, per
-role via its env-prefix chain) so it can never exceed what the model holds.
+Every episode must fit in CONTEXT_SIZE x CONTEXT_COMPRESSION_RATIO tokens
+(per role via its env-prefix chain): system prompt, brief, tool schemas, tool
+results and the model's own turns; the rest of the window is left for the
+reply. There used to be a separate EPISODE_TOKEN_BUDGET (20,000) under that;
+the user dropped it -- "I know I can use that size" -- so the context the
+server really holds is the only knob.
 """
 
 import json
@@ -13,18 +14,13 @@ from typing import Any, List, Optional
 
 from JFI.llm.base_llm_stream import phase_env
 
-DEFAULT_EPISODE_TOKEN_BUDGET = 20_000
 DEFAULT_CONTEXT_SIZE = 32_768  # same defaults as SimpleSessionManager
 DEFAULT_CONTEXT_RATIO = 0.7
-DEFAULT_MAX_EPISODE_TURNS = 15
+DEFAULT_MAX_EPISODE_TURNS = 25
 CHARS_PER_TOKEN = 4
 
 
 def episode_token_budget(prefixes=()) -> int:
-    try:
-        budget = int(os.environ.get("EPISODE_TOKEN_BUDGET", DEFAULT_EPISODE_TOKEN_BUDGET))
-    except ValueError:
-        budget = DEFAULT_EPISODE_TOKEN_BUDGET
     try:
         window = int(phase_env(prefixes, "CONTEXT_SIZE", str(DEFAULT_CONTEXT_SIZE)))
     except ValueError:
@@ -33,7 +29,7 @@ def episode_token_budget(prefixes=()) -> int:
         ratio = float(os.environ.get("CONTEXT_COMPRESSION_RATIO", DEFAULT_CONTEXT_RATIO))
     except ValueError:
         ratio = DEFAULT_CONTEXT_RATIO
-    return max(1_000, min(budget, int(window * ratio)))
+    return max(1_000, int(window * ratio))
 
 
 def max_episode_turns() -> int:

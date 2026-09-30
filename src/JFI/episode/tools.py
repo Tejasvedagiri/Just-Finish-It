@@ -14,7 +14,7 @@ from JFI.planner.nodes import NODE_TOOL_SCHEMAS
 from JFI.tool.code_tools import CODE_TOOL_SCHEMAS
 from JFI.tool.design_tools import DESIGN_TOOL_SCHEMAS
 from JFI.tool.runbook_tools import RUNBOOK_TOOL_SCHEMAS
-from JFI.tool.schemas import CORE_TOOLS, DEFERRED_TOOLS
+from JFI.tool.schemas import TOOL_SCHEMAS
 
 FINISH_SCHEMA = {"type": "function", "function": {
     "name": "finish",
@@ -28,7 +28,7 @@ FINISH_SCHEMA = {"type": "function", "function": {
 
 
 def _known_schemas(extra: Sequence[dict]) -> Dict[str, dict]:
-    schemas = {t["function"]["name"]: t for t in CORE_TOOLS + DEFERRED_TOOLS if t["function"]["name"] != "load_tool"}
+    schemas = {t["function"]["name"]: t for t in TOOL_SCHEMAS}
     for t in [*RUNBOOK_TOOL_SCHEMAS, *DESIGN_TOOL_SCHEMAS, *CODE_TOOL_SCHEMAS, *NODE_TOOL_SCHEMAS, FINISH_SCHEMA,
               *extra]:
         schemas[t["function"]["name"]] = t
@@ -74,9 +74,6 @@ class EpisodeTools:
         self.active.append(name)
         self.loaded.append(name)
         return f"Loaded {name}; it's available from your next call."
-
-    def has(self, name: str) -> bool:
-        return name == "load_tool" or name in self.active
 
     def call(self, name: str, args: Dict[str, Any]):
         if name == "load_tool":

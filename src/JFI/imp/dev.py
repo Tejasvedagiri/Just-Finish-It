@@ -24,7 +24,9 @@ Recovery:
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
+from datetime import timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -37,13 +39,14 @@ from JFI.episode.roles import ROLE_ENV_PREFIXES
 from JFI.episode.tools import EpisodeTools
 from JFI.imp.prompts import FINISH_UP, PARTIAL_ATTEMPT, SETUP, dev_prompt
 from JFI.imp.queue import FINISHED, dev_leaves, next_leaf
-from JFI.models import Leaf, PlanEvent, RunbookEntry, get_session
+from JFI.models import Leaf, PlanEvent, RunbookEntry, build_indexes, display_number, get_session
 from JFI.models._util import utcnow
 from JFI.models.enums import LeafStatus
-from JFI.planner.nodes import BREAKDOWN, children_of, load_nodes, path_of
-from JFI.tool.code_tools import _symbols, make_code_tools, resolve_path, scan_markers
+from JFI.planner.nodes import BREAKDOWN, children_of, load_nodes, path_of, target_symbol
+from JFI.tool.code_tools import DOC_SUFFIXES, _symbols, make_code_tools, resolve_path, scan_markers
 from JFI.tool.design_tools import design_index, make_design_tools
 from JFI.tool.note_tools import add_reviewer_note
+from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.result_cap import cap_result
 from JFI.tool.runbook_tools import make_runbook_tools, runbook_index, runbook_set
 
@@ -119,12 +122,33 @@ def not_implemented_symbol(output: str, root: Optional[Path] = None) -> Optional
     return frames[-1] if frames else None
 
 
-_CALL = re.compile(r"(\w+)\s*\(")
+_WORDS_WANTED = re.compile(r"(\d+)\s*(?:-\s*\d+\s*)?words", re.I)
 
 
-def target_symbol(description: str) -> Optional[str]:
-    match = _CALL.search(description)
-    return match.group(1) if match else None
+def _passage_counts(document: Path) -> tuple[int, int]:
+    """(placeholders left, words) in a document: what a passage leaf's gate
+    compares against the snapshot taken when its episode started."""
+    text = document.read_text(encoding="utf-8")
+    placeholders = sum(1 for line in text.splitlines() if "JFI:" in line and "JFI-FILE:" not in line)
+    return placeholders, len(re.findall(r"\b\w+\b", re.sub(r"<!--.*?-->", "", text, flags=re.S)))
+
+
+def _passage_problem(document: Path, before: tuple[int, int], done_when: str) -> Optional[str]:
+    """The document path's mechanical gate (G4): one placeholder fewer, and at
+    least 80% of the length done_when asks for added."""
+    placeholders, words = _passage_counts(document)
+    if placeholders >= before[0]:
+        return f"its JFI: placeholder is still in {document.name} -- replace that line with the passage"
+    wanted = _WORDS_WANTED.search(done_when)
+    added = words - before[1]
+    if wanted and added < 0.8 * int(wanted.group(1)):
+        return f"it adds about {added} words; done_when asks for {wanted.group(1)}"
+    return None
+
+
+def _epoch(moment) -> Optional[float]:
+    """A stored (naive UTC, see JFI.models._util) datetime as time.time()."""
+    return moment.replace(tzinfo=timezone.utc).timestamp() if moment else None
 
 
 class Imp:
@@ -170,8 +194,18 @@ class Imp:
             db.commit()
         self.deferred.pop(leaf.id, None)
 
-        result = self._leaf_episode(leaf, partial)
+        title = self._title(leaf)
+        result = self._leaf_episode(leaf, partial, title)
+        with get_session(self.engine) as db:
+            row = db.get(Leaf, leaf.id)
+            row.tokens = (row.tokens or 0) + result.tokens
+            db.add(row)
+            db.commit()
+        self.console.set_status(**plan_status_fields(self.engine, self.session_id))
         after = self._leaf(leaf.id)
+        if after.status == LeafStatus.DONE:
+            self.console.record_task_tokens(title, after.tokens or 0, _epoch(after.started_at),
+                                            _epoch(after.ended_at), phase="imp")
         if leaf.id in self.deferred:
             with get_session(self.engine) as db:
                 row = db.get(Leaf, leaf.id)
@@ -206,10 +240,19 @@ class Imp:
     # ---------------------------------------------------------------- the gate
 
     def _mark_leaf_done(self, leaf: Leaf):
+        document = self._document(leaf)
+        before = _passage_counts(document) if document else None
+
         def mark_leaf_done(leaf_id: int, summary: str = "", test_id: Optional[str] = None,
                            check: Optional[str] = None) -> str:
             if int(leaf_id) != leaf.id:
                 return f"Error: this conversation is about leaf {leaf.id}, not {leaf_id}."
+            if leaf.kind == "passage" and document and not test_id and not check:
+                problem = _passage_problem(document, before, leaf.done_when or "")
+                if problem:
+                    return f"Error: the passage isn't done: {problem}."
+                self._finish_leaf(leaf.id)
+                return f"Done: leaf {leaf.id} (the passage is written)."
             if test_id:
                 test_one = self._runbook("test_one")
                 if test_one is None:
@@ -237,6 +280,13 @@ class Imp:
                               f"{output}", "Only the end of the output is shown.")
         return mark_leaf_done
 
+    def _document(self, leaf: Leaf) -> Optional[Path]:
+        for name in leaf.files or []:
+            target, error = resolve_path(self.root, name)
+            if not error and target.suffix.lower() in DOC_SUFFIXES and target.is_file():
+                return target
+        return None
+
     def _missing_dependency(self, leaf: Leaf, output: str) -> Optional[Leaf]:
         """The unfinished leaf that implements the stub the test ran into.
         Leaves are matched by the function they're FOR -- the first `name(`
@@ -258,7 +308,13 @@ class Imp:
 
     # ---------------------------------------------------------------- episodes
 
-    def _leaf_episode(self, leaf: Leaf, partial: bool):
+    def _title(self, leaf: Leaf) -> str:
+        """"1.2.3 description": the dashboards find the current leaf, and
+        file its tokens and time, by that leading number."""
+        by_id, siblings = build_indexes(load_nodes(self.engine, self.session_id))
+        return f"{display_number(by_id[leaf.id], by_id, siblings)} {leaf.description}"
+
+    def _leaf_episode(self, leaf: Leaf, partial: bool, title: str):
         nodes = load_nodes(self.engine, self.session_id)
         by_id = {n.id: n for n in nodes}
         why = []
@@ -269,15 +325,21 @@ class Imp:
         anchor = ScopeAnchor(role="dev", node_id=leaf.id, node=leaf.description, done_when=leaf.done_when or "",
                              files=leaf.files or [], path=path_of(by_id, leaf), reason=" ".join(why),
                              finish=f"mark_leaf_done({leaf.id}, summary, test_id=... or check=...)")
-        return self._episode(anchor, dev_prompt(leaf.kind, leaf.description), self._mark_leaf_done(leaf), "leaf")
+        return self._episode(anchor, dev_prompt(leaf.kind, leaf.description), self._mark_leaf_done(leaf), "leaf",
+                             task=title)
 
-    def _chore(self, mode: str, prompt: str, why: str, command: Optional[str]):
+    def _chore(self, mode: str, prompt: str, why: str, entry: Optional[str]):
         """A leafless Dev episode (setup, finish-up) whose mark_leaf_done
-        re-runs `command` as its proof."""
+        re-runs the runbook's `entry` command as its proof. Read afresh on
+        every call: fixing the command itself (runbook_set) is often the fix,
+        and a command captured at the start kept failing after the real
+        run's Dev had corrected it, until the episode hit its turn cap."""
         def mark_leaf_done(leaf_id: int = 0, summary: str = "", test_id: Optional[str] = None,
                            check: Optional[str] = None) -> str:
-            if command is None:
+            row = self._runbook(entry) if entry else None
+            if row is None:
                 return "Done."
+            command = row.command
             code, output = run_command(command, self.root)
             if code == 0:
                 return f"Done: `{command}` passed."
@@ -287,7 +349,8 @@ class Imp:
                              finish="mark_leaf_done(0, summary)")
         return self._episode(anchor, prompt, mark_leaf_done, mode)
 
-    def _episode(self, anchor: ScopeAnchor, prompt: str, finish_tool: Callable, mode: str):
+    def _episode(self, anchor: ScopeAnchor, prompt: str, finish_tool: Callable, mode: str,
+                 task: Optional[str] = None):
         self.episodes += 1
         impl = {**self.base_tools,
                 **make_runbook_tools(self.engine, self.session_id, "dev"),
@@ -297,7 +360,7 @@ class Imp:
                 "mark_leaf_done": finish_tool}
         system = build_system_message(anchor, prompt, [runbook_index(self.engine, self.session_id),
                                                        design_index(self.engine, self.session_id)])
-        self.console.set_status(stage="Dev")
+        self.console.set_status(stage="Dev", task=(task or anchor.node)[:140], task_started_at=time.time())
         self.console.display_rule(f"DEV · {mode}" + (f" — leaf {anchor.node_id}" if anchor.node_id else ""))
         return run_episode(self.llm, self.console, self.engine, self.session_id, role="dev", mode=mode,
                            anchor=anchor, system_message=system,
@@ -314,8 +377,7 @@ class Imp:
         if code != 0:
             if self.console.should_stop():
                 return False
-            self._chore("setup", SETUP, f"`{setup.command}` failed (exit {code}): {output[-1500:]}",
-                        setup.command)
+            self._chore("setup", SETUP, f"`{setup.command}` failed (exit {code}): {output[-1500:]}", "setup")
             setup = self._runbook("setup")
             code, _ = run_command(setup.command, self.root)
         if code == 0:
@@ -336,7 +398,8 @@ class Imp:
             problems.append("leftover markers: " + "; ".join(f"{p}:{no} {m}" for p, no, m in markers[:30]))
         if not problems or self.console.should_stop():
             return
-        self._chore("finish-up", FINISH_UP, " | ".join(problems), build.command if build else None)
+        self._chore("finish-up", FINISH_UP, " | ".join(problems), "build" if build else None)
+        build = self._runbook("build")
         if build is not None:
             code, _ = run_command(build.command, self.root)
             if code == 0:

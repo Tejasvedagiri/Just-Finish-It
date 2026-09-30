@@ -13,7 +13,7 @@ never could be.
 `awaiting_prompt`/`awaiting_options` stay fields here rather than their own
 table: there is only ever ONE current awaiting prompt per session (never a
 history worth separate rows -- once answered it's just cleared, and the
-transition itself is already captured as a LogEvent/ActivityEvent), so a
+transition itself is already captured as a LogEvent), so a
 table would model something with no multi-row shape.
 """
 

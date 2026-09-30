@@ -8,38 +8,47 @@ before trusting README's file/path details).
 ## Read first: how the pipeline works
 
 Before you change `runner.py`, any phase prompt, or the plan tools, read
-[`docs/pipeline.md`](docs/pipeline.md) (call chain, turn loop, resume,
+[`docs/pipeline.md`](docs/pipeline.md) (call chain, episodes, resume,
 iterations, known gaps). Then read the doc for the phase you're touching:
 
-- [`docs/phase-planner.md`](docs/phase-planner.md) (Arc → Lead → Dev → Task Planner)
-- [`docs/phase-product-owner.md`](docs/phase-product-owner.md)
-- [`docs/phase-imp.md`](docs/phase-imp.md)
-- [`docs/phase-testing.md`](docs/phase-testing.md)
+- [`docs/phase-planner.md`](docs/phase-planner.md) (Architect → Lead → Task, judged)
+- [`docs/phase-imp.md`](docs/phase-imp.md) (one Dev episode per leaf)
 - [`docs/phase-reviewer.md`](docs/phase-reviewer.md)
 - [`docs/phase-cleanup.md`](docs/phase-cleanup.md)
-- [`docs/plan-tree.md`](docs/plan-tree.md) (the `Leaf` model and plan tools)
+- [`docs/plan-tree.md`](docs/plan-tree.md) (the `Leaf` model and plan read tools)
 
 If you change behavior those docs describe, update them in the same
 change. If a doc disagrees with the code, the code wins; fix the doc.
 
-## In-progress rewrite: the v2 pipeline
+## The v2 pipeline
 
-A multi-session rewrite of the planner (and Dev/reviewer) is underway:
-Architect → Lead → Task with a Laya judge, and `v1` and `v2` side by side
-behind `SessionRecord.pipeline_version`. If your task touches the planner,
-imp, reviewer, the plan tools or the DB schema, read these first:
+JFI was rewritten (complete 2026-09-29): Architect → Lead → Task planning in
+short, scoped episodes with a judge between layers, then one Dev episode per
+leaf. **v2 is the only pipeline.** v1 (the tiered Arc → Lead → Dev →
+Task Planner planner, the Program Manager phase, the testing phase, the
+adaptive session manager and v1's plan-editing tools) was deleted; its
+sessions can't be resumed (`_run_session` refuses them by
+`SessionRecord.pipeline_version`), but `export-db` still reads them, so the
+`product_owner`/`testing` enum values and v1 columns stay. If your task
+touches the planner, imp, reviewer, the plan tools or the DB schema, read
+these first:
 
-- [`laya_plan.md`](laya_plan.md): the design and every agreed decision;
-- [`laya_impl_phases.md`](laya_impl_phases.md): the phases, and the
-  **Progress** section that says what's done and what's next.
+- [`docs/laya_plan.md`](docs/laya_plan.md): the design and every agreed decision;
+- [`docs/laya_impl_phases.md`](docs/laya_impl_phases.md): how it was built,
+  phase by phase, and the log of real runs and the bugs they found.
 
-The v2 code is `src/JFI/episode/` (scoped episodes), `src/JFI/planner/`
-and `src/JFI/imp/`, and a session opts in when it's created with
-`JFI_PIPELINE=v2` (`session/pipeline.py`); `run_phase` dispatches on it.
+The code is `src/JFI/episode/` (scoped episodes), `src/JFI/planner/`,
+`src/JFI/imp/` and `src/JFI/review/` (reviewer + cleanup); `run_phase` hands
+every phase to them. There is no long, compressed conversation any more:
+every LLM call is one short episode.
 
-Update the Progress section at the end of any session that advances the
-rewrite. Until phase 11, `v1` is the default and must keep working
-unchanged.
+The planner's judge is a fixed rule; `LAYA=1` in `.env` adds a second score
+from Laya's published `english` checkpoint, and an LLM breaks the tie when
+they disagree and Laya is confident (`LAYA_MIN_CONFIDENCE`). Laya isn't fine-tuned:
+fine-tunes overfitted to the node's level (see `docs/phase-planner.md`).
+
+Both are a reference now: record later design changes in the `docs/phase-*.md`
+page they touch.
 
 ## Repo shape
 
@@ -71,26 +80,21 @@ tooling, or filesystem access. Many docstrings here still name that repo's
 of those contracts (phase keys, reporter message shapes), the matching
 change has to be made in `Just-Finish-It-Fleet` too.
 
-`design-mockups/plan-list/` is standalone HTML mockups for the **fleet**
-dashboard's plan view (they cite `frontend/src/main.js`). Nothing here
-loads them; treat them as reference for fleet work, not as a UI of this
-repo.
-
 Where things live:
 
 | Path | What it is |
 |------|------------|
-| `src/JFI/runner.py` | `main()` → `run_pipeline()` → `_run_session()` → `run_phase()` → `_drive_turn_loop()`. Owns `PHASES`, `TOOL_MAP`, per-phase LLM construction (`PHASE_ENV_PREFIX`), the tiered planner, the product-owner and review loops, tool-call execution + `AUTO-RECTIFY` coaching. |
-| `src/JFI/session/simple_session_manager.py` | All phase/stage **prompt text** (`get_system_message`, `get_phase_trigger`, `PLAN_FORMAT_RULES`, `CONTEXT_CACHE_RULES`, `VERIFICATION_RULES`), history compression/digests, context-window budgeting, the `.jfi/.lock`. |
-| `src/JFI/session/adaptive_session_manager.py` + `task_rules.py` | Default `SESSION_MANAGER=adaptive`: detects goal type (python/javascript/go/sql/html-css/data-eng/story) and swaps in type-specific plan rules. |
+| `src/JFI/runner.py` | `main()` → `run_pipeline()` → `_run_session()` → `run_phase()` → the phase's episodes. Owns `PHASES`, `TOOL_MAP` (the shared tools, rebound per session), per-phase LLM construction (`PHASE_ENV_PREFIX`), the judge per session, and the review/iteration loop. |
+| `src/JFI/session/simple_session_manager.py` | Session persistence: history (DB, legacy file migration), metadata, plan progress, the `.jfi/.lock`. |
+| `src/JFI/episode/`, `src/JFI/planner/`, `src/JFI/imp/` | The episode engine, the planner (loop, node tools, judge) and Dev (queue, gated `mark_leaf_done`). |
 | `src/JFI/models/` | SQLModel tables — the session's real state (see "Where session state lives"). |
-| `src/JFI/tool/` | Everything the model can call. `schemas.py` = JSON schemas; one module per tool family; `plan_db_tools.py` = the plan tree API. |
+| `src/JFI/tool/` | Everything the model can call. `schemas.py` = JSON schemas; one module per tool family; `plan_db_tools.py` = the plan's read tools and display helpers. |
 | `src/JFI/llm/` | `BaseLLMStream` + OpenAI-compatible and Anthropic backends; `backend_select.py` picks one from `LLM_BACKEND`. |
 | `src/JFI/manager/` | `AbstractManager` (console contract; `PHASE_DISPLAY_NAMES`), the prompt_toolkit TUI (`pt_console_manager.py`, `key_bindings.py`, `theme_env.py`), plus `web_bridge.py` (file-based, for `jfi-web`) and `socket_reporter.py` (WebSocket client, for the fleet master). |
+| `src/JFI/utils/` | Small shared helpers that belong to no one subsystem (`text_sanitize.py`: strips leaked chat-template tokens from model output). Not the repo-root `utils/`, which is dev-only scripts. |
 | `src/JFI/web/` | Optional Streamlit `jfi-web` dashboard (`dashboard.py`) and its console-script `launcher.py` (`--extra web`). |
-| `src/JFI/orchestrator/` | Legacy `BaseOrchestrator`; `runner.py` doesn't use it. Don't build on it. |
 | `src/JFI/create_env.py`, `src/build_binary/`, `src/export_db/` | `uv run create-env` / `build` / `export-db` console scripts. |
-| `test/` | pytest suite. `benchmark/` is a separate, non-shipped eval harness (see its README). `utils/`, `docs/`, `design-mockups/` are dev-only. |
+| `test/` | pytest suite. `benchmark/` is a separate, non-shipped eval harness (see its README). `utils/` and `docs/` are dev-only. |
 
 ## Before you start: check `uv run` vs plain `python3`
 
@@ -115,9 +119,8 @@ venv, not system Python. If you're unsure a command is right, try
   feedback (`SessionNote`), queue, processes, and unlocked tools are all
   DB rows now. Code or prompts that read/write `plan.md`,
   `NotesForReviewer.md`, `review.md`, `feedback_to_plan.md`,
-  `context.json` or `history.jsonl.gz` as a source of truth are legacy.
-  `plan_path`/`DEFAULT_PLAN_PATH` still exist only as a fallback/display
-  path.
+  `context.json` or `history.jsonl.gz` as a source of truth are legacy;
+  nothing reads a `plan.md` any more.
 - Adding a column to an existing table: `create_all` never alters
   existing tables — add it to `_ensure_columns` in `models/db.py` too, or
   older project DBs won't get it (SQLite only).
@@ -126,84 +129,79 @@ venv, not system Python. If you're unsure a command is right, try
 
 ## Pipeline and planner shape (when editing `runner.py` or prompts)
 
-- Phase **keys** (`planner`, `product_owner`, `imp`, `testing`,
-  `reviewer`, `cleanup`) and their `<PHASE>_COMPLETE` markers are
-  persisted in history and drive resume — never rename them. Change only
-  `PHASE_DISPLAY_NAMES` in `manager/abstract_manager.py` for UI text
-  (e.g. `product_owner` displays as "Program Manager").
-- The planner is tiered by default: Architect once over the whole tree
-  (`ARCHITECT_STAGE_COMPLETE`), then **depth-first per top-level leaf**
-  Lead → Dev → Task Planner (`team_lead`/`journeyman`/`function_breakdown`),
-  each emitting a node-scoped marker like `LEAD_STAGE_COMPLETE_NODE_7`.
-  Resume works by scanning history for those markers; `PLANNER_COMPLETE`
-  is appended synthetically. `PLANNER_SINGLE_PASS=1` opts out.
-- product_owner reviews **per leaf** via `review_leaf` (approve/reject
-  with `expected_changes`, see `Leaf.review_status`/`rejection_count`)
-  and can send the plan back with `write_plan_feedback`; capped by
-  `MAX_PRODUCT_OWNER_ITERATIONS`. A failed review loops everything again,
-  capped by `MAX_REVIEW_ITERATIONS`.
+- Phase **keys** (`planner`, `imp`, `reviewer`, `cleanup`) and their
+  `<PHASE>_COMPLETE` markers are persisted in history and drive resume —
+  never rename them (the fleet dashboard mirrors them too). Change only
+  `PHASE_DISPLAY_NAMES` in `manager/abstract_manager.py` for UI text.
+- The planner loop (`JFI.planner.loop`) re-reads the DB every step, so
+  resume is "run again"; `PLANNER_COMPLETE` is appended when every node is
+  GOOD. imp writes `IMP_COMPLETE` when every leaf is finished. Neither
+  trusts model text for completion.
+- A failed review loops everything again, capped by `MAX_REVIEW_ITERATIONS`;
+  the review report reaches the planner as the iteration's feedback
+  (`runner._replan_feedback`).
 
-## The plan tree (if you're editing planner prompts or `plan_db_tools.py`)
+## The plan tree (if you're editing planner prompts or the node tools)
 
-- The plan is `Leaf` rows (`models/leaf.py`), edited only through the
-  tools in `tool/plan_db_tools.py` (`get_plan`, `get_leaf`, `add_leaf`,
-  `start_leaf`, `mark_leaf_done`, `split_leaf`, `merge_leaf`,
-  `reorder_leaf`, `delete_leaf`, `update_leaf`, `review_leaf`) — never by
-  text edits.
+- The plan is `Leaf` rows (`models/leaf.py`), written only through the
+  planner's node tools (`JFI.planner.nodes`) and Dev's gated
+  `mark_leaf_done` (`JFI.imp.dev`) — never by text edits. The reviewer
+  reads it with `get_plan`/`get_leaf` (`tool/plan_db_tools.py`).
 - Parent vs leaf is structural (has children or not), not a flag. Only
-  real leaves carry status/timing; the tools reject status changes on a
-  parent.
+  real leaves carry status/timing.
 - Siblings are ordered by a gap-numbered `sort_key` (10, 20, 30…). Dot
   numbers like `1.1.2` are **computed for display only**
-  (`display_number`), per phase — Implementation and Testing are
-  separately numbered trees. Never store or hand-maintain them.
-- Depth is capped mechanically (`MAX_LEAF_DEPTH`, and a stricter
-  `MAX_INVESTIGATION_DEPTH` for diagnostic branches) because prompt
-  guidance alone didn't stop runaway recursive splitting in a real run.
-  Keep that backstop in code, not just prompt text.
-- `render_plan_markdown` renders the old `- [ ] N.M` markdown for
-  display/`export-db` only. `tool/plan_renumber.py` is legacy from the
-  markdown era — don't point new prompts at it.
+  (`display_number`). Never store or hand-maintain them.
+- Depth is capped mechanically (`MAX_LEAF_DEPTH` in `JFI.planner.nodes`)
+  because prompt guidance alone didn't stop runaway recursive splitting in
+  a real run. Keep that backstop in code, not just prompt text; the same
+  goes for the duplicate, ownership and `depends_on` checks there.
+- `render_plan_markdown` renders the old `- [ ] N.M` markdown, plain (the
+  judge's scores are in the dashboard's Task | Judge table), for the status
+  bar and the fleet dashboard only. The table itself reaches the fleet as
+  `plan_detail` in the status snapshot (`plan_status_fields`: the
+  `plan_judge_rows`, runbook and design); the fleet's `renderJudgePanel`
+  reads those row keys, so renaming a column means changing it there too.
 
 ## Adding or changing a model-facing tool
 
-1. Schema in `tool/schemas.py` — `DEFERRED_TOOLS` (locked until the model
-   calls `load_tool`) unless it's needed nearly every turn. A deferred
-   tool also needs a one-line entry in `_DEFERRED_TOOL_SUMMARIES`; an
-   import-time `assert` enforces the two stay in sync.
-2. A `TOOL_MAP` entry in `runner.py`. Tools that need the session's DB
-   engine get a placeholder lambda there ("not available yet — no session
-   is active") and are rebound in `_run_session` via a
-   `make_*_tools(engine, session_id)` factory, like
-   `make_context_tools`/`make_note_tools`/`ssm.plan_db_tools()`.
-3. Return a string (only `view_image` returns a tuple). Start failures
-   with `Error` (that's all `_is_failure` checks) so the AUTO-RECTIFY
-   coaching and retry counting pick them up.
-4. Mention it in the relevant phase prompt in
-   `simple_session_manager.py`/`task_rules.py` — prompt tests
-   string-match that text.
+1. Schema: shared tools go in `tool/schemas.py`'s `TOOL_SCHEMAS`; a tool
+   family with its own module keeps its schemas beside it (the planner's
+   `NODE_TOOL_SCHEMAS`, `CODE_TOOL_SCHEMAS`, `RUNBOOK_TOOL_SCHEMAS`, ...)
+   and is added to `episode/tools.py`'s `_known_schemas`.
+2. Who gets it: a role's core set in `episode/roles.py`
+   (`ROLE_CORE_TOOLS`), or `OPTIONAL_POOL` for a rarely-needed tool that
+   any episode can `load_tool` for itself.
+3. The implementation reaches the episode through the role's tool dict:
+   `make_*_tools(engine, session_id)` factories, or `TOOL_MAP` in
+   `runner.py` (rebound per session in `_run_session`) for the shared and
+   pool tools.
+4. Return a string (only `view_image` returns a tuple). Start failures
+   with `Error` (that's all `episode/rectify.is_failure` checks) so the
+   AUTO-RECTIFY coaching and retry counting pick them up.
+5. Mention it in the role's prompt (`JFI.planner.prompts`,
+   `JFI.imp.prompts`, `JFI.review.prompts`) -- prompt tests string-match
+   that text.
 
 ## After changing Python code
 
 1. `uv run pytest` — run the **whole** suite, not just the file you
    touched. Tests here frequently exercise cross-module wiring (e.g.
-   `runner.py`'s per-phase LLM construction, `simple_session_manager.py`'s
-   prompt text), so a change in one file can silently break assertions in
-   another test file that string-matches prompt content.
+   `runner.py`'s per-phase LLM construction, the role prompts), so a change
+   in one file can silently break assertions in another test file that
+   string-matches prompt content.
    - The Anthropic tests need `--extra anthropic` synced (see below).
    - **On Windows** the suite doesn't fully pass: `test_session_lock.py`
      fails to import (`fcntl` is POSIX-only — pass
      `--ignore=test/test_session_lock.py`), `test_process_tools.py`'s
-     stop tests need `os.getpgid`, and `test_plan_location.py` /
-     `test_get_system_message.py` assert `/` path separators. Compare
-     against that baseline rather than chasing it, and don't "fix" the
-     locking or process-group code for Windows as a side effect of an
-     unrelated change. The project targets Linux/macOS.
+     stop tests need `os.getpgid` (3 failures). Compare against that
+     baseline rather than chasing it, and don't "fix" the locking or
+     process-group code for Windows as a side effect of an unrelated
+     change. The project targets Linux/macOS.
 2. `uv run ruff check <changed files>` (or `uv run ruff check .` — the
-   repo currently has pre-existing warnings: 2 `E741` under
-   `benchmark/tasks/**/verify_story.py` and a few `F401`/`F541` in
-   `pt_console_manager.py`/`simple_session_manager.py`; don't feel
-   obligated to fix unrelated pre-existing lint noise in the same change).
+   repo currently has 2 pre-existing `E741` warnings under
+   `benchmark/tasks/**/verify_story.py`; don't feel obligated to fix
+   unrelated pre-existing lint noise in the same change).
 3. If you touched anything under `src/JFI/` that ships in the binary,
    `uv run build` to confirm PyInstaller still packages cleanly — cheap
    insurance, catches missing-import surprises before they reach a user
@@ -250,28 +248,21 @@ anthropic --group dev`.
   helpers in `runner.py`), document them in `JFI_ENV_TEMPLATE`, and, if
   they're per-phase, go through `phase_env` in `llm/base_llm_stream.py`.
 
-## Context cache convention (for planner/session prompt work)
+## Context cache convention (for role prompts)
 
-`src/JFI/session/simple_session_manager.py`'s `CONTEXT_CACHE_RULES` +
-per-stage prompts teach the model to use `context_save`/`context_lookup`
-instead of re-reading full source files repeatedly. If you add a new
-planner/phase stage that does repeated file inspection across many small
-steps (e.g. a leaf-by-leaf pass like Function Breakdown), explicitly tell
-it to check `context_lookup` before re-opening a file it's already read
-this pass, and `context_save` what it learns — this doesn't happen for
-free just because `CONTEXT_CACHE_RULES` is in scope; it needs a concrete,
-stage-specific nudge or the model defaults back to re-reading.
+`context_save` / `context_lookup` are in every episode's optional pool, but
+an episode only loads them when its prompt says why. If you add a role or
+stage that inspects the same files across many small steps, tell it
+explicitly to `context_lookup` before re-opening a file and `context_save`
+what it learns -- the model doesn't do it unprompted.
 
 ## Docs that have drifted (trust the code)
 
-- `README.md` still describes the pre-DB layout in places: `JFI/readme/plan.md`,
-  `history.json`, per-session `JFI/<session>/` folders, `.env_bk`, and a
-  `./JFI` bash launcher that isn't in the repo. Today it's the flat `.jfi/`
-  + `JFI.db`, `.env` (loaded by `find_dotenv()` in `runner.main`), and
-  `uv run jfi`. Its "Project layout" tree is also stale: no `models/`,
-  `plan_db_tools.py`, `anthropic_stream.py`, `export_db/` or `benchmark/`,
-  and it describes `dashboard.py` as reading `JFI/<session>/*.json` +
-  `plan.md`.
+- `README.md`'s Getting started, Configuration, Resuming and build sections
+  are current (clone → `uv sync` → `create-env` → run in the project folder
+  → `uv run build`). Its "Project layout" tree is still stale: no
+  `models/`, `plan_db_tools.py`, `anthropic_stream.py`, `export_db/`,
+  `episode/`, `planner/`, `imp/`, `review/` or `utils/`.
 - `manager/web_bridge.py`'s and `web/dashboard.py`'s docstrings still say
   the bridge files live in `.jfi/<session>/`; they're directly in `.jfi/`.
 - Many docstrings cite `/todo.md` or `todo_v1.md §N` for rationale; both

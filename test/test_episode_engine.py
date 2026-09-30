@@ -7,17 +7,14 @@ import json
 
 import pytest
 
-from JFI.episode import engine as engine_mod
 from JFI.episode.brief import ScopeAnchor, build_system_message
 from JFI.episode.budget import episode_token_budget, estimate_tokens
-from JFI.episode.directives import add_directive
 from JFI.episode.engine import make_finish, run_episode
 from JFI.episode.roles import OPTIONAL_POOL, ROLE_CORE_TOOLS, ROLE_ENV_PREFIXES, ROLES
 from JFI.episode.tools import EpisodeTools
 from JFI.llm.base_llm_stream import phase_env
 from JFI.manager.abstract_manager import AbstractManager
 from JFI.models import Episode, SessionRecord, get_engine, get_session
-from JFI.session.history_store import load_episode_messages
 
 
 class Console(AbstractManager):
@@ -149,6 +146,14 @@ def test_finish_for_another_node_is_refused(engine):
     assert (result.end_reason, result.turns) == ("finish", 2)
 
 
+def _episode_messages(engine, episode_id: int) -> list[dict]:
+    from JFI.models import HistoryMessage, get_session
+    with get_session(engine) as db:
+        rows = db.exec(HistoryMessage.__table__.select().where(HistoryMessage.episode_id == episode_id)
+                       .order_by(HistoryMessage.seq)).all()
+    return [{"role": r.role, "content": r.content} for r in rows]
+
+
 def test_episodes_are_isolated_from_each_other(engine):
     first = _run(engine, Console([turn(call("finish", {"node_id": 7, "summary": "first"}), content="SECRET-1")]),
                  LLM())
@@ -157,8 +162,8 @@ def test_episodes_are_isolated_from_each_other(engine):
                   anchor=_anchor(node_id=8))
     sent = json.dumps(llm.requests[0]["messages"])
     assert "SECRET-1" not in sent
-    assert all("SECRET-1" not in json.dumps(m) for m in load_episode_messages(engine, "s", second.episode_id))
-    assert any("SECRET-1" in json.dumps(m) for m in load_episode_messages(engine, "s", first.episode_id))
+    assert all("SECRET-1" not in json.dumps(m) for m in _episode_messages(engine, second.episode_id))
+    assert any("SECRET-1" in json.dumps(m) for m in _episode_messages(engine, first.episode_id))
 
 
 def test_turn_cap(engine):
@@ -192,7 +197,11 @@ def test_stop_ends_the_episode(engine):
 
 
 def test_llm_failures_end_with_error(engine, monkeypatch):
-    monkeypatch.setattr(engine_mod, "LLM_RETRY_DELAY_SECONDS", 0)
+    """The user is asked (Retry / Stop) once the automatic retries run out;
+    this console answers Stop but can't actually stop, so the episode ends on
+    "error" (the planner treats that as nothing decided -- test_planner)."""
+    from JFI.llm import retry
+    monkeypatch.setattr(retry, "LLM_RETRY_DELAY_SECONDS", 0)
 
     class Broken(LLM):
         def send_message(self, messages, tools=None):
@@ -220,7 +229,7 @@ def test_load_tool_adds_a_pool_tool_for_this_episode_only(engine):
                        turn(call("load_tool", {"name": "execute_command"}, "d")),
                        turn(call("finish", {"node_id": 7, "summary": "x"}, "e"))])
     result = _run(engine, console, llm, anchor=anchor)
-    tool_results = [m["content"] for m in load_episode_messages(engine, "s", result.episode_id) if m["role"] == "tool"]
+    tool_results = [m["content"] for m in _episode_messages(engine, result.episode_id) if m["role"] == "tool"]
     assert tool_results[0].startswith("Error") and "load_tool('context_lookup')" in tool_results[0]
     assert tool_results[2] == "nothing saved"
     assert tool_results[3].startswith("Error"), "execute_command isn't in lead's pool"
@@ -259,33 +268,38 @@ def test_core_tool_schemas_stay_small():
         assert estimate_tokens([], schemas) <= 3_000, role
 
 
-# ------------------------------------------------------------------ directives
+def test_forced_input_reaches_the_running_episode(engine):
+    """`!text` typed while the planner or Dev is working. Before, only the
+    reviewer's and cleanup's turn loop read it; an episode never saw it."""
+    from JFI.models import Directive
 
-def test_directive_reaches_its_node_once(engine):
-    add_directive(engine, "s", "use httpx, not requests", node_id=7)
-    add_directive(engine, "s", "only for node 8", node_id=8)
+    class Typing(Console):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.forced = [[], ["keep the CSS in one file"]]
+
+        def drain_forced_input(self):
+            return self.forced.pop(0) if self.forced else []
+
     llm = LLM()
-    _run(engine, Console([turn(call("finish", {"node_id": 7, "summary": "x"}))]), llm)
-    kickoff = llm.requests[0]["messages"][1]["content"]
-    assert "use httpx, not requests" in kickoff and "only for node 8" not in kickoff
-    llm2 = LLM()
-    _run(engine, Console([turn(call("finish", {"node_id": 7, "summary": "x"}))]), llm2)
-    assert "use httpx" not in llm2.requests[0]["messages"][1]["content"], "delivered exactly once"
-
-
-def test_untargeted_directive_goes_to_the_next_episode(engine):
-    add_directive(engine, "s", "prefer small functions")
-    llm = LLM()
-    _run(engine, Console([turn(call("finish", {"node_id": 8, "summary": "x"}))]), llm, anchor=_anchor(node_id=8))
-    assert "prefer small functions" in llm.requests[0]["messages"][1]["content"]
+    _run(engine, Typing([turn(call("get_node", {"node_id": 7})), turn(call("finish", {"node_id": 7, "summary": "x"}))]),
+         llm)
+    assert not any("keep the CSS" in str(m.get("content")) for m in llm.requests[0]["messages"])
+    assert llm.requests[1]["messages"][-1] == {
+        "role": "user", "content": "USER INTERJECTION (apply this from here on):\nkeep the CSS in one file"}
+    with get_session(engine) as db:
+        [row] = db.exec(Directive.__table__.select()).all()
+    assert (row.node_id, row.consumed_episode_id is not None) == (7, True)
 
 
 # ------------------------------------------------------------------ budget + models
 
-def test_budget_is_capped_by_the_models_window(monkeypatch):
-    monkeypatch.delenv("EPISODE_TOKEN_BUDGET", raising=False)
+def test_the_budget_is_the_models_window(monkeypatch):
+    """The user: "Remove episode size and use CONTEXT_SIZE" -- there's no
+    separate EPISODE_TOKEN_BUDGET; the window, minus room for the reply."""
+    monkeypatch.setenv("EPISODE_TOKEN_BUDGET", "5000")  # ignored now
     monkeypatch.setenv("CONTEXT_SIZE", "40000")
-    assert episode_token_budget() == 20_000
+    assert episode_token_budget() == int(40000 * 0.7)
     monkeypatch.setenv("CONTEXT_SIZE", "16000")
     assert episode_token_budget() == int(16000 * 0.7)
     monkeypatch.setenv("LEAD_CONTEXT_SIZE", "8000")
@@ -303,3 +317,43 @@ def test_role_model_settings_fall_back_through_the_chain(monkeypatch):
     monkeypatch.setenv("ARCHITECT_MODEL", "architect")
     assert phase_env(chain, "MODEL") == "architect"
     assert phase_env("PLANNER", "MODEL") == "planner", "single-prefix callers are unchanged"
+
+
+def test_budget_warning_and_old_results_trimmed(engine):
+    """Observed on the stui run: the Architect read a 115 KB file in big
+    chunks, hit its budget with nothing written, and was never told the
+    budget was running out. Now it's warned once past 60%, and older tool
+    results shrink to a stub past 75% so it can still write its output."""
+    llm = LLM()
+    big = "x" * 4000
+    anchor = _anchor()
+    tools = _tools(anchor, extra={"read_file": lambda path: big})
+    reads = [turn(call("read_file", {"path": "a"}, cid=f"r{i}")) for i in range(8)]
+    console = Console(reads + [turn(call("finish", {"node_id": 7, "summary": "done"}, cid="f"))])
+    result = _run(engine, console, llm, anchor=anchor, budget=12_000, tools=tools)
+
+    assert result.end_reason == "finish"
+    last = llm.requests[-1]["messages"]
+    assert sum("BUDGET:" in str(m.get("content")) for m in last) == 1
+    tool_contents = [m["content"] for m in last if m["role"] == "tool"]
+    assert "trimmed" in tool_contents[0] and tool_contents[-1] == big
+
+
+def test_a_reply_cut_off_by_the_reasoning_cap_is_retried_with_a_nudge(engine):
+    """Observed on the stui run: the Architect planned all 18 components in
+    its hidden reasoning, hit REASONING_OUTPUT_CAP three times on the same
+    unchanged request, and the plan ended empty. The retry now tells it to
+    act first."""
+    from JFI.episode.engine import TOO_LONG_NUDGE
+    from JFI.manager.abstract_manager import ResponseTooLongError
+
+    def too_long():
+        raise ResponseTooLongError("Reasoning exceeded REASONING_OUTPUT_CAP (3000)")
+
+    llm = LLM()
+    console = Console([too_long, turn(call("finish", {"node_id": 7, "summary": "done"}))])
+    result = _run(engine, console, llm)
+
+    assert result.end_reason == "finish"
+    assert llm.requests[1]["messages"][-1] == {"role": "user", "content": TOO_LONG_NUDGE}
+    assert TOO_LONG_NUDGE not in str(llm.requests[0]["messages"])

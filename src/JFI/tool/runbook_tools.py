@@ -2,7 +2,7 @@
 up, run, stop, view, test and build the app. Operating the app is never a
 plan node; it lives here, where every role and phase can pull the one entry
 it needs instead of rediscovering "which interpreter / which port / how to
-stop it" (the observed failure CONTEXT_CACHE_RULES' run_commands key was a
+stop it" (an observed v1 failure its context cache's run_commands key was a
 workaround for).
 
 A brief carries only runbook_index() -- one line of entry names; the model
@@ -10,6 +10,7 @@ pulls a command with runbook_get(name). Not wired into v1 prompts.
 """
 
 import re
+import shutil
 from typing import Callable, Dict, Optional
 
 from sqlmodel import select
@@ -19,6 +20,25 @@ from JFI.models._util import utcnow
 from JFI.tool.result_cap import cap_result
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+_KILL_BY_NAME = re.compile(r"\btaskkill\b[^|&]*\s/IM\b|\bpkill\b|\bkillall\b|Stop-Process\s+-Name\b", re.I)
+#: Entries later roles execute and read the exit code of. stop/view may be
+#: instructions (Ctrl+C, a URL to open), so they aren't checked.
+COMMAND_ENTRIES = ("setup", "run", "test", "test_one", "build", "e2e")
+_KNOWN_RUNNERS = {"npm", "npx", "node", "pnpm", "yarn", "bun", "deno", "python", "python3", "py", "uv", "pip",
+                  "pytest", "go", "cargo", "make", "dotnet", "mvn", "gradle", "java", "ruby", "bundle", "php",
+                  "composer", "bash", "sh", "cmd", "powershell", "pwsh", "docker", "vite", "vitest", "jest",
+                  "tsc", "rustc", "gcc", "g++", "cmake", "ctest", "echo", "curl"}
+
+
+def _starts_with_a_program(command: str) -> bool:
+    first = command.strip().split()[0].strip("\"'") if command.strip() else ""
+    name = first.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    name = re.sub(r"\.(exe|cmd|bat|ps1)$", "", name)
+    return (name in _KNOWN_RUNNERS or "/" in first.replace("\\", "/") or first.startswith(".")
+            or shutil.which(first) is not None)
+
+
+_OPENS_BROWSER = re.compile(r"^\s*(start|open|xdg-open|explorer)\s+(\"\"\s+)?https?://", re.I)
 
 #: The entries Architect drafts for every project (§4.3); others are allowed.
 STANDARD_ENTRIES = ("setup", "run", "stop", "view", "test", "test_one", "build", "logs", "e2e")
@@ -35,6 +55,21 @@ def runbook_set(engine, session_id: str, name: str, command: str, notes: str = "
                 f"{', '.join(STANDARD_ENTRIES)}).")
     if not command:
         return f"Error: runbook entry {name!r} needs a command."
+    # Both observed on the stui runs, and a prompt rule alone didn't stop them.
+    if _KILL_BY_NAME.search(command):
+        return ("Error: that command kills every process with that name on the machine, not just this app. "
+                "Stop only this app: Ctrl+C in its terminal, or stop_background_process for one started "
+                "with start_background_process.")
+    if name in COMMAND_ENTRIES and not _starts_with_a_program(command):
+        # Observed on the stui run (gemma): e2e = "Compare current view with
+        # portfolio-dashboard.html visually" -- a sentence, not a command.
+        return (f"Error: runbook entry {name!r} must be a command that runs, starting with a program "
+                f"(e.g. npm, npx, node, python, uv, pytest, go, cargo, make, or a script path), got "
+                f"{command.split()[0]!r}. Write a check that exits non-zero on failure.")
+    if name == "e2e" and _OPENS_BROWSER.match(command):
+        return ("Error: e2e must be a check that exits non-zero when the app is broken (the reviewer runs it "
+                "and reads the exit code); opening a browser checks nothing. E.g. build, then a small script "
+                "that asserts on the output.")
     with get_session(engine) as db:
         row = db.exec(select(RunbookEntry).where(RunbookEntry.session_id == session_id,
                                                  RunbookEntry.name == name)).first()

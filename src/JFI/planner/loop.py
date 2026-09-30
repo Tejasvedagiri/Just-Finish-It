@@ -23,6 +23,7 @@ re-judged.
 """
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -32,8 +33,10 @@ from JFI.episode.budget import episode_token_budget
 from JFI.episode.engine import make_finish, run_episode
 from JFI.episode.roles import ROLE_ENV_PREFIXES, ROLE_FINISH_TOOL
 from JFI.episode.tools import EpisodeTools
-from JFI.models import Leaf, PlanEvent, PlannerVerdict, get_session
-from JFI.planner.judge import JudgeNode
+from sqlmodel import select
+
+from JFI.models import DesignEntry, Leaf, PlanEvent, PlannerVerdict, RunbookEntry, get_session
+from JFI.planner.judge import CHECKPOINT, JudgeNode
 from JFI.planner.nodes import (
     BREAKDOWN, GOOD, MAX_LEAF_DEPTH, REDO, children_of, depth_of, load_nodes, make_node_tools, path_of,
 )
@@ -41,12 +44,17 @@ from JFI.planner.prompts import ROLE_PROMPTS
 from JFI.tool.code_tools import make_code_tools
 from JFI.tool.design_tools import design_index, make_design_tools
 from JFI.tool.note_tools import add_reviewer_note
+from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.runbook_tools import make_runbook_tools, runbook_index
 
 LEVELS = ("architect", "lead", "task")
 NEXT_ROLE = {"architect": "lead", "lead": "task", "task": "task"}
 DEFAULT_REDO_CAP = 2
 DEFAULT_MAX_PLANNER_EPISODES = 200
+ARCHITECT_CONTINUATIONS = 2
+REQUIRED_RUNBOOK = ("setup", "run", "test", "test_one", "build", "e2e")
+GOAL_MAX_CHARS = 16_000  # ~4k tokens, a small share of an episode on a 32k window
+FEEDBACK_MAX_CHARS = 12_000
 
 
 def redo_cap() -> int:
@@ -72,24 +80,37 @@ class PlanResult:
 
 class Planner:
     def __init__(self, console, engine, session_id: str, goal: str, root: Path,
-                 llm_for_role: Callable[[str], object], judge, feedback: str = ""):
+                 llm_for_role: Callable[[str], object], judge, feedback: str = "",
+                 pool_tools: Optional[Callable[[str], dict]] = None):
+        """`pool_tools(role)`: the optional tools (roles.OPTIONAL_POOL) an
+        episode can load_tool, bound to the session and that role's model."""
         self.console, self.engine, self.session_id = console, engine, session_id
         self.goal, self.root, self.feedback = goal, Path(root), feedback
         self.llm_for_role, self.judge = llm_for_role, judge
+        self.pool_tools = pool_tools or (lambda role: {})
         self.episodes = 0
+        self.failed: Optional[str] = None
 
     # ---------------------------------------------------------------- run
 
     def run(self) -> PlanResult:
         if not load_nodes(self.engine, self.session_id):
-            if not self._episode("architect", "create", None) and not load_nodes(self.engine, self.session_id):
-                return PlanResult(False, self.episodes, "the Architect produced no plan")
+            # Checked on node count, not on the episode's return: on the stui
+            # run the Architect ran out of budget with no nodes, the episode
+            # still "returned", and an empty plan was reported complete --
+            # imp then "finished" nothing and the run went on to review.
+            result = self._architect("create")
+            if not load_nodes(self.engine, self.session_id):
+                why = result.end_reason if result is not None else "stopped"
+                return PlanResult(False, self.episodes, f"the Architect produced no plan (its episode ended: {why})")
         elif self.feedback:
-            self._episode("architect", "extend", None)
+            self._architect("extend")
 
         while True:
             if self.console.should_stop():
                 return PlanResult(False, self.episodes, "stopped")
+            if self.failed:
+                return PlanResult(False, self.episodes, self.failed)
             if self.episodes >= max_planner_episodes():
                 self._settle_everything("the planner episode budget (MAX_PLANNER_EPISODES) ran out")
                 return PlanResult(True, self.episodes, "episode budget reached")
@@ -103,6 +124,24 @@ class Planner:
                 self._redo(nodes[0])
             else:
                 self._breakdown(nodes[0])
+
+    def _architect(self, mode: str):
+        """One Architect conversation, continued (up to ARCHITECT_CONTINUATIONS
+        more) while it ends on the turn cap or budget instead of `finish`.
+        Observed on the stui run: the Architect spent all 15 turns recording
+        an excellent design, one design_set per turn, and added a single
+        node -- the scaffold -- so the CSS, data, nav and all ten views were
+        never planned. Its work is saved, so a fresh conversation can pick up
+        from it instead of redoing it."""
+        result = self._episode("architect", mode, None)
+        for _ in range(ARCHITECT_CONTINUATIONS):
+            if result is None or result.end_reason not in ("turn_cap", "budget"):
+                break
+            self._event(None, "overflow", f"architect {mode} ended on {result.end_reason}; continuing")
+            result = self._episode("architect", "continue", None,
+                                   reason=f"your previous conversation ended ({result.end_reason}) before you "
+                                          "called finish")
+        return result
 
     def _next_action(self):
         nodes = load_nodes(self.engine, self.session_id)
@@ -123,6 +162,7 @@ class Planner:
     # ---------------------------------------------------------------- judging
 
     def _judge(self, nodes: List[Leaf]) -> None:
+        self.console.set_status(stage="Judge", task=f"{len(nodes)} {nodes[0].level} node(s)")
         all_nodes = load_nodes(self.engine, self.session_id)
         by_id = {n.id: n for n in all_nodes}
         verdicts = self.judge.judge([
@@ -146,6 +186,7 @@ class Planner:
             self._record_verdict(node, v, status)
             if node.escalation_count and status != REDO:
                 self._unpause_children(node.id)
+        self.console.set_status(**plan_status_fields(self.engine, self.session_id))
 
     def _set_status(self, node_id: int, status: str, reason: Optional[str], bump_redo: bool = False) -> None:
         with get_session(self.engine) as db:
@@ -158,14 +199,14 @@ class Planner:
             db.commit()
 
     def _record_verdict(self, node: Leaf, v, final_status: str) -> None:
-        answers = v.answers.get(v.model, {}) if v.model else {}
-        verdict = answers.get("verdict", {}) if answers else {}
+        verdict = v.answers.get("verdict", {})
         with get_session(self.engine) as db:
             db.add(PlannerVerdict(
-                session_id=self.session_id, node_id=node.id, level=node.level, laya_model=v.model,
-                laya_verdict=v.status if v.source == "laya" else verdict.get("choice"),
+                session_id=self.session_id, node_id=node.id, level=node.level,
+                laya_model=CHECKPOINT if v.laya_status else None, laya_verdict=v.laya_status,
                 laya_redo_reason=v.redo_reason, probabilities=verdict.get("probabilities"),
-                answer_confidence=v.confidence, fallback=v.fallback or "none", final_status=final_status))
+                answer_confidence=v.confidence, rule_verdict=v.rule_status, tiebreak_verdict=v.tiebreak_status,
+                decided_by=v.decided_by, final_status=final_status))
             db.commit()
 
     def _unpause_children(self, node_id: int) -> None:
@@ -203,12 +244,42 @@ class Planner:
         mode = "split" if node.level == "task" else "breakdown"
         self._event(node.id, "breakdown", f"{role} {mode}")
         result = self._episode(role, mode, node)
+        if result is not None and result.end_reason == "turn_cap":
+            # Running out of turns isn't proof the node is too big -- only
+            # running out of budget is -- and it isn't proof the node is fully
+            # broken down either. Observed on the stui runs: Lead spent its 15
+            # turns on a tiny view fighting scaffold_file's formatting and added
+            # no node, and the view went back to the Architect as "too big";
+            # and Task episodes that hit the cap after adding SOME functions
+            # were accepted as complete, so the nav, dividends and news files
+            # lost leaves. Either way the conversation is continued once.
+            done = children_of(load_nodes(self.engine, self.session_id), node.id)
+            self._event(node.id, "overflow", f"{role} {mode} ended on turn_cap with {len(done)} node(s); continuing")
+            added = ("You had added these nodes under it:\n" + "\n".join(f"- {c.id}: {c.description}" for c in done)
+                     + "\nKeep them; add only what's still missing, then finish.") if done else \
+                "You hadn't added any nodes yet. Add them, then finish."
+            result = self._episode(role, mode, node, reason=(
+                "your previous conversation on this node hit its turn limit before it finished. What it did is "
+                "saved: files it scaffolded are on disk (outline_file / list_dir them); don't redo them. " + added))
+        if result is not None and result.end_reason == "error" and \
+                not children_of(load_nodes(self.engine, self.session_id), node.id):
+            self._event(node.id, "error", f"{role} {mode} ended on an LLM error; retrying once")
+            result = self._episode(role, mode, node, reason=(
+                "your previous conversation on this node was cut off by a model-server error. What it did is "
+                "saved: files it scaffolded are on disk (outline_file / list_dir them). Add the nodes, then finish."))
         nodes = load_nodes(self.engine, self.session_id)
         if next(n for n in nodes if n.id == node.id).plan_status == REDO:
             return  # the next role escalated it back to its creator during the episode
         if children_of(nodes, node.id):
             self._set_status(node.id, GOOD, None)
-        elif result is not None and result.end_reason in ("budget", "turn_cap"):
+        elif result is None or result.end_reason in ("error", "stopped"):
+            # The episode never got to decide anything. Observed on stui run
+            # 12: LM Studio returned "failed to decode" mid-episode on three
+            # views, and each was then accepted as GOOD ("added nothing") and
+            # would have gone to Dev whole. It stays BREAKDOWN; the run stops.
+            why = "stopped" if result is None else result.end_reason
+            self.failed = f"the {role} on node {node.id} ended on {why} twice without adding nodes"
+        elif result.end_reason in ("budget", "turn_cap"):
             # Too big for one pass of the next layer: back to its creator (§5.3).
             self._event(node.id, "overflow", f"{role} {mode} ended on {result.end_reason}")
             self._set_status(node.id, REDO, "too_big", bump_redo=True)
@@ -225,29 +296,85 @@ class Planner:
         nodes = load_nodes(self.engine, self.session_id)
         by_id = {n.id: n for n in nodes}
         if node is None:
-            anchor = ScopeAnchor(role=role, node_id=None, node=f"the goal: {self.goal[:600]}",
+            # The goal and the review feedback are the Architect's whole brief,
+            # so they're capped only against the episode budget. They used to
+            # be cut at 600 characters: on the calc benchmark that dropped the
+            # goal's last sentence ("place them under tests/") and the second
+            # of two review issues, so both were never planned.
+            anchor = ScopeAnchor(role=role, node_id=None, node=f"the goal: {self.goal[:GOAL_MAX_CHARS]}",
                                  finish=f"{ROLE_FINISH_TOOL[role]}(0, summary)",
-                                 reason=self.feedback[:600] if mode == "extend" else "")
+                                 reason="\n".join(p for p in (reason, self.feedback[:FEEDBACK_MAX_CHARS]
+                                                              if mode in ("extend", "continue") else "") if p))
         else:
             anchor = ScopeAnchor(role=role, node_id=node.id, node=node.description, done_when=node.done_when or "",
                                  files=node.files or [], path=path_of(by_id, node),
                                  finish=f"{ROLE_FINISH_TOOL[role]}({node.id}, summary)", reason=reason)
         scope_id = node.id if node is not None else None
-        impl = {**make_node_tools(self.engine, self.session_id, role, scope_id),
+        impl = {**self.pool_tools(role),
+                **make_node_tools(self.engine, self.session_id, role, scope_id),
                 **make_runbook_tools(self.engine, self.session_id, role),
                 **make_design_tools(self.engine, self.session_id, role),
                 **make_code_tools(self.root),
-                "finish": make_finish(anchor)}
+                "finish": self._architect_finish(anchor) if role == "architect" and node is None
+                else make_finish(anchor)}
         system = build_system_message(anchor, ROLE_PROMPTS[(role, mode)],
                                       [runbook_index(self.engine, self.session_id),
                                        design_index(self.engine, self.session_id)])
-        self.console.set_status(stage=role.capitalize())
+        self.console.set_status(stage=role.capitalize(), task=anchor.node[:140])
         self.console.display_rule(f"PLANNER · {role.upper()} {mode}"
                                   + (f" — node {node.id}" if node is not None else ""))
         return run_episode(self.llm_for_role(role), self.console, self.engine, self.session_id,
                            role=role, mode=mode, anchor=anchor, system_message=system,
                            tools=EpisodeTools(role, impl),
                            budget=episode_token_budget(ROLE_ENV_PREFIXES[role]))
+
+    def _architect_finish(self, anchor: ScopeAnchor):
+        """The Architect's finish refuses until the base it owns is complete:
+        at least one node, the runbook entries later roles run, and a test
+        framework in the stack. Observed on the stui run: after two
+        continuations the plan had its components but the runbook was only
+        setup/dev/build/stop (no test, test_one or e2e, which Dev's gate and
+        the reviewer need) and the stack ruled out unit tests."""
+        plain = make_finish(anchor)
+
+        def finish(node_id: int = 0, summary: str = "") -> str:
+            missing = []
+            if not load_nodes(self.engine, self.session_id):
+                missing.append("the plan has no nodes yet (add_node every component)")
+            with get_session(self.engine) as db:
+                runbook = {r.name: r.command for r in db.exec(
+                    select(RunbookEntry).where(RunbookEntry.session_id == self.session_id))}
+                stack = db.exec(select(DesignEntry).where(DesignEntry.session_id == self.session_id,
+                                                          DesignEntry.kind == "stack")).first()
+                contracts = db.exec(select(DesignEntry).where(DesignEntry.session_id == self.session_id,
+                                                              DesignEntry.kind == "contract")).first()
+                outline = db.exec(select(DesignEntry).where(DesignEntry.session_id == self.session_id,
+                                                            DesignEntry.kind == "outline")).first()
+            if outline is not None:
+                # A document goal (G4): no code, so no runbook, test framework
+                # or contracts -- the outline is what Lead, Task and the
+                # reviewer work from.
+                if missing:
+                    return "Error: not finished yet. Still missing: " + "; ".join(missing) + ". Add them, then finish."
+                return plain(node_id, summary)
+            absent = [name for name in REQUIRED_RUNBOOK if name not in runbook]
+            if absent:
+                missing.append(f"runbook entries {', '.join(absent)} (runbook_set)")
+            if "test_one" in runbook and "{test_id}" not in runbook["test_one"]:
+                missing.append("a {test_id} placeholder in test_one's command")
+            top_level = [n for n in load_nodes(self.engine, self.session_id) if n.parent_id is None]
+            if len(top_level) >= 3 and not contracts:
+                # Observed on the stui run: 16 components and no contract, so
+                # each Lead (who sees one node) had no way to know the others.
+                missing.append('the contracts between components (design_set("contract", "a->b", ...))')
+            if stack is None:
+                missing.append('the stack (design_set("stack", "stack", ...))')
+            elif re.search(r"\bno (unit[- ]?)?test", stack.text, re.I):
+                missing.append("a test framework in the stack: every Dev item is one function plus its unit test")
+            if missing:
+                return "Error: not finished yet. Still missing: " + "; ".join(missing) + ". Add them, then finish."
+            return plain(node_id, summary)
+        return finish
 
     # ---------------------------------------------------------------- guards
 

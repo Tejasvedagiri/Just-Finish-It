@@ -9,7 +9,7 @@ nobody who isn't running the dashboard should pay for a background thread
 and a file write every tick, and existing terminal-only sessions shouldn't
 gain new files in their session folder they never asked for.
 
-Two files live inside the session's own .jfi/<session>/ folder:
+Two files live directly in the project's flat .jfi/ folder:
 
 - web_status.json  -- written by this bridge every _POLL_SECONDS from
   console.get_status_snapshot(). Read-only from the dashboard's side.
@@ -26,6 +26,11 @@ Two files live inside the session's own .jfi/<session>/ folder:
       into the dashboard while nothing is currently awaiting an answer.
       Relayed via console.submit_external_queue_item() -- the same channel
       a terminal line typed at idle time uses.
+    - {"type": "pause", "paused": true|false} -- the dashboard's Pause /
+      Resume button. Relayed via console.submit_external_pause(), the same
+      state Ctrl+P toggles: the session holds before its next model turn.
+      Takes the target state, not a toggle, so a double click can't flip it
+      back. Applies whether or not anything is awaiting an answer.
   Also accepted with no "type" (old dashboards, or a plain button click)
   as an implicit "answer" for backward compatibility. Always deleted after
   being read, whichever branch it took, so nothing can be replayed twice.
@@ -122,6 +127,10 @@ class WebBridge:
             text = payload.get("text")
             if text:
                 self._console.submit_external_queue_item(str(text))
+            return
+
+        if payload.get("type") == "pause":
+            self._console.submit_external_pause(bool(payload.get("paused")))
             return
 
         # "answer" (explicit or implied, for backward compatibility with any

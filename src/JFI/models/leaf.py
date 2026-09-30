@@ -2,8 +2,8 @@
 
 Replaces two independently-fragile things at once: (1) dot-numbered strings
 ("1.1.2") hand-edited via replace_in_file, whose renumbering after a split
-needed a bolt-on repair tool (JFI.tool.plan_renumber) because a stale read
-between two edits could desync; (2) Just-Finish-It-Fleet's src/main.js's own separate
+needed a bolt-on repair tool because a stale read between two edits could
+desync; (2) Just-Finish-It-Fleet's src/main.js's own separate
 regex tree-parser (parsePlanLines/buildPlanTree) over that same markdown,
 which had its own documented bug (a trailing-period parent number once
 flattened the whole tree into bogus top-level roots). One schema, no
@@ -14,9 +14,8 @@ plan.md, where the distinction is structural (does anything else point at
 this row as its parent?) rather than a stored flag. Only rows with no
 children are meant to carry a real `status`/timing; a caller updating a
 parent-with-children row's status is a bug the same way ticking a plan.md
-parent bullet's checkbox was (see PLAN_FORMAT_RULES's "A checkbox on a
-parent hands the implementer a fake duplicate task alongside its own real
-children").
+parent bullet's checkbox was: it handed the implementer a fake duplicate
+task alongside the parent's own real children.
 """
 
 from datetime import datetime
@@ -41,7 +40,7 @@ class Leaf(SQLModel, table=True):
     # gap-numbered sequence (10, 20, 30, ...) rather than 1/2/3 so a new
     # leaf can be inserted between two existing ones (sort_key = 15)
     # without renumbering every sibling after it, the exact operation that
-    # needed plan_renumber.py's repair pass under the old dot-string scheme.
+    # needed a repair pass under the old dot-string scheme.
     sort_key: int = Field(default=0, index=True)
 
     description: str

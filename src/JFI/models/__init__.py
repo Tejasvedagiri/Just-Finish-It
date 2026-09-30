@@ -1,8 +1,7 @@
 """DB-backed session persistence -- replaces everything under
-.jfi/ except .lock (a process mutex, not data -- see /todo.md).
+.jfi/ except .lock (a process mutex, not data).
 
-File-to-table map (see /todo.md's "SQLite/Pydantic persistence rewrite"
-section for the full design and open decisions):
+File-to-table map:
 
     plan.md                              -> Leaf
     metadata.json: unlocked_tools        -> UnlockedTool
@@ -20,15 +19,15 @@ section for the full design and open decisions):
     review.md / NotesForReviewer.md /
       feedback_to_plan.md                -> SessionNote (one row per kind)
 
-v2 pipeline tables (laya_plan.md §13.2), in JFI.models.v2: Episode,
-PlannerVerdict, PlanEvent, RunbookEntry, DesignEntry, Directive.
+The episode pipeline's tables (laya_plan.md §13.2): Episode and Directive
+(JFI.models.episode), PlannerVerdict and PlanEvent (JFI.models.planning),
+RunbookEntry and DesignEntry (JFI.models.runbook_design).
 
 Public surface: every table, their enums (Phase, LeafStatus), and the
 engine/session factory (get_engine, get_session, database_url) that reads
 DB_BACKEND/DATABASE_URL from env.
 """
 
-from JFI.models.activity import ActivityEvent
 from JFI.models.context_entry import ContextEntry
 from JFI.models.db import database_url, get_engine, get_session
 from JFI.models.enums import LeafStatus, Phase
@@ -42,10 +41,11 @@ from JFI.models.queue import QueuedItem
 from JFI.models.session import SessionRecord
 from JFI.models.session_note import SessionNote
 from JFI.models.tools import UnlockedTool
-from JFI.models.v2 import DesignEntry, Directive, Episode, PlanEvent, PlannerVerdict, RunbookEntry
+from JFI.models.episode import Directive, Episode
+from JFI.models.planning import PlanEvent, PlannerVerdict
+from JFI.models.runbook_design import DesignEntry, RunbookEntry
 
 __all__ = [
-    "ActivityEvent",
     "BackgroundProcess",
     "ContextEntry",
     "DesignEntry",

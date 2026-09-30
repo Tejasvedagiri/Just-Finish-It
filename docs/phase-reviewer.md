@@ -1,54 +1,48 @@
 # Phase: `reviewer`
 
-Judges the finished work and decides whether another full iteration
-(planner → product_owner → imp → testing → reviewer → cleanup) is needed. It
-gates nothing interactively.
+Proves the finished project works end to end, the way a user would use it.
+Code: `src/JFI/review/` (`Reviewer`, the prompt in `prompts.py`);
+`runner._run_reviewer` runs it. Design: [`laya_plan.md`](laya_plan.md) §7, G8,
+G12, G19.
 
-- **Code:** the generic `runner.run_phase`. The completion marker is
-  `REVIEWER_COMPLETE`. After it: `_clear_reviewer_notes`, then (once
-  cleanup has also run) `collect_next_iteration` / `review_outcome`.
-- **Tools:** `get_reviewer_notes`, `write_review_report`
-  (`tool/note_tools.py`; `SessionNote` kinds `REVIEWER_NOTES` and
-  `REVIEW_REPORT`).
-- **Prompt:** `get_system_message("reviewer")`. Unlike `imp`/`testing`,
-  there's no inline work queue.
-- **Trigger:** "Testing is done. Call get_plan() and evaluate the finished
-  work against it…"
+## One episode
 
-## What the prompt asks for
+The reviewer is one scoped episode (`role="reviewer"`, model `REVIEWER_*` →
+shared). Its brief carries the runbook index and any leftover `JFI:` markers.
+Its tools include:
+- `runbook_get` / `runbook_set`, `execute_command`;
+- `start_background_process` / `stop_background_process`;
+- `read_file`, `get_plan`, `get_reviewer_notes`;
+- `reopen_leaf`, `write_review_report`, `finish`.
 
-1. **Gather:** `get_plan()`, inspect the produced files, and
-   `get_reviewer_notes()`. Treat each implementer note as something to
-   re-check yourself, not something to accept.
-2. **Re-run the mechanical checks yourself** (build, tests,
-   start-and-hit-it). A testing leaf marked done isn't evidence the check
-   still passes. A review with zero `execute_command`/`read_file` calls
-   isn't a review.
-3. **Pass:** reply "Review: PASS" with a summary, and **don't** call
-   `write_review_report`.
-4. **Fail:** call `write_review_report` with numbered, concrete issues
-   (file/line, how to fix).
-5. End with `REVIEWER_COMPLETE`.
+It reads the Dev and planner notes, runs the runbook's `e2e`, and gives exactly
+one verdict:
 
-## What happens with the verdict
+| Verdict | How | What happens |
+|---|---|---|
+| **pass** | `finish(0, "PASS: ...")` | `finish` **re-runs the e2e itself** and refuses unless it exits 0. On a pass, every done leaf's `review_status` becomes `passed` and the `e2e` runbook entry is marked verified. |
+| **fix** | `reopen_leaf(leaf_id, fix_note)`, then `finish` | A bug in code that was built (G8). The leaf goes back to `todo` with its `fix_note` (`review_status = failed`, `reopened_count += 1`, logged as a `reopen` PlanEvent). Dev's brief carries the note. |
+| **missing** | `write_review_report(text)`, then `finish` | Work that was never planned. The run's next iteration hands the report to the Architect in extend mode. |
 
-- **Reviewer notes** are cleared right after this phase, so each pass
-  starts clean.
-- **Report present** (checked after `cleanup`): `review_outcome` wraps it
-  as "REVIEW FAILED: …" and clears the note. That text, plus anything the
-  user queued, becomes the next iteration's `USER FEEDBACK FOR ITERATION`.
-  The planner's trigger switches to update mode with
-  `review_failed=True`.
-- **Loop cap:** `MAX_REVIEW_ITERATIONS = 3` failed reviews end the run.
-  `REVIEW_LOOP_APPROVAL=1` asks a human before each retry.
-- **No report and nothing queued:** the pipeline idles ("PIPELINE
-  COMPLETE") until something is queued.
+A check that can't run in this environment is reported with
+`write_review_report` as not checked, never passed.
 
-## Known gaps
+## The fix loop (`_run_reviewer`)
 
-- **The planner doesn't act on a failed review in tiered mode,** so the
-  next iteration has no new leaves (see
-  [phase-planner.md](phase-planner.md#known-gaps)).
-- **"PIPELINE COMPLETE" isn't independent verification.** The reviewer is
-  the same kind of model that did the work. See
-  `.claude/skills/run-jfi/SKILL.md` §9.
+```
+for round in 1..MAX_REVIEW_ITERATIONS:
+    review
+    fix  -> Dev fixes only the re-opened leaves (Imp.run), then review again
+    else -> done
+```
+
+If the leaves still fail after `MAX_REVIEW_ITERATIONS` rounds, a review report
+says so and the outer loop takes over. `REVIEWER_COMPLETE` is appended from this
+outcome, never from model text. After the phase, the reviewer notes are cleared
+(`_clear_reviewer_notes`).
+
+## The next iteration
+
+`collect_next_iteration` (`runner.py`) turns a `REVIEW_REPORT` note, plus
+anything the user queued, into the next iteration's feedback. `MAX_REVIEW_ITERATIONS`
+failed reviews end the run; `REVIEW_LOOP_APPROVAL=1` asks before each retry.

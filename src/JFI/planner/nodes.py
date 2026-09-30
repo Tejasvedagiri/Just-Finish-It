@@ -12,6 +12,7 @@ Rules enforced here, in code, not just in prompts:
 """
 
 import os
+import re
 from typing import Callable, Dict, List, Optional, Sequence
 
 from sqlmodel import select
@@ -115,7 +116,73 @@ def render_node(node: Leaf) -> str:
     return "\n  ".join(bits)
 
 
+_CALL = re.compile(r"(\w+)\s*\(")
+
+
+def target_symbol(description: str) -> Optional[str]:
+    """The function a node is FOR: the first `name(` in "implement name(...)
+    in file: ...". Later mentions are the helpers it calls."""
+    match = _CALL.search(description or "")
+    return match.group(1) if match else None
+
+
+def _duplicate_of(nodes: Sequence[Leaf], description: str, files: Sequence[str]) -> Optional[Leaf]:
+    """An unfinished node already for the same function in the same file.
+    Observed on the first real v2 run: the Task splitting "parse()" also
+    added an "implement evaluate()" leaf (evaluate's stub was in the same
+    file), and the Task splitting "evaluate()" added another -- so Dev
+    implemented evaluate twice."""
+    symbol = target_symbol(description)
+    if symbol is None or not files:
+        return None
+    parents = {n.parent_id for n in nodes}
+    return next((n for n in nodes if n.id not in parents and n.status != LeafStatus.DONE
+                 and target_symbol(n.description) == symbol and set(n.files or []) & set(files)), None)
+
+
+def _sources(files: Sequence[str]) -> set:
+    return {f for f in files if "test" not in f.lower()}
+
+
+def _file_owner(nodes: Sequence[Leaf], files: Sequence[str]) -> Optional[Leaf]:
+    """The Lead file node that already owns one of these (non-test) files.
+    Observed on the stui run: the entry component's Lead added a second
+    index.html node although the scaffold component's Lead had one, so two
+    Dev leaves would each rewrite the page. Test files are exempt: sharing
+    one is allowed."""
+    wanted = _sources(files)
+    if not wanted:
+        return None
+    return next((n for n in nodes if n.level == "lead" and n.status != LeafStatus.DONE
+                 and _sources(n.files or []) & wanted), None)
+
+
 # ------------------------------------------------------------------ writes
+
+KINDS = ("project", "component", "code", "artifact", "section", "implement", "integrate", "modify", "delete",
+         "fill", "passage")
+
+
+def _normalise_kind(kind: Optional[str]) -> Optional[str]:
+    """The first known kind in what the model sent. Observed on the stui run
+    (gemma): kinds came back as the schema's own list, "code/artifact/section",
+    copied literally."""
+    for token in re.split(r"[^a-z]+", (kind or "").lower()):
+        if token in KINDS:
+            return token
+    return None
+
+
+def _too_long(description: str) -> str:
+    """Observed on the stui run: the Architect packed exports, line ranges and
+    steps into node descriptions, and 14 of its tool calls came back "too
+    long" -- the old message said only "say less", so it retried with almost
+    the same text. Say where the detail belongs instead."""
+    return (f"Error: the description is {len(description)} characters; the limit is {item_max_chars()} "
+            "(PLANNER_ITEM_MAX_CHARS). A description only names the work and where it goes, e.g. "
+            "\"Create src/views/news.js: news feed + filter chips\". Put the details (exports, line ranges, "
+            "steps) in done_when, or record them with design_set for the next role to pull.")
+
 
 def add_node(engine, session_id: str, role: str, scope_id: Optional[int], description: str,
              done_when: str = "", files: Sequence[str] = (), depends_on: Sequence[int] = (),
@@ -124,8 +191,13 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
     if not description:
         return "Error: a node needs a description."
     if len(description) > item_max_chars():
-        return (f"Error: the description is {len(description)} characters; keep it under {item_max_chars()} "
-                "(PLANNER_ITEM_MAX_CHARS). Say less, or split the work into more nodes.")
+        return _too_long(description)
+    if parent_id == 0:
+        # Observed on the stui run (gemma): the Architect passed parent_id=0
+        # for top-level nodes, copying finish(0, ...), and got "no node 0" seven
+        # times. 0 is never a node id; read it as "top level".
+        parent_id = None
+    kind = _normalise_kind(kind)
     if role in ("lead", "task"):
         if parent_id not in (None, scope_id):
             return f"Error: you can only add nodes under node {scope_id}, the node you are working on."
@@ -144,6 +216,16 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
     missing = [d for d in depends_on if d not in by_id]
     if missing:
         return f"Error: depends_on names unknown node(s) {missing}."
+    duplicate = _duplicate_of([n for n in nodes if n.id != parent_id], description, files)
+    if duplicate is not None:
+        return (f"Error: node {duplicate.id} already covers {target_symbol(description)}() in "
+                f"{', '.join(duplicate.files or [])}. Only add nodes for the work YOUR node names.")
+    if role == "lead":
+        owner = _file_owner(nodes, files)
+        if owner is not None:
+            return (f"Error: node {owner.id} (another component's file node) already owns "
+                    f"{', '.join(_sources(files) & _sources(owner.files or []))}. A file belongs to one node; "
+                    "leave it to that node, and put anything yours needs from it in the design (design_set).")
     siblings = children_of(nodes, parent_id)
     sort_key = (max((s.sort_key for s in siblings), default=0) // 10 + 1) * 10
     with get_session(engine) as db:
@@ -171,7 +253,7 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
     if description is not None:
         description = description.strip()
         if not description or len(description) > item_max_chars():
-            return f"Error: a description must be 1-{item_max_chars()} characters."
+            return _too_long(description) if description else "Error: a description can't be empty."
     if depends_on is not None:
         missing = [d for d in depends_on if d not in by_id]
         if missing:
@@ -188,8 +270,8 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
             row.files = list(files) or None
         if depends_on is not None:
             row.depends_on = list(depends_on) or None
-        if kind is not None:
-            row.kind = kind
+        if _normalise_kind(kind) is not None:
+            row.kind = _normalise_kind(kind)
         row.plan_status = None  # rewritten -> re-judged
         db.add(row)
         db.commit()
@@ -310,12 +392,13 @@ def _fn(name, description, properties, required):
 
 
 _FIELDS = {
-    "description": {"type": "string", "description": "<verb> <what> in <where>: <expected result>; max 200 chars"},
+    "description": {"type": "string", "description": "<verb> <what> in <where>: <expected result>; max 200 chars. "
+                                                "Details (exports, line ranges, steps) go in done_when or the design"},
     "done_when": {"type": "string", "description": "the observable finish condition (on a function: its test case)"},
     "files": {"type": "array", "items": {"type": "string"}, "description": "files it creates/changes + test file"},
     "depends_on": {"type": "array", "items": {"type": "integer"}, "description": "node ids that must be done first"},
-    "kind": {"type": "string", "description": "component/project | code/artifact/section | "
-                                              "implement/modify/delete/fill/passage"},
+    "kind": {"type": "string", "description": "ONE word. Architect: component or project. Lead: code or artifact. "
+                                              "Task: implement, integrate, modify, delete or fill."},
 }
 NODE_TOOL_SCHEMAS = [
     _fn("add_node", "Add a plan node. Architect adds top-level nodes; Lead and Task add nodes under the node "

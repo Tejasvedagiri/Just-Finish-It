@@ -1,5 +1,5 @@
 """Caps what a read tool returns, so one careless read can't eat a v2
-episode's 20k-token budget (laya_plan.md §0, §5.3).
+episode's token budget (laya_plan.md §0, §5.3).
 
 Every v2 read tool passes its result through cap_result() with a hint saying
 how to read more precisely (a line range, one symbol, one key). A truncated
@@ -20,10 +20,15 @@ def tool_result_max_chars() -> int:
     return max(200, tokens) * CHARS_PER_TOKEN
 
 
+TRUNCATED = "\n[… truncated: showing "
+
+
 def cap_result(text: str, hint: str) -> str:
+    """Idempotent: the episode engine caps every result again as a backstop,
+    and a result its own tool already capped must keep that tool's hint."""
     limit = tool_result_max_chars()
-    if len(text) <= limit:
+    if len(text) <= limit or TRUNCATED in text[limit - 1:]:
         return text
     shown = text[:limit].rsplit("\n", 1)[0] or text[:limit]
-    return (f"{shown}\n[… truncated: showing {len(shown):,} of {len(text):,} characters "
+    return (f"{shown}{TRUNCATED}{len(shown):,} of {len(text):,} characters "
             f"(TOOL_RESULT_MAX_TOKENS). {hint}]")

@@ -1,6 +1,6 @@
-"""Which deferred tools (see JFI.tool.schemas's CORE_TOOLS/DEFERRED_TOOLS
-split) this session has called load_tool on -- replaces metadata.json's
-unlocked_tools list. Unlike a JSON blob, this is independently queryable
+"""Which deferred tools a v1 session called load_tool on -- replaced
+metadata.json's unlocked_tools list. v2 episodes load optional tools per
+episode (JFI.episode.tools) and don't write this; it stays for export-db. Unlike a JSON blob, this is independently queryable
 ("every session that ever unlocked execute_command") and gets a real
 uniqueness guarantee (a tool can't be double-unlocked) from the schema
 instead of the caller having to de-dupe a Python list by hand.

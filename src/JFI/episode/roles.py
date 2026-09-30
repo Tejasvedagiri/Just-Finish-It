@@ -4,7 +4,7 @@ gets (laya_plan.md G1.2, G15).
 Core sets are fixed in code and always sent -- they replace v1's
 session-wide load_tool unlocking, where an unlocked tool stayed in every
 request for the rest of the session (all 32 deferred schemas together are
-~5,900 tokens: over a quarter of a 20k episode). Tools a role rarely needs
+~5,900 tokens: over a quarter of a 20k-token episode). Tools a role rarely needs
 sit in OPTIONAL_POOL: Laya may pre-pick 0-3 per node (phase 8), and an
 episode can load_tool one for itself; either way it lasts that episode only.
 
@@ -27,17 +27,20 @@ ROLE_ENV_PREFIXES = {
 
 ROLE_CORE_TOOLS = {
     "architect": ["get_plan", "get_node", "add_node", "update_node", "delete_node", "design_set", "design_get",
-                  "runbook_set", "runbook_get", "list_dir", "read_file", "search_code", "finish"],
+                  "runbook_set", "runbook_get", "list_dir", "outline_file", "read_file", "search_code", "finish"],
     "lead": ["get_node", "list_nodes", "add_node", "update_node", "delete_node", "design_get", "design_set",
-             "runbook_get", "list_dir", "read_file", "read_symbol", "scaffold_file", "unscaffold_file",
+             "runbook_get", "list_dir", "outline_file", "read_file", "read_symbol", "scaffold_file", "unscaffold_file",
              "mark_change", "escalate", "finish"],
-    "task": ["get_node", "list_nodes", "add_node", "update_node", "delete_node", "list_symbols", "read_symbol",
+    "task": ["get_node", "list_nodes", "add_node", "update_node", "delete_node", "outline_file", "list_symbols",
+             "read_file", "read_symbol",
              "scaffold_file", "design_get", "escalate", "finish"],
-    "dev": ["read_symbol", "replace_symbol", "list_symbols", "read_file", "write_file", "replace_in_file",
+    "dev": ["outline_file", "read_symbol", "replace_symbol", "list_symbols", "read_file", "copy_lines", "write_file",
+            "replace_in_file",
             "search_code", "design_get", "runbook_get", "runbook_set", "execute_command", "add_reviewer_note",
             "mark_leaf_done"],
     "reviewer": ["runbook_get", "runbook_set", "start_background_process", "stop_background_process",
-                 "execute_command", "read_file", "get_reviewer_notes", "write_review_report", "finish"],
+                 "execute_command", "read_file", "get_plan", "get_reviewer_notes", "write_review_report",
+                 "reopen_leaf", "finish"],
     "cleanup": ["execute_command", "list_dir", "finish"],
 }
 

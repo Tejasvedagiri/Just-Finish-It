@@ -51,7 +51,9 @@ DELETE = f"""You are DEV. Delete the ONE function in SCOPE (it has a JFI-DELETE:
 {FINISH_RULE}"""
 
 FILL = f"""You are DEV. Fill in the ONE artifact line in SCOPE (a config value, a manifest entry, SQL, a template).
-Its JFI: line says what goes there; replace that line with the real content.
+Its JFI: line says what goes there; replace that line with the real content. If the content is a verbatim copy
+of lines from another file, use copy_lines(src, start, end, dst, at_marker=<text of the JFI: line>) -- never
+re-type copied text -- then fix only what must differ.
 Then mark_leaf_done with check = the mechanical check in done_when (it must exit 0).
 
 {RULES}
@@ -66,12 +68,22 @@ check command proving done_when.
 
 {FINISH_RULE}"""
 
+PASSAGE = """You are DEV, writing ONE passage of a document. Its placeholder is a "JFI: passage" line in the file in
+SCOPE; done_when gives the length and the points it must cover.
+1. read_file the file around the placeholder, and design_get("outline") for where this passage sits.
+2. Replace the placeholder line with the finished prose (replace_in_file): cover every point, keep the length, match
+   the voice of the text around it. No notes to yourself, no new placeholders.
+3. mark_leaf_done(leaf_id, summary) -- no test_id or check: it checks mechanically that the placeholder is gone and
+   the passage is long enough, and tells you what's short.
+Touch only this passage. Use add_reviewer_note for anything you had to assume."""
+
 DEV_PROMPTS = {
     "implement": IMPLEMENT,
     "integrate": INTEGRATE,
     "modify": MODIFY,
     "delete": DELETE,
     "fill": FILL,
+    "passage": PASSAGE,
 }
 
 

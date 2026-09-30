@@ -13,10 +13,10 @@ from JFI.llm.lmstudio_control import LMStudioControl
 # Trimmed from a real `lms ps --json` (2026-09-28): one GGUF model with no TTL,
 # one MLX model with a selected variant and a TTL.
 PS_JSON = [
-    {"type": "llm", "modelKey": "ornith-1.0-35b-uncensored-heretic", "identifier": "ornith-1.0-35b-uncensored-heretic",
-     "ttlMs": None, "contextLength": 40192, "parallel": 4},
     {"type": "llm", "modelKey": "qwen/qwen3.8-27b", "identifier": "qwen/qwen3.8-27b",
-     "selectedVariant": "qwen/qwen3.8-27b@4bit", "ttlMs": 3600000, "contextLength": 42496, "parallel": 2},
+     "ttlMs": None, "contextLength": 40192, "parallel": 4},
+    {"type": "llm", "modelKey": "google/gemma-4-12b", "identifier": "google/gemma-4-12b",
+     "selectedVariant": "google/gemma-4-12b@4bit", "ttlMs": 3600000, "contextLength": 42496, "parallel": 2},
     {"type": "embedding", "modelKey": "nomic-embed", "identifier": "nomic-embed"},
 ]
 
@@ -43,9 +43,9 @@ def test_unload_then_reload_with_the_same_settings():
 
     loads = [c for c in lms.calls if c[0] == "load"]
     assert loads == [
-        ["load", "ornith-1.0-35b-uncensored-heretic", "-y", "--context-length", "40192", "--parallel", "4"],
-        # modelKey, not selectedVariant: `lms load qwen/qwen3.8-27b@4bit` didn't resolve in practice.
-        ["load", "qwen/qwen3.8-27b", "-y", "--context-length", "42496", "--parallel", "2", "--ttl", "3600"],
+        ["load", "qwen/qwen3.8-27b", "-y", "--context-length", "40192", "--parallel", "4"],
+        # modelKey, not selectedVariant: `lms load <modelKey>@4bit` didn't resolve in practice.
+        ["load", "google/gemma-4-12b", "-y", "--context-length", "42496", "--parallel", "2", "--ttl", "3600"],
     ], "embedding models aren't touched; LLMs come back with their context, parallelism and TTL"
 
 
@@ -58,12 +58,12 @@ def test_reload_happens_even_if_the_block_raises():
 
 
 def test_one_failed_reload_does_not_stop_the_others():
-    lms = FakeLms(fail_load_for={"ornith-1.0-35b-uncensored-heretic"})
+    lms = FakeLms(fail_load_for={"qwen/qwen3.8-27b"})
     logs = []
     with LMStudioControl(lms_path="lms", runner=lms).models_unloaded(log=logs.append):
         pass
     assert sum(1 for c in lms.calls if c[0] == "load") == 2
-    assert any(line.startswith("Error: could not reload ornith") for line in logs)
+    assert any(line.startswith("Error: could not reload qwen/qwen3.8-27b") for line in logs)
 
 
 def test_missing_lms_runs_the_block_without_unloading():

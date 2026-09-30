@@ -56,10 +56,9 @@ jfi-web = "JFI.web.launcher:main"
 build = "build_binary:main"
 create-env = "JFI.create_env:main"
 export-db = "export_db:main"
-laya-finetune = "laya_finetune:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/JFI", "src/build_binary", "src/export_db", "src/laya_finetune"]
+packages = ["src/JFI", "src/build_binary", "src/export_db"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -87,7 +86,7 @@ dev = [
 ]
 
 # torch (pulled in only by the optional `laya` extra) comes from PyTorch's CUDA
-# 13.0 index on Windows/Linux, so `uv run laya-finetune` trains on the GPU --
+# 13.0 index on Windows/Linux, so Laya can use the GPU (LAYA_DEVICE=cuda) --
 # the PyPI Windows wheel is CPU-only, and a plain `uv run` re-syncs to the lock,
 # which used to swap a hand-installed CUDA build back to CPU. cu130 is what an
 # RTX 50-series (Blackwell, sm_120) needs; the same wheel runs on CPU-only

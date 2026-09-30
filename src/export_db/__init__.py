@@ -4,10 +4,10 @@ JFI/<session>/ folder except .lock) back into plain text files a human can
 read, one pair per session.
 
 **Debugging only.** This is a one-way, read-only export: JFI itself never
-reads these files back. The entire point of the DB rewrite (see /todo.md)
-was retiring markdown as a SOURCE OF TRUTH because two independent parsers
-over plan.md (this project's own Python planner-phase scanner and
-Just-Finish-It-Fleet's src/main.js's regex tree-parser) had each hit their own real bugs.
+reads these files back. The entire point of the DB rewrite was retiring
+markdown as a SOURCE OF TRUTH because two independent parsers over plan.md
+(this project's own Python planner-phase scanner and Just-Finish-It-Fleet's
+src/main.js's regex tree-parser) had each hit their own real bugs.
 Reintroducing a markdown file that anything parses back in would just grow
 a third one.
 
@@ -68,6 +68,7 @@ def _render_plan_export(session_id: str, engine) -> str:
         display_number,
         get_session,
     )
+    from JFI.tool.plan_db_tools import display_status
 
     with get_session(engine) as db:
         record = db.get(SessionRecord, session_id)
@@ -142,11 +143,15 @@ def _render_plan_export(session_id: str, engine) -> str:
             indent = "  " * depth
             v2 = ""
             if leaf.level:
-                bits = [leaf.level, leaf.kind, leaf.plan_status or "unjudged"]
+                bits = [leaf.level, leaf.kind, display_status(leaf.plan_status, bool(children)) or "unjudged"]
                 if leaf.done_when:
                     bits.append(f"done when: {leaf.done_when}")
                 if leaf.depends_on:
                     bits.append(f"depends on {leaf.depends_on}")
+                if leaf.review_status:
+                    bits.append(f"review {leaf.review_status}")
+                if leaf.fix_note:
+                    bits.append(f"fix: {leaf.fix_note}")
                 v2 = " · " + " · ".join(b for b in bits if b)
             if children:
                 lines.append(f"{indent}- {number}. {leaf.description}{v2}")
@@ -241,8 +246,10 @@ def _render_plan_export(session_id: str, engine) -> str:
         lines.append(f"## Planner verdicts ({len(verdicts)})")
         for v in verdicts:
             conf = f"{v.answer_confidence:.2f}" if v.answer_confidence is not None else "—"
-            lines.append(f"- node {v.node_id} ({v.level}): laya {v.laya_verdict or '—'} @ {conf}, "
-                         f"fallback {v.fallback} -> **{v.final_status}**")
+            tiebreak = f", llm {v.tiebreak_verdict}" if v.tiebreak_verdict else ""
+            lines.append(f"- node {v.node_id} ({v.level}): rule {v.rule_verdict or '—'}, "
+                         f"laya {v.laya_verdict or '—'} @ {conf}{tiebreak}, "
+                         f"decided by {v.decided_by or v.fallback} -> **{v.final_status}**")
         lines.append("")
     if events:
         lines.append(f"## Plan events ({len(events)})")
@@ -303,10 +310,12 @@ def _export_one(project_root: Path, engine, session_id: str) -> tuple[Path, Path
     jfi_dir.mkdir(parents=True, exist_ok=True)
 
     plan_path = jfi_dir / f"{session_id}_plan_export.md"
-    plan_path.write_text(_render_plan_export(session_id, engine))
+    # Explicit UTF-8: the default is the locale's codepage (cp1252 on
+    # Windows), which crashed on the first emoji in a history message.
+    plan_path.write_text(_render_plan_export(session_id, engine), encoding="utf-8")
 
     log_path = jfi_dir / f"{session_id}_log_export.txt"
-    log_path.write_text(_render_log_export(session_id, engine))
+    log_path.write_text(_render_log_export(session_id, engine), encoding="utf-8")
 
     return plan_path, log_path
 

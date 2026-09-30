@@ -3,10 +3,9 @@
 from JFI.manager.abstract_manager import AbstractManager
 from JFI.models import get_engine
 from JFI.tool.cmd_tools import (
-    CmdApprovalGate,
     get_approved_cmd_prefixes,
     make_gated_execute_command,
-    request_cmd_approval,
+    CmdApprovalGate,
 )
 
 
@@ -39,29 +38,29 @@ class TestRequestCmdApproval:
     def test_yes_runs_once_without_saving(self, tmp_path):
         engine = _engine(tmp_path)
         console = _Console(answers=["y"])
-        assert request_cmd_approval("ls -la", console, engine, "demo") is True
+        assert CmdApprovalGate(console, engine, "demo").request("ls -la") is True
         assert get_approved_cmd_prefixes(engine, "demo") == []
 
     def test_no_does_not_run(self, tmp_path):
         engine = _engine(tmp_path)
         console = _Console(answers=["n"])
-        assert request_cmd_approval("rm -rf /", console, engine, "demo") is False
+        assert CmdApprovalGate(console, engine, "demo").request("rm -rf /") is False
 
     def test_invalid_answer_reprompts(self, tmp_path):
         engine = _engine(tmp_path)
         console = _Console(answers=["banana", "y"])
-        assert request_cmd_approval("ls", console, engine, "demo") is True
+        assert CmdApprovalGate(console, engine, "demo").request("ls") is True
         assert any("Please answer" in m for m in console.system_messages)
 
     def test_save_persists_prefix_and_second_call_is_silent(self, tmp_path):
         engine = _engine(tmp_path)
         console = _Console(answers=["s"])
-        assert request_cmd_approval("npm install", console, engine, "demo") is True
+        assert CmdApprovalGate(console, engine, "demo").request("npm install") is True
         assert get_approved_cmd_prefixes(engine, "demo") == ["npm"]
 
         # A fresh gate (no in-memory state) still auto-approves from the DB.
         console2 = _Console(answers=[])
-        assert request_cmd_approval("npm run build", console2, engine, "demo") is True
+        assert CmdApprovalGate(console2, engine, "demo").request("npm run build") is True
         assert console2.answers == []  # never had to prompt
 
     def test_save_preserves_unrelated_keys_in_context_store(self, tmp_path):
@@ -70,7 +69,7 @@ class TestRequestCmdApproval:
 
         set_context_value(engine, "demo", "db_schema", "users: id, email")
         console = _Console(answers=["s"])
-        request_cmd_approval("uv run pytest", console, engine, "demo")
+        CmdApprovalGate(console, engine, "demo").request("uv run pytest")
 
         from JFI.tool.context_tools import get_context_value
 
@@ -81,7 +80,7 @@ class TestRequestCmdApproval:
         """The DB is shared across every session in a project — a saved
         prefix must not leak into a different session_id's row."""
         engine = _engine(tmp_path)
-        request_cmd_approval("npm install", _Console(answers=["s"]), engine, "session-a")
+        CmdApprovalGate(_Console(answers=["s"]), engine, "session-a").request("npm install")
         assert get_approved_cmd_prefixes(engine, "session-b") == []
 
 

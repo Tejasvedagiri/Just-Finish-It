@@ -32,7 +32,6 @@ Launch with: streamlit run src/JFI/web/dashboard.py
 
 import json
 import os
-import re
 import time
 from pathlib import Path
 
@@ -40,9 +39,10 @@ import streamlit as st
 
 from JFI.manager.web_bridge import ANSWER_FILENAME, STATUS_FILENAME, atomic_write_json
 from JFI.models import get_engine
-from JFI.session.simple_session_manager import PHASE_SECTION
 from JFI.tool.note_tools import get_note, REVIEW_REPORT
-from JFI.tool.plan_db_tools import has_leaves, phase_progress_db, plan_progress_db, render_plan_markdown
+from JFI.tool.plan_db_tools import (
+    phase_progress_db, plan_judge_rows, plan_progress_db, render_plan_markdown,
+)
 
 st.set_page_config(page_title="Just Finish It — Status", page_icon="📋", layout="wide")
 
@@ -75,35 +75,6 @@ def _list_session_ids(engine) -> list[str]:
     with get_session(engine) as db:
         rows = list(db.exec(select(SessionRecord).order_by(SessionRecord.created_at.desc())))
     return [row.session_id for row in rows]
-
-
-# Checkbox-counting regexes kept identical to
-# SimpleSessionManager.plan_progress/phase_progress -- a user-skipped
-# "- [○]" item counts as resolved alongside "- [x]", same as there.
-def _plan_counts(text: str) -> tuple[int, int]:
-    done = len(re.findall(r"^[ \t]*[-*][ \t]*\[[xX]\]", text, re.M))
-    skipped = len(re.findall(r"^[ \t]*[-*][ \t]*\[○\]", text, re.M))
-    todo = len(re.findall(r"^[ \t]*[-*][ \t]*\[[ ]\]", text, re.M))
-    return done + skipped, done + skipped + todo
-
-
-def _phase_counts(text: str, section: str) -> tuple[int, int]:
-    done = skipped = todo = 0
-    in_section = False
-    for line in text.splitlines():
-        header = re.match(r"^\s*#{1,6}\s+(.*)", line)
-        if header:
-            in_section = header.group(1).strip().lower().startswith(section.lower())
-            continue
-        if not in_section:
-            continue
-        if re.match(r"^[ \t]*[-*][ \t]*\[[xX]\]", line):
-            done += 1
-        elif re.match(r"^[ \t]*[-*][ \t]*\[○\]", line):
-            skipped += 1
-        elif re.match(r"^[ \t]*[-*][ \t]*\[[ ]\]", line):
-            todo += 1
-    return done + skipped, done + skipped + todo
 
 
 def _recent_log_events(engine, session_id: str, limit: int = 200) -> list:
@@ -148,7 +119,7 @@ def _render_approval(jfi_dir: Path, awaiting: dict) -> None:
     if options:
         cols = st.columns(len(options))
         for col, option in zip(cols, options):
-            if col.button(option["label"], key=f"answer-{option['key']}", use_container_width=True):
+            if col.button(option["label"], key=f"answer-{option['key']}", width="stretch"):
                 atomic_write_json(jfi_dir / ANSWER_FILENAME, {"type": "answer", "key": option["key"]})
                 st.toast(f"Sent: {option['label']}")
                 time.sleep(0.3)
@@ -175,6 +146,27 @@ def _render_queue_input(jfi_dir: Path) -> None:
         if st.form_submit_button("Queue") and text.strip():
             atomic_write_json(jfi_dir / ANSWER_FILENAME, {"type": "queue", "text": text.strip()})
             st.toast("Queued")
+            time.sleep(0.3)
+            st.rerun()
+
+
+def _render_pause_control(jfi_dir: Path, status: dict) -> None:
+    """Pause / Resume, the dashboard's Ctrl+P. Writes the target state (not a
+    toggle) for WebBridge._relay_answer -> console.submit_external_pause(), so
+    the session holds cleanly before its next model turn; the turn already in
+    flight finishes first."""
+    paused = bool(status.get("is_paused"))
+    left, right = st.columns([3, 1])
+    with left:
+        if paused:
+            st.warning("⏸️  Paused: the session is holding before its next model turn.")
+        else:
+            st.caption("Running. Pause holds the session before its next model turn.")
+    with right:
+        label = "▶️ Resume" if paused else "⏸️ Pause"
+        if st.button(label, key="pause-toggle", width="stretch"):
+            atomic_write_json(jfi_dir / ANSWER_FILENAME, {"type": "pause", "paused": not paused})
+            st.toast("Resuming" if paused else "Pausing after the current turn")
             time.sleep(0.3)
             st.rerun()
 
@@ -231,6 +223,21 @@ def _render_status(status: dict) -> None:
                 )
 
 
+def _render_runbook_and_design(engine, session_id: str) -> None:
+    """The Architect's runbook (how to set up, run and test the project; ✓ =
+    a command that has actually run) and design (stack, contracts,
+    conventions, outline): what every later role works from."""
+    from JFI.tool.plan_db_tools import plan_runbook_and_design
+
+    runbook, design = plan_runbook_and_design(engine, session_id)
+    if runbook:
+        with st.expander(f"Runbook ({len(runbook)})"):
+            st.dataframe(runbook, width="stretch", hide_index=True)
+    if design:
+        with st.expander(f"Design ({len(design)})"):
+            st.dataframe(design, width="stretch", hide_index=True)
+
+
 def _render_db_browser_tab(engine, selected_session_id: str) -> None:
     """Raw table view of .jfi/JFI.db -- a plain, mechanical browser (pick a
     table, see its rows) rather than a purpose-built view of any one of
@@ -250,7 +257,7 @@ def _render_db_browser_tab(engine, selected_session_id: str) -> None:
         st.info("No rows.")
         return
     st.caption(f"{len(rows)} row(s)")
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
 
 
 def main() -> None:
@@ -313,6 +320,7 @@ def _render_session_tab(db_engine, jfi_dir: Path, selected_name: str) -> None:
         )
         _render_status(status)
     else:
+        _render_pause_control(jfi_dir, status)
         awaiting = status.get("awaiting")
         if awaiting:
             _render_approval(jfi_dir, awaiting)
@@ -322,39 +330,21 @@ def _render_session_tab(db_engine, jfi_dir: Path, selected_name: str) -> None:
 
     st.subheader("Plan")
     session_id = selected_name
-    if has_leaves(db_engine, session_id):
-        # The plan is DB-backed now (see JFI.tool.plan_db_tools) -- prefer
-        # it over plan.md the same way SimpleSessionManager's own
-        # plan_progress/phase_progress do, since a session that ever
-        # called add_leaf has nothing meaningful left in plan.md at all.
+    judge_rows = plan_judge_rows(db_engine, session_id)
+    if judge_rows:
         done, total = plan_progress_db(db_engine, session_id)
         if total:
-            st.progress(done / total, text=f"{done}/{total} items ticked")
-        for phase, section in PHASE_SECTION.items():
-            pdone, ptotal = phase_progress_db(db_engine, session_id, phase)
-            if ptotal:
-                st.caption(f"{section}: {pdone}/{ptotal}")
+            st.progress(done / total, text=f"{done}/{total} leaves done")
+        pdone, ptotal = phase_progress_db(db_engine, session_id, "imp")
+        if ptotal:
+            st.caption(f"Implementation: {pdone}/{ptotal}")
         with st.expander("Full plan", expanded=status is None):
             st.markdown(render_plan_markdown(db_engine, session_id))
+            st.markdown("**Task | Judge**")
+            st.dataframe(judge_rows, width="stretch", hide_index=True)
+        _render_runbook_and_design(db_engine, session_id)
     else:
-        # Legacy fallback for a pre-DB-cutover session -- `.jfi/plan.md` is
-        # shared/flat now too, so this only ever reflects whichever session
-        # most recently wrote one (unlike the review report below, which
-        # is DB-backed and genuinely scoped to the selected session_id).
-        plan_path = jfi_dir / "plan.md"
-        if plan_path.exists():
-            plan_text = plan_path.read_text(encoding="utf-8")
-            done, total = _plan_counts(plan_text)
-            if total:
-                st.progress(done / total, text=f"{done}/{total} items ticked")
-            for phase, section in PHASE_SECTION.items():
-                pdone, ptotal = _phase_counts(plan_text, section)
-                if ptotal:
-                    st.caption(f"{section}: {pdone}/{ptotal}")
-            with st.expander("Full plan.md", expanded=status is None):
-                st.markdown(plan_text)
-        else:
-            st.info("No plan yet for this session.")
+        st.info("No plan yet for this session.")
 
     review_report = get_note(db_engine, session_id, REVIEW_REPORT)
     if review_report:

@@ -55,11 +55,6 @@ class AbstractManager(ABC):
         pass
 
     @abstractmethod
-    def display_assistant(self, text: str) -> None:
-        """Render assistant response."""
-        pass
-
-    @abstractmethod
     def display_system(self, text: str) -> None:
         """Render system or background notification."""
         pass
@@ -146,53 +141,9 @@ class AbstractManager(ABC):
     def display_tool_result(self, text: str) -> None:
         self.display_system(f"Result: {text}")
 
-    def display_stream(self, text: str) -> None:
-        """Appends `text` to the current live output in place, merging into
-        the same visual block rather than starting a new line/log entry —
-        for showing a response as it's generated (e.g. side-channel LLM
-        calls like _summarize_with_llm's digest, under SHOW_STREAM_PROMPTS)
-        the same way the main turn's own response streams token-by-token.
-        Default fallback for managers with no incremental rendering: whole
-        chunks land as separate display_system lines, which works but won't
-        look "live" — see PromptToolkitConsoleManager's real override."""
-        self.display_system(text)
-
-    def log_stream_result(self, tag: str, text: str) -> None:
-        """Persists `text` to whatever durable log this manager keeps (see
-        PromptToolkitConsoleManager._log's LogEvent table / log_tail)
-        WITHOUT re-rendering it to the live view — for closing out a
-        display_stream(...) burst once it's fully assembled, same as
-        print_agent_response's own live streaming logs the complete
-        response exactly once at the end rather than per chunk. Calling
-        this after a display_stream burst avoids showing the same text
-        twice. Default fallback for managers with no separate durable log
-        (nothing would otherwise record the streamed text at all): show it
-        via display_system."""
-        self.display_system(text)
-
-    # ------------------------------------------------------- queued input
-
     def drain_forced_input(self) -> List[str]:
         """Lines the user pushed to the front of the queue, for the next AI turn."""
         return []
-
-    def drain_skip_request(self) -> bool:
-        """
-        True the moment a "skip the current checklist item" gesture (Ctrl+K
-        in PromptToolkitConsoleManager) is pending, and clears it — checked
-        once per turn boundary in run_phase, same as drain_forced_input.
-        No-op default for managers with no such gesture.
-        """
-        return False
-
-    def drain_skip_all_request(self) -> bool:
-        """
-        True the moment a "skip every remaining item in this phase" gesture
-        (Ctrl+Q) is pending, and clears it. Same shape as drain_skip_request,
-        just the bulk version. No-op default for managers with no such
-        gesture.
-        """
-        return False
 
     def drain_queued_input(self) -> List[str]:
         """Lines the user queued, to be replayed once the pipeline comes around."""
@@ -229,25 +180,25 @@ class AbstractManager(ABC):
                    plan: Optional[tuple] = None, phase_plan: Optional[tuple] = None,
                    tokens: Optional[tuple] = None, task: Optional[str] = None,
                    stage: Optional[str] = None, plan_markdown: Optional[str] = None,
-                   task_started_at: Optional[float] = None) -> None:
+                   task_started_at: Optional[float] = None, plan_detail: Optional[dict] = None) -> None:
         """`stage` is a short sub-phase tag shown alongside the phase itself
-        (e.g. "Arc"/"Lead"/"Dev"/"Tickets"/"Task" for the tiered planner's
-        own internal stages -- see runner.PLANNER_ARC_STAGE/
-        PLANNER_NODE_STAGES) -- distinct from
-        `task` (a per-leaf checkbox title) so runner.py's frequent
-        `task=ssm.current_task_title(phase)` updates during a turn never
-        clobber it; callers clear it with `stage=""` on phase change.
+        (the episode's role: "Architect"/"Lead"/"Task"/"Judge"/"Dev"/
+        "Reviewer"/...) -- distinct from `task` (what that episode is working
+        on; for Dev, the leaf's "1.2.3 description" title); callers clear it
+        with `stage=""` on phase change.
 
-        `plan_markdown` is the raw current text of plan.md, refreshed each
-        turn alongside `plan`/`phase_plan` -- meant for get_status_snapshot
-        (a fleet-dashboard checklist view), since a remote viewer has no
-        filesystem access to read plan.md itself.
+        `plan_markdown` is the plan rendered as the old plan.md checklist
+        (plan_db_tools.render_plan_markdown) -- for get_status_snapshot (the
+        fleet dashboard's checklist view), since a remote viewer can't read
+        the session's DB.
 
         `task_started_at` is the wall-clock (time.time()) moment `task`
-        became current -- refreshed alongside `task` every turn so a live
-        viewer can show "running Xm" for the in-progress leaf; the same
-        timestamp is handed to record_task_tokens as `started_at` once that
-        leaf finishes and a new one becomes current."""
+        became current, so a live viewer can show "running Xm" for the
+        in-progress leaf.
+
+        `plan_detail` is plan_db_tools.plan_status_fields' Task | Judge rows,
+        runbook and design -- for get_status_snapshot, so the fleet dashboard
+        can show the same tables the Streamlit one reads from the DB."""
         pass
 
     def mark_phase_done(self, phase: str) -> None:
@@ -273,33 +224,20 @@ class AbstractManager(ABC):
                            started_at: Optional[float] = None, ended_at: Optional[float] = None,
                            phase: Optional[str] = None) -> None:
         """
-        Records how many tokens a just-finished plan leaf (`task`, the
-        title that was `current_task` in runner._drive_turn_loop) consumed
-        while it was current — `tokens` is the same accumulator that loop
-        already keeps for the stuck-task-split trigger
-        (_task_stuck_token_limit), so this is free real data, not a new
-        estimate. `started_at`/`ended_at` are wall-clock (time.time())
-        timestamps bracketing how long the leaf stayed current — `started_at`
-        is the same value set_status's own `task_started_at` carried while
-        this leaf was the current one.
+        Records a just-finished plan leaf (`task`, its "1.2.3 description"
+        title) with the tokens its Dev episodes used (Leaf.tokens, summed
+        over attempts). `started_at`/`ended_at` are wall-clock (time.time())
+        timestamps: when Dev first started the leaf and when it was marked
+        done.
 
-        `phase` is which phase this leaf belonged to (only "imp" and
-        "testing" ever produce a real, non-empty `task` here — see
-        PHASE_SECTION in simple_session_manager.py; other phases have no
-        checkbox-driven task queue at all). This matters because
-        "## Implementation" and "## Testing" are numbered as SEPARATE trees
-        in plan.md, so e.g. leaf "3.2" can legitimately exist in both
-        sections at once — a UI grouping/labeling entries by number alone
-        without `phase` would conflate two unrelated leaves that happen to
-        share a number.
+        `phase` is the leaf's phase ("imp"; v1 sessions also had "testing",
+        numbered as a separate tree), so a UI grouping entries by number
+        can't conflate two leaves from different trees.
 
         Meant for a UI that wants a per-task cost/duration breakdown (e.g.
         a tasks-vs-tokens heatmap grouped by phase, or a plan checklist
         showing how long each leaf took); no-op default for managers with
-        no such display. Never called for a leaf that finished before this
-        tracking window ever accumulated anything (tokens == 0) or for the
-        empty task title seen before the very first real leaf becomes
-        current.
+        no such display.
         """
         pass
 

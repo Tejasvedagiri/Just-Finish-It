@@ -1,10 +1,8 @@
-"""Engine/session factory for the DB_BACKEND env var described in todo.md's
-scope section 2: "sqlite" (default, ONE file per PROJECT -- `.jfi/JFI.db`
-at the project root, shared by every session ever run there, each row
-distinguished by its `session_id` column) or "mysql"/"postgres" (one
-shared DATABASE_URL, e.g. a fleet-wide server multiple projects/machines
-can all reach -- see todo.md's open decision #1 on how the master
-dashboard reads this).
+"""Engine/session factory for the DB_BACKEND env var: "sqlite" (default, ONE
+file per PROJECT -- `.jfi/JFI.db` at the project root, shared by every
+session ever run there, each row distinguished by its `session_id` column)
+or "mysql"/"postgres" (one shared DATABASE_URL, e.g. a fleet-wide server
+multiple projects/machines can all reach).
 
 One DB per project rather than one per session: every table already keyed
 its rows by `session_id`, so nothing about the schema had to change to
@@ -32,7 +30,6 @@ from sqlmodel import Session, SQLModel, create_engine
 # which import order alone doesn't guarantee -- SQLAlchemy resolves that
 # from the string reference at create_all time, not at import time, so this
 # is just for registration, not dependency ordering.
-from JFI.models.activity import ActivityEvent  # noqa: F401
 from JFI.models.context_entry import ContextEntry  # noqa: F401
 from JFI.models.files import ImplementedFile  # noqa: F401
 from JFI.models.history import HistoryMessage  # noqa: F401
@@ -44,9 +41,9 @@ from JFI.models.queue import QueuedItem  # noqa: F401
 from JFI.models.session import SessionRecord  # noqa: F401
 from JFI.models.session_note import SessionNote  # noqa: F401
 from JFI.models.tools import UnlockedTool  # noqa: F401
-from JFI.models.v2 import (  # noqa: F401
-    DesignEntry, Directive, Episode, PlanEvent, PlannerVerdict, RunbookEntry,
-)
+from JFI.models.episode import Directive, Episode  # noqa: F401
+from JFI.models.planning import PlanEvent, PlannerVerdict  # noqa: F401
+from JFI.models.runbook_design import DesignEntry, RunbookEntry  # noqa: F401
 
 
 def database_url(project_root: Path) -> str:
@@ -132,6 +129,12 @@ ADDED_COLUMNS = {
     },
     "historymessage": {
         "episode_id": "INTEGER",
+    },
+    # The two-score judge (the rule + Laya, LLM tie-break)
+    "plannerverdict": {
+        "rule_verdict": "TEXT",
+        "tiebreak_verdict": "TEXT",
+        "decided_by": "TEXT",
     },
 }
 

@@ -27,12 +27,6 @@ MODEL=qwen3:8b
 
 # --- Optional ----------------------------------------------------------------
 
-# Which SessionManager drives a session: "adaptive" (default) detects the
-# task type (python/javascript/story) from the goal and sends smaller,
-# type-specific planning rules instead of one generic block for every goal;
-# "simple" opts back into the original one-size-fits-all rules.
-# SESSION_MANAGER=adaptive
-
 # Sampling temperature. Defaults to 0.7 if unset.
 # TEMPERATURE=0.7
 
@@ -43,14 +37,16 @@ MODEL=qwen3:8b
 # stuck repeating itself; stronger models generally don't need it.
 # FREQUENCY_PENALTY=0.0
 
-# Context window of the served model, in tokens. History is compressed once a
-# request would exceed CONTEXT_SIZE * CONTEXT_COMPRESSION_RATIO. Size it to
+# Context window of the served model, in tokens. It sets every episode's
+# token budget: CONTEXT_SIZE * CONTEXT_COMPRESSION_RATIO (32768 * 0.7 = 22937;
+# the rest is room for the reply). It must match what the server actually
+# loaded (LM Studio's own context length), or replies get cut off. Size it to
 # what fits on your machine: 4096-16384 for an ~8GB setup with a small model,
 # 32768+ for 27B/31B runs. Defaults to 32768 if unset.
 # CONTEXT_SIZE=32768
 
-# Headroom left for the model's own reply when deciding whether to compress
-# history. Defaults to 0.7 if unset.
+# The share of CONTEXT_SIZE an episode may fill; the rest is headroom for the
+# model's own reply. Defaults to 0.7 if unset.
 # CONTEXT_COMPRESSION_RATIO=0.7
 
 # Max tokens (estimated) for a single streamed response before it's
@@ -85,14 +81,15 @@ MODEL=qwen3:8b
 #
 # Each of OPENAI_URL / OPENAI_API_KEY / MODEL / TEMPERATURE / FREQUENCY_PENALTY
 # / CONTEXT_SIZE can be overridden per phase by prefixing it PLANNER_, IMP_,
-# TESTING_, or REVIEWER_. Any phase
+# REVIEWER_ or CLEANUP_, and per planner/Dev role by ARCHITECT_, LEAD_, TASK_
+# (falling back to PLANNER_) or DEV_ (falling back to IMP_). Any phase
 # left unset falls back to the shared settings above, so uncomment only the
 # phases (and only the settings within them) you actually want to route
-# elsewhere — e.g. a cheap/fast model for testing, a stronger one for review.
+# elsewhere — e.g. a cheap/fast model for Dev, a stronger one for review.
 # CONTEXT_SIZE in particular is worth setting per phase whenever a phase's
 # model differs from the shared default's real context window — otherwise
-# compression budgets that phase against the WRONG window (risking silent
-# truncation on a smaller one, or needless over-compression on a larger one).
+# that phase's episodes are budgeted against the WRONG window (overflowing a
+# smaller one, or cut needlessly short on a larger one).
 
 # PLANNER_MODEL=qwen3:8b
 # PLANNER_OPENAI_URL=http://127.0.0.1:11434/v1
@@ -106,11 +103,7 @@ MODEL=qwen3:8b
 # IMP_TEMPERATURE=0.7
 # IMP_CONTEXT_SIZE=32768
 
-# TESTING_MODEL=qwen3:8b
-# TESTING_OPENAI_URL=http://127.0.0.1:11434/v1
-# TESTING_OPENAI_API_KEY=ollama
-# TESTING_TEMPERATURE=0.7
-# TESTING_CONTEXT_SIZE=32768
+# ARCHITECT_MODEL=a-stronger-model
 
 # REVIEWER_MODEL=gpt-4.1
 # REVIEWER_OPENAI_URL=https://api.openai.com/v1
@@ -119,18 +112,6 @@ MODEL=qwen3:8b
 # REVIEWER_CONTEXT_SIZE=128000
 
 # --- Debugging -----------------------------------------------------------
-
-# The planner phase is tiered by default -- Architect (top-level shape
-# only, once) -> then, depth-first for each top-level node, Team Lead
-# (feature breakdown) -> Dev (walks the branch down to genuinely atomic,
-# checkbox-ready leaves) -> Task Planner (one child leaf per function) --
-# instead of one combined pass, because a single pass was observed letting
-# compound leaves through (a "leaf" that was really several independent test
-# cases, or several independent shell actions, bundled into one). Set this
-# to opt back into the original one-pass planner (far fewer LLM calls) if
-# you'd rather trade that decomposition quality for lower planner cost.
-# Accepts 1/true/yes/on.
-# PLANNER_SINGLE_PASS=1
 
 # Every execute_command call runs immediately, with no approval prompt at
 # all -- as if "Yes, for the rest of this session" had been answered every
@@ -143,7 +124,7 @@ MODEL=qwen3:8b
 
 # Prints every message sent to the LLM each turn, in full -- no truncation
 # anywhere, unlike the normal tool-result preview. Verbose by design; meant
-# for prompt-engineering and context-compression debugging, not everyday
+# for prompt-engineering debugging, not everyday
 # runs. Accepts 1/true/yes/on.
 # SHOW_STREAM_PROMPTS=1
 
@@ -194,18 +175,14 @@ MODEL=qwen3:8b
 # same trust model execute_command already has.
 # MASTER_WS_URL=ws://203.0.113.5:8765/report
 
-# --- Experimental: the v2 pipeline (laya_plan.md) ---------------------------
+# --- Planner and Dev episodes (laya_plan.md) ---------------------------------
 
-# Sessions CREATED while this is v2 run the v2 planner: Architect -> Lead ->
-# Task in short, scoped episodes, every node judged GOOD / BREAKDOWN / REDO,
-# and no Program Manager phase. Existing sessions keep the pipeline they were
-# created with. Default v1. The reviewer and cleanup are still v1 for now.
-# JFI_PIPELINE=v2
+# The planner runs Architect -> Lead -> Task in short, scoped episodes, and
+# every node is judged GOOD / BREAKDOWN / REDO (LAYA below); Dev then builds
+# one leaf per episode. Sessions from the removed v1 pipeline can't be resumed.
 
-# Token budget for one episode (default 20000; capped further by
-# CONTEXT_SIZE x CONTEXT_COMPRESSION_RATIO), and its turn cap (default 15).
-# EPISODE_TOKEN_BUDGET=20000
-# MAX_EPISODE_TURNS=15
+# Turn cap for one episode (default 25); its token budget comes from CONTEXT_SIZE.
+# MAX_EPISODE_TURNS=25
 
 # Longest single tool result, in tokens, before it's cut with a hint (3000).
 # TOOL_RESULT_MAX_TOKENS=3000
@@ -214,8 +191,10 @@ MODEL=qwen3:8b
 # PLANNER_ITEM_MAX_CHARS=200
 
 # Redos per node before it's accepted as-is (2); escalations into one node
-# (1); planner episodes per planning round before everything left is
-# accepted as-is (200).
+# (1). MAX_PLANNER_EPISODES is a safety stop, not a size: the most planner
+# episodes in a whole planning round before everything left is accepted
+# as-is (200; the calc goal used 8, a 97-node app 47). Not the same as
+# MAX_EPISODE_TURNS, which caps the replies inside one episode.
 # PLANNER_REDO_CAP=2
 # PLANNER_ESCALATION_CAP=1
 # MAX_PLANNER_EPISODES=200
@@ -224,26 +203,27 @@ MODEL=qwen3:8b
 # to be split into smaller pieces (default 3).
 # MAX_DEV_ATTEMPTS=3
 
-# --- Optional: Laya judge (v2 planner, `uv sync --extra laya`) --------------
+# --- Planner judge (`uv sync --extra laya` for Laya) --------------------------
 
-# The v2 planner asks Laya (a small non-generative decision model) whether
-# each plan node is GOOD / needs BREAKDOWN / needs a REDO. It loads two
-# checkpoints, english + typed-decisions (~3.5 GiB RAM, ~1.7 GB download on
-# first use), once per session. Without the `laya` extra -- including in the
-# `uv run build` binary, which never bundles it -- every node is judged by a
-# fixed fallback rule instead. See laya_plan.md §5.
+# After each planning layer, every node is judged GOOD / BREAKDOWN / REDO by a
+# fixed rule (components and files break down, function-level nodes are
+# accepted). With LAYA=1 it gets a second score from Laya, a small non-generative decision model (its
+# published `english` checkpoint, downloaded from Hugging Face on first use
+# and loaded once per session). They agree: that's the verdict. They disagree and
+# Laya is at least LAYA_MIN_CONFIDENCE sure: one short LLM call (the Architect's
+# model) breaks the tie. Otherwise the rule decides. Without the `laya` extra
+# -- including in the `uv run build` binary, which never bundles it -- the rule
+# decides alone. See laya_plan.md §5.
 
-# Answers below this confidence use the fallback rule. Default 0.6.
-# LAYA_MIN_CONFIDENCE=0.6
+# 1: the rule + Laya (+ the LLM tie-break). Unset (default): the rule alone.
+# LAYA=1
 
-# Load a checkpoint from a local folder instead of the published one, e.g.
-# the judge fine-tuned by laya-finetuning/finetune.py. Unset = the Hub copy.
-# LAYA_ENGLISH_PATH=laya-finetuning/checkpoints/jfi-judge-english
-# LAYA_TYPED_DECISIONS_PATH=laya-finetuning/checkpoints/jfi-judge-typed-decisions
+# Where Laya runs: cpu (default -- the LLM usually fills the GPU) or cuda.
+# LAYA_DEVICE=cpu
 
-# Which checkpoint's answer decides: english (default) or typed-decisions.
-# Both are always asked, and both answers are kept for comparison.
-# LAYA_JUDGE_MODEL=english
+# How sure Laya must be for a disagreement with the rule to go to the LLM
+# tie-break instead of the rule winning. Default 0.75.
+# LAYA_MIN_CONFIDENCE=0.75
 
 # Unload every model loaded in LM Studio before each Laya judge step, and
 # reload them afterwards with the same context length, parallelism,
