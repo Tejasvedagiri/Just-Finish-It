@@ -108,7 +108,15 @@ class SocketReporter:
             loop.close()
 
     async def _reconnect_loop(self) -> None:
-        import websockets
+        try:
+            import websockets
+        except ImportError:
+            # A build or venv without it: say so once and leave the run alone,
+            # instead of a traceback from this background thread.
+            self._console.display_error(
+                "MASTER_WS_URL is set but the `websockets` package isn't installed, so this session won't "
+                "report to the fleet dashboard. Run `uv sync` (or rebuild the binary after it).")
+            return
 
         while not self._stop.is_set():
             try:

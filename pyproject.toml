@@ -21,17 +21,20 @@ dependencies = [
     # validation schema and the DB table. SQLite (the default DB_BACKEND) is
     # stdlib in Python, so no extra driver dependency is needed for it.
     "sqlmodel>=0.0.22",
+    # Fleet reporting (src/JFI/manager/socket_reporter.py, on when
+    # MASTER_WS_URL is set). It used to be the `master` extra, but a plain
+    # `uv sync` drops any extra it isn't told about, and the next binary
+    # build then shipped without it: "No module named 'websockets'" as soon
+    # as .env named a fleet. Small and pure Python, so it's always installed.
+    "websockets>=13",
 ]
 
 [project.optional-dependencies]
 # Only needed for `jfi-web` / src/JFI/web/dashboard.py -- the core agent has
 # no dependency on this, so it stays opt-in rather than in the base install.
 web = ["streamlit>=1.38"]
-# Only needed for a session reporting to a fleet master
-# (src/JFI/manager/socket_reporter.py, gated on MASTER_WS_URL being set) --
-# the core agent has no dependency on this either. The master itself is a
-# separate, standalone Node project (Just-Finish-It-Fleet, its own repo,
-# `npm run master`), not Python -- see "Fleet dashboard" in README.
+# Kept so existing `uv sync --extra master` commands still work; websockets
+# is a base dependency now (see above).
 master = ["websockets>=13"]
 # Only needed for LLM_BACKEND=anthropic (see src/JFI/llm/anthropic_stream.py
 # and backend_select.py) -- everything else (the default OpenAI-compatible

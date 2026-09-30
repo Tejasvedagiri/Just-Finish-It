@@ -64,14 +64,13 @@ uv sync
 | Extra | Adds |
 |-------|------|
 | `web` | `jfi-web`, the Streamlit dashboard |
-| `master` | reporting to the fleet dashboard (`MASTER_WS_URL`) |
 | `anthropic` | the Claude backend (`LLM_BACKEND=anthropic`) |
 | `laya` | Laya's second score for the planner's judge (`LAYA=1`; pulls in torch, several GB) |
 | `mysql` / `postgres` | a shared database instead of SQLite (`DB_BACKEND`) |
 
 ```bash
-uv sync --extra web --extra master          # the usual choice
-uv sync --extra web --extra master --group dev   # + pytest, ruff and PyInstaller for development
+uv sync --extra web                         # the usual choice
+uv sync --extra web --group dev             # + pytest, ruff and PyInstaller for development
 ```
 
 ### 3. Configure: `uv run create-env`
@@ -115,13 +114,13 @@ Answer two prompts — a **session name** and your **goal** (be as detailed as y
   npm install && npm run build && npm run master   # http://localhost:8765
   ```
 
-  Then set `MASTER_WS_URL=ws://<master-host>:8765/report` in your project's `.env` (and sync the `master` extra). See [Fleet dashboard](#fleet-dashboard-just-finish-it-fleet--standalone-node-master).
+  Then set `MASTER_WS_URL=ws://<master-host>:8765/report` in your project's `.env`. See [Fleet dashboard](#fleet-dashboard-just-finish-it-fleet--standalone-node-master).
 - **`uv run export-db [project-dir]`** — dumps a project's database to readable text files after the fact.
 
 ### 6. Build a standalone binary (optional)
 
 ```bash
-uv sync --extra web --extra master --group dev
+uv sync --extra web --group dev
 uv run build        # -> dist/jfi  (dist/jfi.exe on Windows)
 ```
 
@@ -433,7 +432,7 @@ Every failed call gets a concrete `AUTO-RECTIFY:` instruction naming the exact t
 ## Tests
 
 ```bash
-uv sync --extra web --extra master --extra anthropic --group dev
+uv sync --extra web --extra anthropic --group dev
 uv run pytest     # full suite (config in pyproject.toml: testpaths = ["test"])
 ```
 

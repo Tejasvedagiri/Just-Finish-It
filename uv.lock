@@ -733,6 +733,7 @@ dependencies = [
     { name = "prompt-toolkit" },
     { name = "python-dotenv" },
     { name = "sqlmodel" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -781,6 +782,7 @@ requires-dist = [
     { name = "streamlit", marker = "extra == 'web'", specifier = ">=1.38" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'laya') or (sys_platform == 'win32' and extra == 'laya')", specifier = ">=2.14", index = "https://download.pytorch.org/whl/cu130" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'laya'", specifier = ">=2.14" },
+    { name = "websockets", specifier = ">=13" },
     { name = "websockets", marker = "extra == 'master'", specifier = ">=13" },
 ]
 provides-extras = ["web", "master", "anthropic", "mysql", "postgres", "laya"]
