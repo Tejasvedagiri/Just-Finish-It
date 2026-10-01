@@ -38,7 +38,8 @@ from sqlmodel import select
 from JFI.models import DesignEntry, Leaf, PlanEvent, PlannerVerdict, RunbookEntry, get_session
 from JFI.planner.judge import CHECKPOINT, JudgeNode
 from JFI.planner.nodes import (
-    BREAKDOWN, GOOD, MAX_LEAF_DEPTH, REDO, children_of, depth_of, load_nodes, make_node_tools, path_of,
+    BREAKDOWN, GOOD, MAX_LEAF_DEPTH, REDO, repo_path, children_of, depth_of, load_nodes, make_node_tools,
+    path_of,
 )
 from JFI.planner.prompts import ROLE_PROMPTS
 from JFI.tool.code_tools import make_code_tools
@@ -57,8 +58,14 @@ ARCHITECT_CONTINUATIONS = 2
 # beside its source while the Architect's test_one ran __tests__/{test_id}.test.js,
 # so those tests could never be run through test_one. `script` runs scratch code
 # from a file instead of inline python -c / node -e.
-REQUIRED_RUNBOOK = ("setup", "run", "test", "test_one", "build", "e2e", "script", "src_dir", "test_dir",
+# `entry` is the file the app starts from (src/main.js for Vite, main.py for a
+# CLI). Observed on the QA machine's stui run: index.html imported
+# /src/main.js, but no node owned it -- nothing wired the shell and views
+# together and Vite failed mid-imp. The Architect's finish now refuses until a
+# plan node lists the entry file.
+REQUIRED_RUNBOOK = ("setup", "run", "test", "test_one", "build", "e2e", "script", "entry", "src_dir", "test_dir",
                     "test_naming")
+_PATH = re.compile(r"[\w./\\-]+\.\w+")
 GOAL_MAX_CHARS = 16_000  # ~4k tokens, a small share of an episode on a 32k window
 FEEDBACK_MAX_CHARS = 12_000
 
@@ -375,7 +382,10 @@ class Planner:
                 missing.append("test_one's notes with one example test id (Dev passes only the id)")
             if "script" in runbook and "{file}" not in runbook["script"]:
                 missing.append("a {file} placeholder in script's command")
-            top_level = [n for n in load_nodes(self.engine, self.session_id) if n.parent_id is None]
+            nodes = load_nodes(self.engine, self.session_id)
+            if "entry" in runbook:
+                missing += self._entry_problems(runbook["entry"], nodes)
+            top_level = [n for n in nodes if n.parent_id is None]
             if len(top_level) >= 3 and not contracts:
                 # Observed on the stui run: 16 components and no contract, so
                 # each Lead (who sees one node) had no way to know the others.
@@ -388,6 +398,22 @@ class Planner:
                 return "Error: not finished yet. Still missing: " + "; ".join(missing) + ". Add them, then finish."
             return plain(node_id, summary)
         return finish
+
+    def _entry_problems(self, entry: str, nodes: List[Leaf]) -> List[str]:
+        """The runbook's entry names the file(s) the app starts from; each must
+        be built by some plan node, or already be in the project (extending an
+        existing app whose entry point stays as it is)."""
+        files = [repo_path(p) for p in _PATH.findall(entry)]
+        if not files:
+            return ["the entry file in entry's command (the file the app starts from, e.g. src/main.js)"]
+        owned = {repo_path(f) for n in nodes for f in (n.files or [])}
+        unowned = [f for f in files if f not in owned
+                   and not ((self.root / f).is_file() and (self.root / f).stat().st_size > 0)]
+        if not unowned:
+            return []
+        return [f"a plan node that builds the entry point {', '.join(unowned)}: add_node it as its own component "
+                f"-- wire the components together and start the app -- with files=[{', '.join(unowned)}] and "
+                f"depends_on the components it imports"]
 
     # ---------------------------------------------------------------- guards
 
