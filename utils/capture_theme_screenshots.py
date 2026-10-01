@@ -1,7 +1,6 @@
 """Captures REAL screenshots of the JFI TUI under each THEME preset.
 
-Unlike docs/make_theme_screenshots.py (which draws a synthetic mockup from
-the style dict), this spawns the actual `python -m JFI.runner` process on a
+This spawns the actual `python -m JFI.runner` process on a
 real pty, feeds its raw output into a real VT100 emulator (pyte), and
 rasterizes the resulting screen buffer -- including real per-cell fg/bg
 colors as prompt_toolkit actually painted them -- to a PNG with Pillow. This

@@ -681,6 +681,23 @@ class TestRunSetupWizard:
         assert values["AUTO_APPROVE_COMMANDS"] == "0"
         assert "FLARESOLVERR_URL" not in values
 
+    def test_input_ending_early_stops_cleanly_and_writes_nothing(self, tmp_path, monkeypatch, capsys):
+        """Observed with redirected input in Git Bash (which still reports a
+        terminal): the first prompt raised EOFError with a traceback."""
+        env_path = tmp_path / ".env"
+        env_path.write_text("MODEL=m\n", encoding="utf-8")
+        monkeypatch.setattr(create_env, "ENV_PATH", env_path)
+        monkeypatch.setattr(create_env.sys.stdin, "isatty", lambda: True)
+
+        def eof(*a, **k):
+            raise EOFError
+        monkeypatch.setattr("builtins.input", eof)
+
+        with pytest.raises(SystemExit):
+            create_env.main()
+        assert "nothing was written" in capsys.readouterr().out
+        assert not list(tmp_path.glob(".env_v*"))
+
     def test_a_bare_fleet_port_becomes_a_full_url(self):
         """Observed: answering `8765` wrote MASTER_WS_URL=8765, which the
         session can't connect to."""

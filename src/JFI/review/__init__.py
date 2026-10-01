@@ -30,7 +30,8 @@ from JFI.models import DesignEntry, Leaf, PlanEvent, RunbookEntry, get_session
 from JFI.models.enums import LeafStatus
 from JFI.planner.nodes import load_nodes
 from JFI.review.prompts import CLEANUP, REVIEW_CONTINUE, REVIEWER
-from JFI.tool.code_tools import list_dir, read_file_range, scan_markers
+from JFI.tool.checkpoint_tools import make_checkpoint_tools, revert_leaf
+from JFI.tool.code_tools import list_dir, read_file_range, scan_markers, search_code
 from JFI.tool.note_tools import REVIEW_REPORT, get_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.result_cap import cap_result
@@ -43,6 +44,10 @@ REOPEN_LEAF_SCHEMA = {"type": "function", "function": {
     "parameters": {"type": "object", "properties": {
         "leaf_id": {"type": "integer"},
         "fix_note": {"type": "string", "description": "The failing step, expected vs actual, and where."},
+        "revert": {"type": "boolean", "description": ("true: first undo the leaf's change (its files go back "
+                                                       "to before it), so Dev rebuilds it from scratch instead "
+                                                       "of patching a wrong approach. Refused if a later leaf "
+                                                       "changed the same files.")},
     }, "required": ["leaf_id", "fix_note"]},
 }}
 
@@ -94,6 +99,11 @@ class Reviewer:
                              reason=why, finish="finish(0, summary)")
         impl = {**self.base_tools, **make_runbook_tools(self.engine, self.session_id, "reviewer"),
                 "read_file": lambda path, start=None, end=None: read_file_range(self.root, path, start, end),
+                # Observed on the calc run: with no search tool the reviewer ran
+                # `findstr "JFI:"` over a 4.7 MB log and got 99,395 characters back.
+                "search_code": lambda pattern, path=".", regex=False: search_code(self.root, pattern, path, regex),
+                "list_dir": lambda path=".": list_dir(self.root, path),
+                **make_checkpoint_tools(self.engine, self.session_id, self.root),
                 "reopen_leaf": self._reopen_leaf(reopened),
                 "finish": self._finish(reopened, report_before)}
         system = build_system_message(anchor, REVIEWER, [runbook_index(self.engine, self.session_id)])
@@ -111,13 +121,22 @@ class Reviewer:
         return "leftover markers: " + "; ".join(f"{p}:{no} {m}" for p, no, m in markers[:20])
 
     def _reopen_leaf(self, reopened: List[int]):
-        def reopen_leaf(leaf_id: int, fix_note: str) -> str:
+        def reopen_leaf(leaf_id: int, fix_note: str, revert: bool = False) -> str:
             fix_note = (fix_note or "").strip()
             if not fix_note:
                 return "Error: reopen_leaf needs a fix_note: the failing step, expected vs actual, and where."
             leaf = next((n for n in dev_leaves(load_nodes(self.engine, self.session_id)) if n.id == int(leaf_id)), None)
             if leaf is None:
                 return f"Error: {leaf_id} isn't a leaf Dev builds. get_plan() lists the leaves and their files."
+            reverted = ""
+            if revert:
+                if not leaf.checkpoint:
+                    return (f"Error: leaf {leaf.id} has no checkpoint to revert to (git unavailable when it "
+                            f"finished). Reopen it without revert.")
+                reverted = revert_leaf(self.root, self.session_id, leaf.checkpoint)
+                if reverted.startswith("Error"):
+                    return reverted
+                reverted = " " + reverted
             with get_session(self.engine) as db:
                 row = db.get(Leaf, leaf.id)
                 row.status, row.started_at, row.ended_at = LeafStatus.TODO, None, None
@@ -127,7 +146,7 @@ class Reviewer:
                 db.add(PlanEvent(session_id=self.session_id, node_id=leaf.id, type="reopen", detail=fix_note[:500]))
                 db.commit()
             reopened.append(leaf.id)
-            return f"Reopened leaf {leaf.id} ({leaf.description}) for Dev with your fix note."
+            return f"Reopened leaf {leaf.id} ({leaf.description}) for Dev with your fix note.{reverted}"
         return reopen_leaf
 
     def _finish(self, reopened: List[int], report_before: Optional[str]):

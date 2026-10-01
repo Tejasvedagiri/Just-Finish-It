@@ -27,14 +27,15 @@ def has_history(engine, session_id: str) -> bool:
 
 
 def load_history_from_db(engine, session_id: str) -> list[dict]:
-    """The full conversation as plain message dicts, in seq order --
-    exactly the shape self.history already carries everywhere else in
-    this codebase."""
+    """The session-level conversation (the goal, phase markers, iteration
+    feedback) as plain message dicts, in seq order. Episode messages
+    (episode_id set) are each episode's own and never read back here; loading
+    them made a long session's resume carry every episode's transcript."""
     with get_session(engine) as db:
         rows = list(
             db.exec(
                 select(HistoryMessage)
-                .where(HistoryMessage.session_id == session_id)
+                .where(HistoryMessage.session_id == session_id, HistoryMessage.episode_id.is_(None))
                 .order_by(HistoryMessage.seq)
             )
         )

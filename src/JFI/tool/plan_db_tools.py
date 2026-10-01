@@ -8,6 +8,7 @@ get_leaf (one leaf's full detail), which the reviewer uses. runner.py wires
 them into TOOL_MAP per session -- see make_plan_db_tools at the bottom.
 """
 
+import re
 from typing import Callable, Dict, Optional
 
 from sqlmodel import select
@@ -212,6 +213,11 @@ def get_leaf(engine, session_id: str, leaf_id: int) -> str:
     else:
         lines.append("children: none (genuine leaf)")
 
+    for label, value in (("done when", leaf.done_when), ("files", ", ".join(leaf.files or [])),
+                         ("notes", leaf.notes), ("references", ", ".join(leaf.references or [])),
+                         ("fix note", leaf.fix_note)):
+        if value:
+            lines.append(f"{label}: {value}")
     lines.append(f"started_at: {leaf.started_at or '-'}")
     lines.append(f"ended_at: {leaf.ended_at or '-'}")
     lines.append(f"tokens: {leaf.tokens if leaf.tokens is not None else '-'}")
@@ -220,6 +226,39 @@ def get_leaf(engine, session_id: str, leaf_id: int) -> str:
 
 
 _LAYA_LETTERS = {"A": "GOOD", "B": "BREAKDOWN", "C": "REDO"}
+
+_NOTE_STEP = re.compile(r"\s*\((\d{1,2}|[a-h])\)\s+")
+_NOTE_SENTENCE = re.compile(r"(?<!\be\.g\.)(?<!\bi\.e\.)(?<!\betc\.)(?<=[.!?])\s+(?=[A-Z`\"'(])")
+
+
+def note_points(text: Optional[str]) -> list[tuple[str, str]]:
+    """A node's notes as (step label, text) points for the dashboards: the
+    planners write one long paragraph, often with numbered steps "(1) ...
+    (2) ..." in the middle, which read badly as a single block. A step keeps
+    its label ("1", "a"); every other sentence is its own point with label "".
+    Mirrored by notePoints() in the fleet's src/main.js."""
+    text = " ".join((text or "").split())
+    # Only a run counts as steps -- (1) (2) (3) or (a) (b) (c) -- so code like
+    # "str (e) == e.message" isn't read as step "e" (seen on the calc run).
+    steps, expected = [], None
+    for m in _NOTE_STEP.finditer(text):
+        label = m.group(1)
+        if label in ("1", "a"):
+            expected = label
+        if label == expected:
+            steps.append(m)
+            expected = str(int(label) + 1) if label.isdigit() else chr(ord(label) + 1)
+
+    def sentences(chunk: str) -> list[str]:
+        return [s.strip() for s in _NOTE_SENTENCE.split(chunk.strip(" ;,")) if s.strip()]
+
+    points = [("", s) for s in sentences(text[:steps[0].start()] if steps else text)]
+    for m, nxt in zip(steps, steps[1:] + [None]):
+        body = sentences(text[m.end():nxt.start() if nxt else len(text)])
+        if body:
+            points.append((m.group(1), body[0].rstrip(";,")))
+            points += [("", s) for s in body[1:]]
+    return points
 
 
 def plan_judge_rows(engine, session_id: str) -> list[dict]:
@@ -253,6 +292,8 @@ def plan_judge_rows(engine, session_id: str) -> list[dict]:
                 "#": display_number(leaf, by_id, siblings_by_parent),
                 "Level": leaf.level or "",
                 "Task": "· " * depth + leaf.description,
+                "Notes": leaf.notes or "",
+                "References": ", ".join(leaf.references or []),
                 "Judge": (v.rule_verdict or "") if v else "",
                 "Laya": laya,
                 "LLM": (v.tiebreak_verdict or "") if v else "",

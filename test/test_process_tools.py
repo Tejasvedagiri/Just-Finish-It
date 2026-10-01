@@ -9,6 +9,9 @@ state, same tradeoff execute_command's own lack of persistence has) via
 the autouse fixture below.
 """
 
+import os
+import subprocess
+import sys
 import time
 
 import pytest
@@ -166,6 +169,7 @@ class TestStopBackgroundProcess:
         result = process_tools.stop_background_process("bg1")
         assert "already exited" in result
 
+    @pytest.mark.skipif(os.name == "nt", reason="SIGTERM/SIGKILL fallback is POSIX; Windows ends the tree at once")
     def test_force_kills_a_process_that_ignores_sigterm(self):
         # A process that explicitly ignores SIGTERM so the SIGKILL fallback
         # path actually gets exercised, not just the clean-stop path. (A
@@ -173,12 +177,33 @@ class TestStopBackgroundProcess:
         # process in the group, including a `sleep` child that has no trap
         # of its own and terminates normally regardless of its parent's.)
         process_tools.start_background_process(
-            "python3 -c \"import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)\""
+            f"\"{sys.executable}\" -c \"import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "time.sleep(30)\""
         )
         time.sleep(0.3)  # let the signal handler actually get installed before we send TERM
         result = process_tools.stop_background_process("bg1", timeout=1)
         assert "force-killed" in result.lower()
         assert process_tools._registry["bg1"].poll() is not None
+
+    @pytest.mark.skipif(os.name != "nt", reason="the Windows tree stop")
+    def test_windows_stop_ends_the_server_the_shell_started(self, tmp_path):
+        """Observed on the react_counter run: on Windows the stop failed on
+        os.getpgid and the reviewer had to taskkill its own http.server. With
+        shell=True the tracked pid is cmd.exe; the server is its child."""
+        pid_file = tmp_path / "server.pid"
+        script = f"import os,time; open(r'{pid_file}','w').write(str(os.getpid())); time.sleep(60)"
+        process_tools.start_background_process(f'"{sys.executable}" -c "{script}"')
+        deadline = time.time() + 15
+        while not pid_file.exists() and time.time() < deadline:
+            time.sleep(0.1)
+        server_pid = pid_file.read_text()
+
+        result = process_tools.stop_background_process("bg1")
+
+        assert result.startswith("Stopped bg1") and "every process it started" in result
+        running = subprocess.run(["tasklist", "/FI", f"PID eq {server_pid}", "/NH"], capture_output=True,
+                                 text=True).stdout
+        assert server_pid not in running, "the server grandchild outlived the stop"
 
     def test_never_touches_a_process_it_did_not_start(self):
         """The whole point: stop_background_process only ever takes a

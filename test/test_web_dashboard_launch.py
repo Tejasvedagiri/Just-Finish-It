@@ -180,29 +180,13 @@ class TestStopWebDashboard:
 
         runner._stop_web_dashboard(FakeProc())
 
-    def test_running_process_is_terminated(self):
-        calls = []
+    def test_hung_process_is_killed_after_the_tree_stop_times_out(self, monkeypatch):
+        monkeypatch.setattr(runner.subprocess, "run", lambda *a, **k: None)
+        monkeypatch.setattr(runner.os, "killpg", lambda *a, **k: None, raising=False)
 
         class FakeProc:
-            def poll(self):
-                return None  # still running
+            pid = 12345
 
-            def terminate(self):
-                calls.append("terminate")
-
-            def wait(self, timeout=None):
-                calls.append(("wait", timeout))
-
-            def kill(self):
-                calls.append("kill")
-
-        runner._stop_web_dashboard(FakeProc())
-
-        assert calls[0] == "terminate"
-        assert calls[1][0] == "wait"
-
-    def test_hung_process_is_killed_after_terminate_times_out(self):
-        class FakeProc:
             def poll(self):
                 return None
 
@@ -379,3 +363,39 @@ class TestLauncherMainExtraArgs:
 
         assert "--internal-web-dashboard" not in captured["argv"]
         assert captured["argv"] == ["streamlit", "run", "/x/dashboard.py", "--server.port", "7777"]
+
+
+def _alive(pid: int) -> bool:
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_stopping_the_dashboard_stops_its_child_server_too(tmp_path):
+    """Observed on Windows: jfi-web.exe -> python -> python (Streamlit).
+    Terminating only jfi-web.exe left the Streamlit server running, still on
+    its port and attached to the run's terminal after JFI finished."""
+    import sys
+    import time
+    pid_file = tmp_path / "child.pid"
+    child = f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    parent = f"import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)"
+    proc = subprocess.Popen([sys.executable, "-c", parent], start_new_session=os.name != "nt")
+    for _ in range(100):
+        if pid_file.exists() and pid_file.read_text():
+            break
+        time.sleep(0.1)
+    child_pid = int(pid_file.read_text())
+
+    runner._stop_web_dashboard(proc)
+
+    for _ in range(50):
+        if not _alive(child_pid):
+            break
+        time.sleep(0.1)
+    assert proc.poll() is not None and not _alive(child_pid)

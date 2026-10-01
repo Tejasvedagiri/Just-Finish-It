@@ -2,7 +2,7 @@
 one session's live status to a remote "master" (server/master.js in the
 standalone Just-Finish-It-Fleet repo, the Node-based fleet dashboard
 server) over a WebSocket instead of writing
-.jfi/<session>/web_status.json to disk -- the mechanism a session on one
+.jfi/web_status.json to disk -- the mechanism a session on one
 machine uses to report into a fleet dashboard running on a different one,
 where there is no shared filesystem to write a status file into in the
 first place.

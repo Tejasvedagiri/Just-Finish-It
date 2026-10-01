@@ -198,3 +198,26 @@ def test_every_episode_can_load_the_optional_tools(monkeypatch):
 def test_cleanup_is_one_episode(engine, tmp_path):
     console = Console([turn("list_dir"), turn("finish", node_id=0, summary="already tidy")])
     assert run_cleanup(console, engine, "s", tmp_path, LLM(), {"execute_command": lambda command: "ok"})
+
+
+def test_reopen_with_revert_rebuilds_the_leaf_from_before_it(engine, tmp_path):
+    """A leaf whose approach is wrong is reopened with its files
+    put back, so Dev starts from the stub instead of patching the attempt."""
+    pytest.importorskip("shutil").which("git") or pytest.skip("needs git")
+    from JFI.tool.checkpoint_tools import checkpoint, ensure_baseline
+
+    (tmp_path / "calc").mkdir()
+    (tmp_path / "calc" / "parse.py").write_text("def parse(line):\n    raise NotImplementedError\n")
+    ensure_baseline(tmp_path, "s")
+    (tmp_path / "calc" / "parse.py").write_text("def parse(line):\n    return eval(line)\n")
+    with get_session(engine) as db:
+        db.get(Leaf, 2).checkpoint = checkpoint(tmp_path, "s", "leaf 2: parse")
+        db.commit()
+
+    reopen = _reviewer(engine, tmp_path, [])._reopen_leaf([])
+    assert reopen(1, "wrong", revert=True).startswith("Error: leaf 1 has no checkpoint")
+    assert _leaf(engine, 1).status == LeafStatus.DONE, "a refused revert reopens nothing"
+    done = reopen(2, "parse() uses eval: '__import__(\"os\")' runs code", revert=True)
+    assert done.endswith("Reverted 1 file(s) to before the leaf: calc/parse.py.")
+    assert "raise NotImplementedError" in (tmp_path / "calc" / "parse.py").read_text()
+    assert _leaf(engine, 2).status == LeafStatus.TODO

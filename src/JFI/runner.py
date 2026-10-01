@@ -1,6 +1,7 @@
 import argparse
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -34,7 +35,9 @@ from JFI.tool.note_tools import clear_note, get_note, make_note_tools, REVIEW_RE
 from JFI.tool.image_tools import capture_screenshot, view_image
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.web_tools import fetch_webpage_images
-from JFI.tool.browser_tools import browse_webpage
+from JFI.tool.browser_session import browser, close_browser
+from JFI.tool.browser_tools import browse_webpage, check_page
+from JFI.tool.http_tools import http_request
 from JFI.tool.video_tools import extract_video_frames
 from JFI.tool.process_tools import (
     start_background_process, list_processes, stop_background_process,
@@ -52,6 +55,9 @@ TOOL_MAP = {
     "capture_screenshot": capture_screenshot,
     "fetch_webpage_images": fetch_webpage_images,
     "browse_webpage": browse_webpage,
+    "check_page": check_page,
+    "browser": browser,
+    "http_request": http_request,
     "extract_video_frames": extract_video_frames,
     "start_background_process": start_background_process,
     "list_processes": list_processes,
@@ -260,8 +266,8 @@ def _web_dashboard_command() -> Optional[List[str]]:
     itself resolves to). Falls back to re-invoking THIS SAME process's own
     executable with a hidden flag when running as a frozen standalone binary
     (see build_binary -- it bundles streamlit in via --collect-all so the
-    binary is self-sufficient) -- `sys.executable` in a PyInstaller onefile
-    app is the running binary itself, so this needs no separate install.
+    binary is self-sufficient) -- `sys.executable` in a PyInstaller app is
+    the running binary itself, so this needs no separate install.
     """
     jfi_web = shutil.which("jfi-web")
     if jfi_web:
@@ -299,7 +305,10 @@ def _launch_web_dashboard(console: AbstractManager) -> Optional[subprocess.Popen
         return None
 
     try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Its own process group (POSIX), so _stop_web_dashboard can stop the
+        # whole tree: jfi-web is a launcher that starts Streamlit as a child.
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=os.name != "nt")
     except OSError as e:
         console.display_system(f"ℹ️  Web dashboard failed to start ({e}); continuing with the terminal only.")
         return None
@@ -312,9 +321,19 @@ def _launch_web_dashboard(console: AbstractManager) -> Optional[subprocess.Popen
 
 
 def _stop_web_dashboard(proc: Optional[subprocess.Popen]) -> None:
+    """Stops the dashboard's whole process tree. Observed on Windows:
+    jfi-web.exe -> python -> python (Streamlit); terminating only jfi-web.exe
+    left the Streamlit server running, still holding the port and attached to
+    the run's terminal after JFI had finished."""
     if proc is None or proc.poll() is not None:
         return
-    proc.terminate()
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    else:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            proc.terminate()
     try:
         proc.wait(timeout=3)
     except subprocess.TimeoutExpired:
@@ -465,7 +484,8 @@ def _run_imp(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: Sess
 
 
 #: The session-bound tools the reviewer episode reuses (see JFI.review).
-REVIEWER_BASE_TOOLS = ("execute_command", "start_background_process", "stop_background_process", "get_plan",
+REVIEWER_BASE_TOOLS = ("execute_command", "start_background_process", "stop_background_process", "check_page",
+                       "get_plan",
                        "get_reviewer_notes", "write_review_report")
 
 
@@ -574,9 +594,8 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
     web_bridge: Optional[WebBridge] = None
     socket_reporter: Optional[SocketReporter] = None
     try:
-        # 2. Gate execute_command behind the human's approval, backed by this
-        # session's own context.json (approved "Save" prefixes live there,
-        # alongside whatever facts the LLM itself has stashed there).
+        # 2. Gate execute_command behind the human's approval; approved "Save"
+        # prefixes live in this session's context cache (ContextEntry rows).
         TOOL_MAP["execute_command"] = make_gated_execute_command(console, ssm.db_engine, ssm.session_id)
         TOOL_MAP.update(make_context_tools(ssm.db_engine, ssm.session_id))
         TOOL_MAP.update(make_process_tools(ssm.db_engine, ssm.session_id))
@@ -594,7 +613,7 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
             )
             socket_reporter.start()
         # Requests queued but never drained before the process closed (killed,
-        # crashed, or just quit) live in metadata.json — hand them back now, and
+        # crashed, or just quit) are QueuedItem rows — hand them back now, and
         # persist the queue from here on so this doesn't happen again.
         console.set_queue_store(ssm.load_queued_requests(), ssm.save_queued_requests)
 
@@ -678,6 +697,7 @@ def _run_session(console: AbstractManager, llms: Dict[str, BaseLLMStream]) -> No
             web_bridge.stop()
         if socket_reporter is not None:
             socket_reporter.stop()
+        close_browser()
         ssm.release_session_lock()
 
 

@@ -22,8 +22,8 @@ Every JFI session runs four phases in order:
 | Phase     | What it does |
 |-----------|--------------|
 | **planner** | Architect → Lead → Task, each in short episodes. The Architect maps the project (components, runbook, design contracts); Leads break each component into files; Tasks break files into functions. After each layer a **judge** labels every node GOOD / BREAKDOWN / REDO: a fixed rule, plus a [Laya](https://github.com/NandhaKishorM/laya) score with `LAYA=1` (see [Configuration](#configuration-env)). |
-| **imp** | One short **Dev** episode per GOOD leaf, in dependency order: implement the one function (or change) and its unit test, then `mark_leaf_done`, which is refused until the test passes. Problems worth flagging go to the reviewer as notes. |
-| **reviewer** | Re-runs the project's checks itself (build, tests, the runbook's end-to-end check), reads the Dev notes, and either signs off (`REVIEWER_COMPLETE`) or writes a review report, which schedules another iteration. Up to 3 failed reviews per session before JFI stops. |
+| **imp** | One short **Dev** episode per GOOD leaf, in dependency order: implement the one function (or change) and its unit test, then `mark_leaf_done`, which is refused until the test passes. Each passing leaf is committed as a git checkpoint in `.jfi/checkpoints.git` (your own git is never touched). Problems worth flagging go to the reviewer as notes. |
+| **reviewer** | Re-runs the project's checks itself (the runbook's end-to-end check; for a web app it also loads the page with `check_page`), reads the Dev notes, and signs off, reopens the leaf that owns a bug (`leaf_diff` shows which leaf changed what), or writes a review report for missing work, which schedules another iteration. Up to 3 failed reviews per session before JFI stops. |
 | **cleanup** | Tidies the working directory: moves anything worth keeping into `.jfi/` and deletes the rest. Never touches the deliverable or `.jfi/` itself. |
 
 ### How one run actually flows
@@ -33,6 +33,8 @@ Every JFI session runs four phases in order:
 3. **imp** works through the leaves one episode at a time. The header's progress bars (`implement ████░░░░ 8/18`) count finished leaves.
 4. The **reviewer** checks the whole result. A failed review (or anything you queued meanwhile) becomes feedback for the next iteration: the planner adds nodes for it, leaving finished leaves alone, and the loop runs again (the header shows `loop #2`, etc.).
 5. **cleanup** tidies up, then JFI idles with a live input line waiting for your next request, or exits.
+
+A new session in the same project starts from the last session's runbook and its lasting design (stack, components, contracts, conventions), so it doesn't re-discover how to set up, run and test the project; the Architect keeps what still fits the new goal.
 
 Every console line is also logged to the database as it happens (`uv run export-db` dumps it, and `jfi-web` shows it live).
 
@@ -121,10 +123,10 @@ Answer two prompts — a **session name** and your **goal** (be as detailed as y
 
 ```bash
 uv sync --extra web --extra laya --group dev
-uv run build        # -> dist/jfi  (dist/jfi.exe on Windows)
+uv run build        # -> dist/jfi/  (run dist/jfi/jfi, or dist\\jfi\\jfi.exe on Windows)
 ```
 
-`dist/jfi` runs without Python or uv installed. Put it on your `PATH`, then in your project folder (with its `.env`) just run `jfi`. It bundles everything, the optional parts included: the Streamlit dashboard, Laya for `LAYA=1` (torch + transformers, so the binary is several GB), and websockets for the fleet. The build stops with the `uv sync` command to run if any of them is missing. See [`uv run build`](#uv-run-build--standalone-binary).
+`dist/jfi/` runs without Python or uv installed. Keep the folder together (the executable needs its `_internal/` beside it) and put it on your `PATH`, then in your project folder (with its `.env`) just run `jfi`. It bundles everything, the optional parts included: the Streamlit dashboard, Laya for `LAYA=1` (torch + transformers, so the binary is several GB), and websockets for the fleet. The build stops with the `uv sync` command to run if any of them is missing. See [`uv run build`](#uv-run-build--standalone-binary).
 
 ### Configuration (`.env`)
 
@@ -146,7 +148,7 @@ uv run build        # -> dist/jfi  (dist/jfi.exe on Windows)
 | `THEME` *(optional)*| Live-console color preset — see [Themes](#themes)  | `dark-ocean`, `light-paper`, or empty for auto-detect |
 | `SHOW_STREAM_PROMPTS` *(optional, debug)* | Prints every message sent to the LLM each turn, in full — no truncation anywhere, unlike the normal tool-result preview. Verbose by design; meant for prompt-engineering debugging, not everyday runs. Accepts `1`/`true`/`yes`/`on`. | `1` |
 | `LOG_LLM_CALL_DEBUG` *(optional, debug)* | Appends every LLM request/response pair to `.jfi/llm_debug.jsonl` (with its role and episode) — one JSON object per line, full request (messages + tools) and full response (content + tool_calls), no truncation. Unlike `SHOW_STREAM_PROMPTS` (console/TUI-only, meant for watching a run live), this persists to disk so a run can be inspected afterward. Accepts `1`/`true`/`yes`/`on`. | `1` |
-| `LAYA` *(optional)* | After each planning layer, a fixed rule decides whether a node is ready (GOOD) or needs splitting (BREAKDOWN). `1` adds a second score from [Laya](https://github.com/NandhaKishorM/laya)'s published `english` checkpoint: if the two agree, that's the verdict; if they disagree and Laya is at least `LAYA_MIN_CONFIDENCE` sure, one short LLM call breaks the tie (and may ask for a rewrite, REDO); otherwise the rule decides. Laya needs JFI run from source with `uv sync --extra laya`; without it (including in the `jfi` binary) the rule decides alone. Unset: the rule alone. | `1` |
+| `LAYA` *(optional)* | After each planning layer, a fixed rule decides whether a node is ready (GOOD) or needs splitting (BREAKDOWN). `1` adds a second score from [Laya](https://github.com/NandhaKishorM/laya)'s published `english` checkpoint, asked whether the node's task and description can be solved within 20k tokens (yes: GOOD, no: BREAKDOWN): if the two agree, that's the verdict; if they disagree and Laya is at least `LAYA_MIN_CONFIDENCE` sure, one short LLM call breaks the tie; otherwise the rule decides. Laya needs `uv sync --extra laya` when run from source; the `jfi` binary bundles it. Without it the rule decides alone. Unset: the rule alone. | `1` |
 | `LAYA_DEVICE` / `LAYA_MIN_CONFIDENCE` *(optional)* | Where Laya runs (`cpu` by default, so it never competes with a local LLM for VRAM; or `cuda`), and how sure Laya must be (default 0.75) for a disagreement with the rule to go to the LLM tie-break. | `cpu` / `0.75` |
 | `SESSION_PATH` *(optional, advanced)* | Where the `JFI/` session folder is created, relative to. Defaults to the current working directory. | `.` |
 | `FLARESOLVERR_URL` *(optional)* | Base URL of a [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) instance. When a `curl` run via `execute_command` gets blocked by a site's anti-bot/DoS protection (Cloudflare challenge, etc.), the model is told to retry the request through this endpoint instead. Left unset, the model is just told the direct request was blocked. | `http://localhost:8192/` |
@@ -315,10 +317,10 @@ Builds a single native `jfi` executable with PyInstaller — the machine that ru
 
 ```bash
 uv sync --extra web --extra laya --group dev   # everything the binary bundles, plus pyinstaller
-uv run build          # -> dist/jfi
+uv run build          # -> dist/jfi/ (the executable is dist/jfi/jfi)
 ```
 
-The binary is a onefile build of `src/JFI/runner.py`, bundling prompt_toolkit, the openai client, and every other dependency — including the optional ones: Streamlit (for `jfi-web`), Laya with torch and transformers (for `LAYA=1`), and websockets (for the fleet). `uv run build` refuses to run without them. Laya's checkpoint itself isn't bundled: it downloads from Hugging Face the first time `LAYA=1` runs. It reads the `.env` in the folder it's started from, like `uv run jfi`. Build logic lives in `src/build_binary/__init__.py`.
+The binary is a folder build of `src/JFI/runner.py` (`dist/jfi/`: the executable plus `_internal/`; a single-file build unpacked 2.2 GB on every launch), bundling prompt_toolkit, the openai client, and every other dependency — including the optional ones: Streamlit (for `jfi-web`), Laya with torch and transformers (for `LAYA=1`), and websockets (for the fleet). `uv run build` refuses to run without them. Laya's checkpoint itself isn't bundled: it downloads from Hugging Face the first time `LAYA=1` runs. It reads the `.env` in the folder it's started from, like `uv run jfi`. Build logic lives in `src/build_binary/__init__.py`.
 
 ---
 
@@ -326,65 +328,44 @@ The binary is a onefile build of `src/JFI/runner.py`, bundling prompt_toolkit, t
 
 ```
 Just-Finish-It/
-├── JFI                          # bash launcher (venv bootstrap + .env check)
-├── .python-version              # 3.12 — matches pyproject.toml's requires-python floor
-├── pyproject.toml               # package metadata, deps (pytest/pyinstaller for dev), pytest config
-├── JFI_ENV_TEMPLATE             # copied to ./.env on first run if missing, or by `uv run create-env`
-├── README.md                    # this file
+├── pyproject.toml                # package metadata, dependencies and extras (web, laya, anthropic, mysql, postgres)
+├── JFI_ENV_TEMPLATE              # every .env setting, documented; `uv run create-env` fills it in
+├── AGENTS.md                     # how to work in this repo (read before changing the pipeline)
+├── TODO.md                       # what's still open
 │
-├── src/JFI/                     # the agent itself
-│   ├── runner.py                # main() + run_pipeline(): orchestrates the 4 phases, review loop, queue/force/idle
-│   │                            #   • _run_planner() / _run_imp() — hand the planner and imp to JFI.planner / JFI.imp
-│   │                            #   • execute_tool_call() — runs one tool call, coaches on failure (AUTO-RECTIFY), tracks per-signature retry counts
-│   │                            #   • collect_next_iteration() / review_outcome() — the no-prompt loop back to planner after a failed review or queued request
-│   ├── llm/
-│   │   ├── base_llm_stream.py   # BaseLLMStream: MODEL/TEMPERATURE from .env, abstract send_message/close
-│   │   └── openai_compatable_stream.py# OpenAICompatableStream: any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio, …)
-│   ├── session/
-│   │   └── simple_session_manager.py  # session persistence: history (DB), metadata, plan progress, the .jfi/.lock
-│   │                                  #   • phase completion detection (per-phase COMPLETE markers in history)
-│   ├── manager/
-│   │   ├── abstract_manager.py  # AbstractManager: the console API contract (display_*, get_user_input, print_agent_response, safe_get_user_input)
-│   │   ├── pt_console_manager.py# PromptToolkitConsoleManager: full-screen UI — header/task/status lines, streaming AI space,
-│   │   │                        #   always-live input line (queue/force/answer), scroll lock, theme presets, live run.log mirroring
-│   │   ├── key_bindings.py      # teaches the terminal Shift+Enter/Ctrl+Enter encodings so multiline input works everywhere
-│   │   ├── web_bridge.py        # WebBridge: mirrors live status + relays answers/new-request text to/from jfi-web, see "Web dashboard" below
-│   │   └── socket_reporter.py   # SocketReporter: a WebSocket CLIENT mirroring live status to the fleet master (server/master.js in the standalone Just-Finish-It-Fleet repo), see "Fleet dashboard" below
-│   ├── web/                     # jfi-web: an optional Streamlit dashboard, see "Web dashboard" below
-│   │   ├── dashboard.py         # the app itself — reads .jfi/JFI.db and the web_status/web_answer bridge files
-│   │   └── launcher.py          # `jfi-web` console script — thin `streamlit run dashboard.py` wrapper
-│   └── tool/
-│       ├── schemas.py           # TOOL_SCHEMAS: the shared tools' JSON schemas; each episode picks its role's set
-│       ├── file_tools.py        # write_file / read_file / append_to_file / replace_in_file (the exact functions documented in each phase prompt)
-│       ├── cmd_tools.py         # execute_command, gated by CmdApprovalGate — see [Command approval](#command-approval)
-│       ├── context_tools.py     # context_save / context_lookup — the model's fact store, see [Context cache](#context-cache)
-│       ├── image_tools.py       # capture_screenshot / view_image — the one tool pair that returns an image to the model, not just text
-│       ├── web_tools.py         # fetch_webpage_images — downloads a page's images to disk (view_image shows them, same as a screenshot)
-│       ├── video_tools.py       # extract_video_frames — dedupes a video down to its visually distinct frames (ffmpeg + a pure-Python pixel-diff pass)
-│       ├── llm_tools.py         # ask_llm — a stateless one-off LLM call for text work with no dedicated tool
-│       └── process_tools.py     # start_background_process / list_processes / stop_background_process / clear_finished_processes — handle-based, never a raw pid or name pattern
+├── src/JFI/
+│   ├── runner.py                 # main() -> run_pipeline() -> _run_session() -> run_phase(): the 4 phases, the review loop, queue/force/idle
+│   ├── create_env.py             # `uv run create-env`: the setup wizard and readiness check
+│   ├── create_env_detect.py      # what create-env measures: RAM/GPU (Linux, macOS, Windows), the model server, the model's speed -> computed settings
+│   ├── episode/                  # the episode engine: one short, scoped LLM conversation (brief, role tools, token budget, turn cap, finish)
+│   ├── planner/                  # Architect -> Lead -> Task: the loop, the node tools, the prompts, the judge (rule + optional Laya)
+│   ├── imp/                      # Dev: the leaf queue and one gated episode per leaf (mark_leaf_done runs the leaf's test)
+│   ├── review/                   # the reviewer (confirms the e2e itself, reopens broken leaves) and cleanup
+│   ├── models/                   # SQLModel tables: .jfi/JFI.db is the session's real state (plan, history, episodes, verdicts, runbook, design, ...)
+│   ├── session/                  # session persistence (history, metadata, queue) and the project-wide .jfi/.lock
+│   ├── llm/                      # OpenAI-compatible and Anthropic backends, retries, LM Studio control
+│   ├── manager/                  # the prompt_toolkit terminal UI, and the bridges to jfi-web (files) and the fleet (WebSocket)
+│   ├── tool/                     # everything the model can call: code, commands, runbook/design, plan reads, context cache, images, browser, ...
+│   ├── web/                      # jfi-web: the Streamlit dashboard and its launcher
+│   └── utils/                    # small shared helpers (text_sanitize.py)
 │
-├── src/build_binary/             # `uv run build` — PyInstaller onefile packaging of src/JFI/runner.py
-│   └── __init__.py
+├── src/build_binary/             # `uv run build`: the PyInstaller binary, a dist/jfi/ folder (bundles Streamlit, Laya, websockets)
+├── src/export_db/                # `uv run export-db`: a project's JFI.db as readable text
 │
-│   (the fleet dashboard used to live here as frontend/ — it's now its own
-│   standalone repo, github.com/Tejasvedagiri/Just-Finish-It-Fleet, a sibling
-│   checkout, not a subdirectory; see "Fleet dashboard" below)
-│
-├── test/                        # pytest suite (see "Tests" below) — unit tests per module plus the plan-file protocol
-├── utils/                       # dev-only scripts, not part of the shipped package
-│   ├── capture_theme_screenshots.py # real pty capture of the console under every THEME (proof images, or --docs for docs/images/)
-│   └── _docs_frame_app.py       # no-LLM harness rendering one representative frame for the --docs capture
-└── docs/
-    ├── Themes.md                # live screenshots of all twenty theme presets, plus the custom-theme (THEME as JSON) docs
-    └── images/theme-*.png       # those screenshots, captured from the real console by ../utils/capture_theme_screenshots.py --docs
+├── test/                         # pytest suite (see "Tests" below)
+├── benchmark/                    # the eval harness and its tasks (not shipped; see its README)
+├── utils/                        # dev-only: capture_theme_screenshots.py (real TUI screenshots for docs/images/)
+└── docs/                         # pipeline.md and the phase pages, plan-tree.md, create_env_sizing.md, Themes.md, feature-description.md,
+                                  # and the rewrite's design and build log (laya_plan.md, laya_impl_phases.md)
 ```
+
+The fleet dashboard is its own repo, [Just-Finish-It-Fleet](https://github.com/Tejasvedagiri/Just-Finish-It-Fleet), not a folder here.
 
 ---
 
 ## Context cache
 
-Alongside the plan, each session keeps a small persistent fact store (`context.json`) for
+Alongside the plan, each session keeps a small persistent fact store (`ContextEntry` rows in `.jfi/JFI.db`) for
 things worth remembering from one short episode to the next (each episode starts fresh), out
 of context: key decisions, discovered schema/API/config details, gotchas — anything a later
 phase or iteration would otherwise have to re-derive.
@@ -405,26 +386,60 @@ It's meant to stay small — a handful of high-value facts, not a transcript. On
 
 ## The tool set (what the model can call)
 
-| Tool               | Purpose                                                                                          |
-|--------------------|--------------------------------------------------------------------------------------------------|
-| `write_file`       | Create/overwrite a file.                                                                         |
-| `read_file`        | Read an existing file's content.                                                                 |
-| `append_to_file`   | Append to a file — the sanctioned way to build long documents in chunks instead of one oversized write. |
-| `replace_in_file`  | Replace exactly one substring, leaving everything else untouched. This is *the* mechanism for ticking plan checkboxes and making surgical edits; a bad match (0 or >1 hits) errors out rather than corrupting the file. |
-| `execute_command`  | Run any shell command; returns stdout+stderr. Times out after 300s by default — pass `timeout` to raise it for a slow install/build/test step. Every call needs human approval first, unless `AUTO_APPROVE_COMMANDS=1` is set (unattended runs only — see `JFI_ENV_TEMPLATE`). |
-| `context_save`     | Save one fact to the persistent [context cache](#context-cache) in a single call — merges it in without touching any other key. |
-| `context_lookup`   | Search the context cache instead of reading it wholesale — call with no keyword to list every saved key, or a keyword to get the full text of just what matches. |
-| `capture_screenshot` | Snapshot the monitor to disk — used for visual verification where possible (fails cleanly with a "skip this step" hint if there's no display). |
-| `fetch_webpage_images` | Fetch a web page (http/https only) and download the images it references — Open Graph/Twitter preview image first, then every `<img>` tag — to disk, auto-numbered. Same "writes files, doesn't show you anything" design as `capture_screenshot`. |
-| `view_image`       | Attach an image file into the model's next turn (the only tool whose result becomes an actual image message, not just text) — this is how the agent can actually *see* screenshots it captured or images `fetch_webpage_images` downloaded. |
-| `extract_video_frames` | Turn a video into a small set of unique screenshots: extracts the first frame plus every later frame whose pixels differ from the last *kept* frame by at least `threshold` (default 50%), saved to disk auto-numbered. Same "writes files, doesn't show you anything" design as `capture_screenshot` — `view_image` each one afterward. Requires the `ffmpeg` binary. |
-| `ask_llm`          | A general-purpose escape hatch: sends `prompt` as a fresh, **stateless** single-turn LLM call (no tools, no conversation history, no plan/file access) and returns the reply. For one-off text work — a description, a clarification, a rephrase, brainstorming a name — that doesn't warrant its own dedicated tool. Uses whatever model the calling phase itself is configured for (see [per-phase models](#configuration-env) above); its cost still counts toward the header's cumulative ↓/↑ token totals, real usage if the server reports it, an estimate otherwise. |
-| `start_background_process` | Starts a shell command (a dev/test server, anything long-running) detached, and returns a **handle** — never the raw OS pid. |
-| `list_processes`   | Lists processes *this session* started with `start_background_process` — never the whole OS process table. Use instead of `ps aux`/`ps -ef`. |
-| `stop_background_process` | Stops a process by its handle — SIGTERM to its whole process group, then SIGKILL after `timeout` (default 5s) if it's still alive. Structurally can't match and kill the wrong process, unlike `pkill`/`kill` by a guessed pid or name pattern (a real, observed failure: the shell running `execute_command` itself can share part of the pattern). |
-| `clear_finished_processes` | Prunes the bookkeeping entry for every **exited** process (never a running one, and never sends a signal) — keeps `list_processes`/the fleet dashboard's process panel from accumulating dead one-off servers over a long session. |
+Each episode gets only its role's tools (`ROLE_CORE_TOOLS` in `src/JFI/episode/roles.py`). Anything in the optional group can be added for the rest of an episode with `load_tool`. How a call travels through the engine is in `src/JFI/episode/engine.py`; every result is capped at `TOOL_RESULT_MAX_TOKENS`.
 
-Every failed call gets a concrete `AUTO-RECTIFY:` instruction naming the exact tool/argument to change, and after 3 identical failures JFI tells the model to abandon that approach rather than loop — the difference between "retry forever" and "fix or move on."
+**Planning** (Architect, Lead, Task)
+
+| Tool | What it does |
+|------|--------------|
+| `add_node` / `update_node` / `delete_node` | Write the plan tree. A node has a short description, `done_when`, `files`, and `notes` (what to implement and how) plus `references` (design entries, source ranges, docs) that the next layer's brief shows. Checked in code: scope, ownership, duplicates, `depends_on` ids and cycles, the depth cap, description length, and that a test file follows the runbook's `test_dir`. |
+| `get_node` / `list_nodes` / `get_plan` | Read the plan. |
+| `escalate` | Send the parent node back to the layer above when the node can't be fixed at this layer. |
+| `design_set` / `design_get` | The design: stack, components, contracts, conventions, assumptions, a document's outline. |
+| `runbook_set` / `runbook_get` | How to set up, run, stop, test (`test`, `test_one`), build, check (`e2e`) and run a scratch script (`script`), plus the layout: `src_dir`, `test_dir`, `test_naming`. Operating the app is never a plan node. |
+| `scaffold_file` / `unscaffold_file` | Create a file of stubs (a declaration and what it does; the body is generated), or remove one. |
+| `mark_change` | Mark an existing function for Dev to change or delete. |
+| `finish` | End the episode. The Architect's also requires the runbook, design and test setup (or the outline, for a document). |
+
+**Reading and editing code** (all roles, by need)
+
+| Tool | What it does |
+|------|--------------|
+| `outline_file` / `list_dir` | A cheap map of a folder or file (sections, functions, headings) with line numbers. |
+| `list_symbols` / `read_symbol` / `replace_symbol` | Work one top-level function or class at a time. |
+| `find_references` | Where a function or class is defined, imported and called (comments and strings skipped): every caller a change or delete leaf must update. |
+| `read_file` / `search_code` | Read a file or a line range; search the project (text or regex). |
+| `write_file` / `replace_in_file` / `copy_lines` | Write a file, patch one exact substring, or copy lines between files without retyping them. |
+| `apply_patch` | Dev: a unified diff across one or more files in one call, all-or-nothing when a hunk doesn't match. |
+
+**Building and checking** (Dev, reviewer, cleanup)
+
+| Tool | What it does |
+|------|--------------|
+| `execute_command` | Run a shell command. Needs your approval unless `AUTO_APPROVE_COMMANDS=1`, or a saved command prefix matches. |
+| `mark_leaf_done` | Dev's finish: runs the leaf's own test through the runbook's `test_one` (or a `check` command) and refuses until it passes. |
+| `add_reviewer_note` / `get_reviewer_notes` | Dev's notes for the reviewer. |
+| `reopen_leaf` | Reviewer: send a built leaf back to Dev with a fix note. |
+| `leaf_diff` | Reviewer: what one leaf changed (its git checkpoint), or which leaves changed a file. |
+| `check_page` | Reviewer (optional for others): load a URL in a headless browser and report console errors, exceptions, failed requests, the visible text and a screenshot. |
+| `write_review_report` | Reviewer: record work the plan never covered, which starts another iteration. |
+| `finish` | Reviewer's pass re-runs the runbook's `e2e` itself; a pass the e2e refutes is refused. |
+
+**Optional** (added with `load_tool`)
+
+| Tool | What it does |
+|------|--------------|
+| `start_background_process` / `list_processes` / `stop_background_process` / `clear_finished_processes` | Long-running commands (dev servers), tracked by handle, never by raw pid; the reviewer has the first and third by default. |
+| `capture_screenshot` / `view_image` | Screenshot the screen, and attach an image so the model can see it. |
+| `fetch_webpage_images` / `browse_webpage` | Download a page's images; load a page in a headless browser (runs its JavaScript). |
+| `browser` | An interactive headless browser that stays open across calls: open a URL, screenshot it (the model sees the image), find, click and type by `[ref]` number, visible text or CSS selector, press keys, scroll, read the text, go back. Each call reports console errors and failed requests since the last one. For UI flows: fill a form, click a tab, check what changed. |
+| `http_request` | Call an API the project serves: status, key headers and the body (JSON pretty-printed), instead of `curl` through the shell. |
+| `extract_video_frames` | A video's visually distinct frames (needs `ffmpeg`). |
+| `context_save` / `context_lookup` | The [context cache](#context-cache): facts one episode saves for later ones. |
+| `ask_llm` | A one-off, stateless call to the role's own model, for text work no tool covers. |
+| `append_to_file` | Build a long document in chunks. |
+
+A result that starts with `Error` comes back with concrete `AUTO-RECTIFY` advice naming what to change, and after 3 identical failures the model is told to take a different approach.
 
 
 ---
@@ -436,7 +451,7 @@ uv sync --extra web --extra anthropic --group dev
 uv run pytest     # full suite (config in pyproject.toml: testpaths = ["test"])
 ```
 
-On Windows, add `--ignore=test/test_session_lock.py` (it needs POSIX `fcntl`); three process-group tests in `test_process_tools.py` also fail there. The project targets Linux/macOS.
+On Windows, add `--ignore=test/test_session_lock.py` (it needs POSIX `fcntl`); everything else passes there. The project targets Linux/macOS.
 
 Highlights:
 
@@ -461,4 +476,4 @@ Scoped to Pyflakes plus pycodestyle's error-level checks (unused imports/variabl
 
 ## TODO
 
-- [ ] **Evaluate JFI on a concrete real-world task** with a ~31B local model: pick one representative coding task (not a toy example), run it fully through the pipeline, and record — completion or not, final code quality vs. what a frontier agent would likely produce for the same prompt, total tokens consumed, wall-clock time, and any phase where the model got stuck or needed a forced/queued nudge. This is the honest "is this actually worth the token burn" check the project currently only has anecdotes for.
+What's still open is in [`TODO.md`](TODO.md).

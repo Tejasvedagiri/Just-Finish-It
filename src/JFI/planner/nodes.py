@@ -11,13 +11,14 @@ Rules enforced here, in code, not just in prompts:
 - Depth is still capped by MAX_LEAF_DEPTH.
 """
 
+import html
 import os
 import re
 from typing import Callable, Dict, List, Optional, Sequence
 
 from sqlmodel import select
 
-from JFI.models import Leaf, Phase, PlanEvent, get_session
+from JFI.models import Leaf, Phase, PlanEvent, RunbookEntry, get_session
 from JFI.models.enums import LeafStatus
 from JFI.tool.result_cap import cap_result
 
@@ -108,6 +109,10 @@ def render_node(node: Leaf) -> str:
     bits = [f"[id={node.id}] ({node.level}{'/' + node.kind if node.kind else ''}) {node.description}"]
     if node.done_when:
         bits.append(f"done_when: {node.done_when}")
+    if node.notes:
+        bits.append(f"notes: {node.notes}")
+    if node.references:
+        bits.append(f"references: {', '.join(node.references)}")
     if node.files:
         bits.append(f"files: {', '.join(node.files)}")
     if node.depends_on:
@@ -116,7 +121,10 @@ def render_node(node: Leaf) -> str:
     return "\n  ".join(bits)
 
 
-_CALL = re.compile(r"(\w+)\s*\(")
+# No space before "(": on the stui runs "copied verbatim (L1376-1402)" and
+# "exactly (…)" read as functions verbatim() and exactly(), and valid nodes
+# were refused as duplicates of each other.
+_CALL = re.compile(r"\b([A-Za-z_]\w*)\(")
 
 
 def target_symbol(description: str) -> Optional[str]:
@@ -173,6 +181,27 @@ def _normalise_kind(kind: Optional[str]) -> Optional[str]:
     return None
 
 
+def _plain(text: Optional[str]) -> str:
+    """Observed on the react_counter run: the Task planner wrote "&lt;head&gt;"
+    for <head> in descriptions and notes, which Dev and the dashboards then
+    showed escaped. Node text is plain text; entities are decoded."""
+    return html.unescape(text or "").strip()
+
+
+# Observed on the react_counter run: notes that open with where to edit
+# ("Replace the JFI comment at index.html L3. ...") and only then, if at all,
+# say what the item is for. The location belongs in references.
+_LOCATION_FIRST = re.compile(r"^(replace|fill|swap|substitute)\b[^.]{0,60}?\bJFI\b", re.IGNORECASE)
+
+
+def _notes_problem(notes: str) -> Optional[str]:
+    if _LOCATION_FIRST.match(notes):
+        return ("Error: notes must start with WHAT this item must do and why -- the behaviour or result, its "
+                "inputs and outputs, edge cases -- not with where to edit (\"Replace the JFI comment at ...\"). "
+                "Put the location in references (e.g. \"index.html L3\") and rewrite the notes.")
+    return None
+
+
 def _too_long(description: str) -> str:
     """Observed on the stui run: the Architect packed exports, line ranges and
     steps into node descriptions, and 14 of its tool calls came back "too
@@ -180,16 +209,74 @@ def _too_long(description: str) -> str:
     the same text. Say where the detail belongs instead."""
     return (f"Error: the description is {len(description)} characters; the limit is {item_max_chars()} "
             "(PLANNER_ITEM_MAX_CHARS). A description only names the work and where it goes, e.g. "
-            "\"Create src/views/news.js: news feed + filter chips\". Put the details (exports, line ranges, "
-            "steps) in done_when, or record them with design_set for the next role to pull.")
+            "\"Create src/views/news.js: news feed + filter chips\". Put the details (exports, steps, edge "
+            "cases) in notes, and where to look (design entries, line ranges, docs) in references.")
+
+
+def _unknown_ids(nodes: Sequence[Leaf], parent_id: Optional[int], missing: Sequence[int]) -> str:
+    """Observed on the stui runs: ~29 depends_on errors gave sibling positions
+    ([1], [1, 2]) instead of ids, and the old message didn't say which ids
+    exist."""
+    siblings = children_of(nodes, parent_id)
+    known = "; ".join(f"{n.id} ({n.description[:50]})" for n in siblings[:12]) or "none yet"
+    return (f"Error: depends_on names unknown node(s) {list(missing)}. depends_on takes node ids (the id= that "
+            f"add_node returned), not positions. Ids here: {known}.")
+
+
+_TEST_FILE = re.compile(r"(^|/)(tests?|__tests__|spec)/|(\.|_)(test|spec)\.[^/]+$|(^|/)test_[^/]+$", re.I)
+
+
+def _repo_path(path: str) -> str:
+    path = path.strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path.strip("/")
+
+
+def _test_path_problem(engine, session_id: str, files: Sequence[str]) -> Optional[str]:
+    """A test file that doesn't follow the runbook's test_dir. Observed on the
+    QA machine: tests landed both beside their source and in __tests__/,
+    while test_one only ran __tests__/{test_id}.test.js."""
+    tests = [f.replace("\\", "/") for f in files if _TEST_FILE.search(f.replace("\\", "/"))]
+    if not tests:
+        return None
+    with get_session(engine) as db:
+        entries = {r.name: r.command for r in db.exec(select(RunbookEntry).where(
+            RunbookEntry.session_id == session_id, RunbookEntry.name.in_(("test_dir", "test_naming"))))}
+    test_dir = (entries.get("test_dir") or "").strip()
+    if not test_dir:
+        return None
+    naming = f" ({entries['test_naming']})" if entries.get("test_naming") else ""
+    if re.search(r"\b(beside|next to|same (dir|folder)|colocated|alongside)\b", test_dir, re.I):
+        source_dirs = {f.replace("\\", "/").rsplit("/", 1)[0] for f in files if f not in tests and "/" in f}
+        wrong = [t for t in tests if source_dirs and t.rsplit("/", 1)[0] not in source_dirs]
+        where = "beside their source files"
+    else:
+        # Observed on the react_counter run: test_dir "." (the repo root) became
+        # the folder "/", so every path was refused -- test_index.py,
+        # ./test_index.py, tests/test_index.py -- and the Task planner escalated.
+        folder = _repo_path(test_dir)
+        if folder in ("", "."):
+            wrong = [t for t in tests if "/" in _repo_path(t)]
+            where = "at the repo root"
+        else:
+            wrong = [t for t in tests if not _repo_path(t).startswith(folder + "/")]
+            where = f"under {folder}/"
+    if not wrong:
+        return None
+    return (f"Error: the runbook puts tests {where}{naming}, but {', '.join(wrong)} isn't. Use the path the "
+            f"runbook's test_dir and test_naming give.")
 
 
 def add_node(engine, session_id: str, role: str, scope_id: Optional[int], description: str,
              done_when: str = "", files: Sequence[str] = (), depends_on: Sequence[int] = (),
-             kind: Optional[str] = None, parent_id: Optional[int] = None) -> str:
-    description = (description or "").strip()
+             kind: Optional[str] = None, parent_id: Optional[int] = None, notes: str = "",
+             references: Sequence[str] = ()) -> str:
+    description, done_when, notes = _plain(description), _plain(done_when), _plain(notes)
     if not description:
         return "Error: a node needs a description."
+    if _notes_problem(notes):
+        return _notes_problem(notes)
     if len(description) > item_max_chars():
         return _too_long(description)
     if parent_id == 0:
@@ -215,7 +302,10 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
                     f"Treat node {parent_id} as small enough and stop splitting it.")
     missing = [d for d in depends_on if d not in by_id]
     if missing:
-        return f"Error: depends_on names unknown node(s) {missing}."
+        return _unknown_ids(nodes, parent_id, missing)
+    test_problem = _test_path_problem(engine, session_id, files)
+    if test_problem:
+        return test_problem
     duplicate = _duplicate_of([n for n in nodes if n.id != parent_id], description, files)
     if duplicate is not None:
         return (f"Error: node {duplicate.id} already covers {target_symbol(description)}() in "
@@ -230,7 +320,8 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
     sort_key = (max((s.sort_key for s in siblings), default=0) // 10 + 1) * 10
     with get_session(engine) as db:
         node = Leaf(session_id=session_id, parent_id=parent_id, phase=Phase.IMP, sort_key=sort_key,
-                    description=description, level=role, kind=kind, done_when=done_when.strip() or None,
+                    description=description, level=role, kind=kind, done_when=done_when or None,
+                    notes=notes or None, references=list(references) or None,
                     files=list(files) or None, depends_on=list(depends_on) or None)
         db.add(node)
         db.commit()
@@ -240,7 +331,8 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
 
 def update_node(engine, session_id: str, role: str, node_id: int, description: Optional[str] = None,
                 done_when: Optional[str] = None, files: Optional[Sequence[str]] = None,
-                depends_on: Optional[Sequence[int]] = None, kind: Optional[str] = None) -> str:
+                depends_on: Optional[Sequence[int]] = None, kind: Optional[str] = None,
+                notes: Optional[str] = None, references: Optional[Sequence[str]] = None) -> str:
     nodes = load_nodes(engine, session_id)
     by_id = {n.id: n for n in nodes}
     node = by_id.get(node_id)
@@ -250,22 +342,34 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
         return f"Error: node {node_id} was written by the {node.level}; only the {node.level} can change it."
     if node.status == LeafStatus.DONE:
         return f"Error: node {node_id} is done; it can't be rewritten."
+    if notes is not None:
+        notes = _plain(notes)
+        if _notes_problem(notes):
+            return _notes_problem(notes)
     if description is not None:
-        description = description.strip()
+        description = _plain(description)
         if not description or len(description) > item_max_chars():
             return _too_long(description) if description else "Error: a description can't be empty."
     if depends_on is not None:
         missing = [d for d in depends_on if d not in by_id]
         if missing:
-            return f"Error: depends_on names unknown node(s) {missing}."
+            return _unknown_ids(nodes, node.parent_id, missing)
         if _cycles(nodes, node_id, depends_on):
             return "Error: that depends_on would create a cycle."
+    if files is not None:
+        test_problem = _test_path_problem(engine, session_id, files)
+        if test_problem:
+            return test_problem
     with get_session(engine) as db:
         row = db.get(Leaf, node_id)
         if description is not None:
             row.description = description
         if done_when is not None:
-            row.done_when = done_when.strip() or None
+            row.done_when = _plain(done_when) or None
+        if notes is not None:
+            row.notes = notes or None
+        if references is not None:
+            row.references = list(references) or None
         if files is not None:
             row.files = list(files) or None
         if depends_on is not None:
@@ -373,10 +477,12 @@ def render_plan(engine, session_id: str) -> str:
 
 def make_node_tools(engine, session_id: str, role: str, scope_id: Optional[int]) -> Dict[str, Callable]:
     return {
-        "add_node": lambda description, done_when="", files=(), depends_on=(), kind=None, parent_id=None: add_node(
-            engine, session_id, role, scope_id, description, done_when, files, depends_on, kind, parent_id),
-        "update_node": lambda node_id, description=None, done_when=None, files=None, depends_on=None, kind=None:
-            update_node(engine, session_id, role, node_id, description, done_when, files, depends_on, kind),
+        "add_node": lambda description, done_when="", files=(), depends_on=(), kind=None, parent_id=None,
+        notes="", references=(): add_node(engine, session_id, role, scope_id, description, done_when, files,
+                                          depends_on, kind, parent_id, notes, references),
+        "update_node": lambda node_id, description=None, done_when=None, files=None, depends_on=None, kind=None,
+        notes=None, references=None: update_node(engine, session_id, role, node_id, description, done_when, files,
+                                                 depends_on, kind, notes, references),
         "delete_node": lambda node_id: delete_node(engine, session_id, role, node_id),
         "get_node": lambda node_id: get_node(engine, session_id, node_id),
         "list_nodes": lambda parent_id=None: list_nodes(engine, session_id, parent_id),
@@ -393,7 +499,13 @@ def _fn(name, description, properties, required):
 
 _FIELDS = {
     "description": {"type": "string", "description": "<verb> <what> in <where>: <expected result>; max 200 chars. "
-                                                "Details (exports, line ranges, steps) go in done_when or the design"},
+                                                "Details go in notes; where to look goes in references"},
+    "notes": {"type": "string", "description": "what this item must do and why, first: the behaviour or result, inputs "
+                                          "and outputs, edge cases, the contract to follow, what not to touch. Plain "
+                                          "text. Never start with where to edit -- that goes in references"},
+    "references": {"type": "array", "items": {"type": "string"},
+                   "description": "where the context lives: design entries as kind:key (e.g. contract:main->calc), "
+                                  "source ranges (e.g. page.html L1376-1402), docs or URLs"},
     "done_when": {"type": "string", "description": "the observable finish condition (on a function: its test case)"},
     "files": {"type": "array", "items": {"type": "string"}, "description": "files it creates/changes + test file"},
     "depends_on": {"type": "array", "items": {"type": "integer"}, "description": "node ids that must be done first"},

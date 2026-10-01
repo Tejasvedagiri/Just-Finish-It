@@ -122,8 +122,8 @@ def replace_in_file(file_path: str, old_string: str, new_string: str) -> str:
     Swaps an exact substring inside a file, restricted to the current working
     directory.
 
-    This is the cheap way to tick a checkbox: rewriting a whole plan through a
-    JSON tool argument is what truncates on long documents.
+    The cheap way to patch a few lines: rewriting a whole file through a JSON
+    tool argument is what truncates on long documents.
     """
     try:
         path = _get_safe_path(file_path)

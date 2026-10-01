@@ -23,7 +23,7 @@ DIVIDE_BY_ZERO_INPUT = "1 / 0\nexit\n"
 
 def run(stdin_text: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["python3", "main.py"],
+        [sys.executable, "main.py"],
         input=stdin_text,
         capture_output=True,
         text=True,

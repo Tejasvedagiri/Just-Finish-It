@@ -124,6 +124,9 @@ def start_background_process(command: str, log_file: str = "", host: str = "", p
             stdout=stdout,
             stderr=stderr,
             start_new_session=True,  # own process group -- see module docstring
+            # Windows has no POSIX process groups; a new console process group
+            # is its equivalent, and the stop ends the whole tree (_stop_windows).
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
         )
     except OSError as e:
         return f"Error: failed to start '{command}': {e}"
@@ -179,6 +182,8 @@ def stop_background_process(handle: str, timeout: float = 5.0) -> str:
         return f"{handle} already exited (code {code})."
 
     pid = _metadata[handle]["pid"]
+    if os.name == "nt":
+        return _stop_windows(handle, proc, pid)
     try:
         pgid = os.getpgid(pid)
     except ProcessLookupError:
@@ -211,6 +216,21 @@ def stop_background_process(handle: str, timeout: float = 5.0) -> str:
     except subprocess.TimeoutExpired:
         pass
     return f"{handle} (pid {pid}) didn't stop within {timeout:.0f}s — force-killed."
+
+
+def _stop_windows(handle: str, proc: subprocess.Popen, pid: int) -> str:
+    """Observed on the react_counter run (Windows): stop_background_process
+    failed on os.getpgid, and the reviewer had to `taskkill /T /F` its own
+    http.server. `taskkill /T` walks the tree from the shell wrapper, so it
+    runs while the wrapper is still alive -- once it exits, its children are
+    orphaned and no longer reachable from its pid. Console servers don't
+    answer a polite taskkill, so the tree is ended outright (/F)."""
+    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return f"Error: {handle} (pid {pid}) is still running after taskkill /T /F."
+    return f"Stopped {handle} (pid {pid}) and every process it started."
 
 
 def clear_finished_processes() -> str:

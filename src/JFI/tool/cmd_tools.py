@@ -71,7 +71,7 @@ def execute_command(command: str, timeout: int = 300) -> str:
 #
 # Before a shell command from the LLM actually runs, the human is asked:
 #   [Y]es       — run this one command, ask again next time
-#   [S]ave      — run it, and remember its prefix in context.json so future
+#   [S]ave      — run it, and remember its prefix in the context cache so future
 #                 commands starting with that prefix skip the prompt
 #   [A]ll       — run it, and stop asking for the rest of this session
 #                 (in-memory only; a fresh run asks again)

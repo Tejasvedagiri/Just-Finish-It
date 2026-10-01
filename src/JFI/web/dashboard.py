@@ -32,6 +32,7 @@ Launch with: streamlit run src/JFI/web/dashboard.py
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -41,7 +42,7 @@ from JFI.manager.web_bridge import ANSWER_FILENAME, STATUS_FILENAME, atomic_writ
 from JFI.models import get_engine
 from JFI.tool.note_tools import get_note, REVIEW_REPORT
 from JFI.tool.plan_db_tools import (
-    phase_progress_db, plan_judge_rows, plan_progress_db, render_plan_markdown,
+    note_points, phase_progress_db, plan_judge_rows, plan_progress_db, render_plan_markdown,
 )
 
 st.set_page_config(page_title="Just Finish It — Status", page_icon="📋", layout="wide")
@@ -50,10 +51,9 @@ st.set_page_config(page_title="Just Finish It — Status", page_icon="📋", lay
 def _project_root() -> Path:
     """Same SESSION_PATH SimpleSessionManager resolves its own
     `self._project_root` from (see simple_session_manager.py's __init__) --
-    the one shared `.jfi/JFI.db` lives here, NOT inside any individual
-    .jfi/<session>/ folder. get_engine must be called with this, never with
-    a session_path -- passing a session directory silently points at a
-    different (and normally empty) JFI.db two levels too deep, instead of
+    the one shared `.jfi/JFI.db` lives here. get_engine must be called with
+    this, never with a session_path -- passing `.jfi/` itself silently points
+    at a different (and normally empty) JFI.db one level too deep, instead of
     the real one every actual jfi session writes to."""
     return Path(os.environ.get("SESSION_PATH", "."))
 
@@ -223,6 +223,41 @@ def _render_status(status: dict) -> None:
                 )
 
 
+def _render_node_detail(judge_rows: list) -> None:
+    """One node's notes (what to implement and how) and references (where the
+    context is), which the Task | Judge table can only show truncated."""
+    options = {f"{row['#']} {row['Task'].lstrip('· ')}": row for row in judge_rows}
+    choice = st.selectbox("Node", list(options), key="node_detail")
+    row = options[choice]
+    st.markdown(f"**{row['#']}** · {row['Level']} · {row['Final'] or 'unjudged'} · {row['Status'] or 'parent'}")
+    st.markdown(row["Task"].lstrip("· "))
+    if row["Notes"]:
+        with st.container(border=True):
+            st.markdown("**Notes**\n\n" + _notes_markdown(note_points(row["Notes"])))
+    else:
+        st.caption("No notes on this node.")
+    if row["References"]:
+        st.markdown("**References**\n" + "\n".join(f"- `{ref.strip()}`" for ref in row["References"].split(", ")))
+
+
+_MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]<>()#+\-.!|~^$])")
+
+
+def _notes_markdown(points: list) -> str:
+    """Notes as a bullet list; numbered steps nest under the point before
+    them (usually "Steps:"). Notes are code-heavy ("+ - * /", "a ** b"), so
+    everything is escaped rather than read as Markdown."""
+    lines, nested = [], False
+    for label, text in points:
+        text = _MARKDOWN_SPECIAL.sub(r"\\\1", text)
+        if label:
+            lines.append(f"{'    ' if nested else ''}- **{label}.** {text}")
+        else:
+            nested = text.endswith(":")
+            lines.append(f"- {text}")
+    return "\n".join(lines)
+
+
 def _render_runbook_and_design(engine, session_id: str) -> None:
     """The Architect's runbook (how to set up, run and test the project; ✓ =
     a command that has actually run) and design (stack, contracts,
@@ -280,7 +315,7 @@ def main() -> None:
 
     selected_name = st.sidebar.selectbox("Session", session_ids)
     auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
-    refresh_seconds = st.sidebar.slider("Refresh every (seconds)", 1, 30, 3, disabled=not auto_refresh)
+    refresh_seconds = st.sidebar.slider("Refresh every (seconds)", 1, 60, 20, disabled=not auto_refresh)
 
     st.title(selected_name)
 
@@ -342,6 +377,7 @@ def _render_session_tab(db_engine, jfi_dir: Path, selected_name: str) -> None:
             st.markdown(render_plan_markdown(db_engine, session_id))
             st.markdown("**Task | Judge**")
             st.dataframe(judge_rows, width="stretch", hide_index=True)
+        _render_node_detail(judge_rows)
         _render_runbook_and_design(db_engine, session_id)
     else:
         st.info("No plan yet for this session.")

@@ -7,7 +7,9 @@ several GB), and websockets for the fleet dashboard. The build refuses to run
 without them rather than silently shipping a binary that lacks them.
 
 Usage: `uv sync --extra web --extra laya --group dev`, then `uv run build`.
-Output lands at dist/jfi (or dist/jfi.exe on Windows).
+Output is a folder, dist/jfi/, with the executable dist/jfi/jfi (jfi.exe on
+Windows) inside. A onefile build unpacked its 2.2 GB (torch) on every launch:
+18-35 s before `jfi --version` even answered.
 """
 
 import sys
@@ -29,6 +31,15 @@ LAYA_MODEL_PACKAGES = ("transformers.models.modernbert",)
 def _missing_extras() -> list[str]:
     import importlib.util
     return [extra for module, extra in REQUIRED.items() if importlib.util.find_spec(module) is None]
+
+
+def remove_old_onefile(dist: Path) -> None:
+    """An earlier onefile build: dist/jfi on Linux/macOS, which the folder
+    build needs the name of, and dist/jfi.exe on Windows, which was left
+    beside dist/jfi/ (2.2 GB) after the switch to a folder build."""
+    for old in (dist / BINARY_NAME, dist / f"{BINARY_NAME}.exe"):
+        if old.is_file():
+            old.unlink()
 
 
 def main() -> None:
@@ -60,7 +71,10 @@ def main() -> None:
     args = [
         str(ENTRY_POINT),
         "--name", BINARY_NAME,
-        "--onefile",
+        "--onedir",
+        # `jfi --version` reads the installed package's metadata; without it
+        # the binary printed "unknown".
+        "--copy-metadata", "just-finish-it",
         "--console",
         "--noconfirm",
         "--paths", str(PROJECT_ROOT / "src"),
@@ -99,9 +113,10 @@ def main() -> None:
         "--workpath", str(build_dir),
         "--specpath", str(build_dir),
     ]
+    remove_old_onefile(PROJECT_ROOT / "dist")
     PyInstaller.__main__.run(args)
 
-    output_path = PROJECT_ROOT / "dist" / BINARY_NAME
+    output_path = PROJECT_ROOT / "dist" / BINARY_NAME / (BINARY_NAME + (".exe" if sys.platform == "win32" else ""))
     if sys.platform == "darwin":
         # PyInstaller's own re-sign step (see its "Re-signing the EXE" log
         # line above) leaves arm64 builds with a signature the OS's launch

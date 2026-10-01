@@ -32,14 +32,16 @@ ROLE_CORE_TOOLS = {
              "runbook_get", "list_dir", "outline_file", "read_file", "read_symbol", "scaffold_file", "unscaffold_file",
              "mark_change", "escalate", "finish"],
     "task": ["get_node", "list_nodes", "add_node", "update_node", "delete_node", "outline_file", "list_symbols",
-             "read_file", "read_symbol",
+             "read_file", "read_symbol", "find_references",
              "scaffold_file", "design_get", "escalate", "finish"],
     "dev": ["outline_file", "read_symbol", "replace_symbol", "list_symbols", "read_file", "copy_lines", "write_file",
-            "replace_in_file",
+            "replace_in_file", "apply_patch", "find_references",
             "search_code", "design_get", "runbook_get", "runbook_set", "execute_command", "add_reviewer_note",
             "mark_leaf_done"],
     "reviewer": ["runbook_get", "runbook_set", "start_background_process", "stop_background_process",
-                 "execute_command", "read_file", "get_plan", "get_reviewer_notes", "write_review_report",
+                 "check_page", "execute_command", "read_file", "search_code", "list_dir", "get_plan",
+                 "get_reviewer_notes", "leaf_diff",
+                 "write_review_report",
                  "reopen_leaf", "finish"],
     "cleanup": ["execute_command", "list_dir", "finish"],
 }
@@ -49,7 +51,8 @@ ROLE_FINISH_TOOL = {role: ("mark_leaf_done" if role == "dev" else "finish") for 
 
 #: Tools most nodes don't need, available through load_tool (or a Laya pick).
 OPTIONAL_POOL = [
-    "capture_screenshot", "view_image", "fetch_webpage_images", "browse_webpage", "extract_video_frames",
+    "capture_screenshot", "view_image", "fetch_webpage_images", "browse_webpage", "check_page", "browser", "http_request",
+    "extract_video_frames",
     "ask_llm", "start_background_process", "stop_background_process", "list_processes",
     "clear_finished_processes", "context_save", "context_lookup", "append_to_file",
 ]

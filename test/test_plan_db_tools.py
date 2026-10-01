@@ -203,6 +203,9 @@ class TestPlanJudgeRows:
                 leaf = db.get(Leaf, leaf_id)
                 leaf.plan_status = status
                 db.add(leaf)
+            leaf = db.get(Leaf, child)
+            leaf.notes, leaf.references = "clamp to the data's range", ["contract:range", "app.js L10-40"]
+            db.add(leaf)
             db.add(PlannerVerdict(session_id=session_id, node_id=parent, level="architect", laya_model="english",
                                   laya_verdict="GOOD", answer_confidence=0.95, rule_verdict="BREAKDOWN",
                                   tiebreak_verdict="BREAKDOWN", decided_by="llm", final_status="BREAKDOWN"))
@@ -223,6 +226,9 @@ class TestPlanJudgeRows:
         assert rows[1]["Task"] == "· setRange()" and rows[1]["Decided by"] == "agree"
         assert rows[1]["Status"] == "todo" and rows[0]["Status"] == ""
         assert (rows[2]["Laya"], rows[2]["Decided by"]) == ("GOOD (0.64)", "rule")
+        assert rows[1]["Notes"] == "clamp to the data's range"
+        assert rows[1]["References"] == "contract:range, app.js L10-40"
+        assert (rows[0]["Notes"], rows[0]["References"]) == ("", "")
 
 
 class TestPlanStatusForTheDashboards:
@@ -306,3 +312,18 @@ class TestMakePlanDbTools:
 
         assert set(tools) == {"get_plan", "get_leaf"}
         assert "Core arithmetic" in tools["get_plan"]()
+
+
+def test_notes_become_points_with_numbered_steps():
+    """Observed 2026-10-01: a node's notes are one long paragraph with steps
+    "(1) ... (5)" inside, unreadable as a single box in the dashboards; and
+    code like "str (e) == e.message" must not become step "e"."""
+    from JFI.tool.plan_db_tools import note_points
+
+    notes = ("Define CalcError(Exception) with .message, str (e) == e.message. Steps: (1) strip the line; "
+             "(2) split into exactly 3 tokens, e.g. '2 + 2'; (3) compute (a ** b). Edge cases: 0 ** 0 is fine.")
+    assert note_points(notes) == [
+        ("", "Define CalcError(Exception) with .message, str (e) == e.message."), ("", "Steps:"),
+        ("1", "strip the line"), ("2", "split into exactly 3 tokens, e.g. '2 + 2'"),
+        ("3", "compute (a ** b)."), ("", "Edge cases: 0 ** 0 is fine.")]
+    assert note_points(None) == [] and note_points("One sentence") == [("", "One sentence")]

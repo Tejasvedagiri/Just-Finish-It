@@ -3,206 +3,147 @@
 Scores one finished (or abandoned) JFI benchmark session by combining:
   1. The objective outcome from harness.py's bench_results.json (did the
      task's hidden/held-out verify.command actually pass?).
-  2. Process metrics scraped from JFI's own on-disk artifacts under
-     JFI/<task_id>/ -- run.log, history.jsonl.gz, plan.md, metadata.json --
-     none of which JFI computes or exposes itself.
+  2. Process metrics read from the project's own database, `.jfi/JFI.db`
+     (the `Leaf`, `Episode`, `PlannerVerdict`, `PlanEvent` and
+     `HistoryMessage` tables), read-only with the standard library's sqlite3,
+     so this runs with any Python, not only JFI's venv.
 
-Why these particular process metrics: each one is directly traceable to a
-real failure mode observed while running JFI against a local ~12B reasoning
-model (see the harness/README for the full story):
-  - plan_rewrite_count: the model repeatedly called write_file on plan.md
-    instead of resuming it -- 15+ full re-plans in one session instead of
-    ticking boxes. Per PLAN_FORMAT_RULES, plan.md should be write_file'd
-    ONCE (by the planner) and only ever edited afterward via
-    replace_in_file (the boxes get ticked, the file is never rewritten
-    wholesale) -- so any write_file call to it beyond the first is exactly
-    the anomaly this metric is built to catch, independent of how the
-    reviewer or the model itself judged the run.
-  - stall_nudges: how many times the model reasoned for a full turn
-    without ever producing content or a tool call (JFI's own AUTO-RECTIFY
-    "entirely reasoning" nudge, see runner.py) -- a proxy for the model
-    losing its footing.
-  - llm_retry_events / crash_events: how many times the LLM backend itself
-    failed mid-session (timeouts, 5xx, or an HTML error page) -- this is
-    infrastructure instability, not the model's fault, but it directly
-    caused the one real session death seen in practice (a growing,
-    redundant context eventually crashing the local server outright).
-  - tool_call_error_rate: fraction of tool calls that came back as an
-    Error -- a cheap, model-agnostic efficiency signal independent of
-    whether the task ultimately passed.
-  - hidden_tests: whether a task's hidden_tests_dir (e.g. tests/, present
-    per task.json) survived the run. JFI's pipeline now ends with a
-    cleanup phase that has execute_command's mv/rm and is told to leave
-    the deliverable's own tests/ alone -- but it's new and autonomous, so
-    this makes "cleanup deleted/moved the oracle test file" a labeled
-    flag instead of a mysterious objective-verify failure.
+Why these metrics: each one tracks a failure seen on real runs.
+  - plan: nodes per level, leaves finished / skipped / left, the deepest
+    leaf. A leaf left unfinished means imp never completed.
+  - judge: how the planner's nodes were settled (agree / rule / llm) and how
+    many redos and escalations it took.
+  - episodes: per role, and how they ended. `budget` and `turn_cap` endings
+    are overflows -- on the calc run a finished leaf was re-split after its
+    episode hit the turn cap.
+  - dev: attempts, reopened leaves (the reviewer's fix loop) and deferrals.
+  - tool_call_error_rate: the fraction of tool results starting with
+    "Error" -- on the QA machine add_node alone failed 28% of the time.
+  - hidden_tests: whether a task's hidden_tests_dir survived the run (the
+    cleanup phase has mv/rm).
 
 Usage:
-    python3 score.py <project_dir> [--results bench_results.json]
+    python3 score.py <projects_root or project_dir> [--results bench_results.json]
 """
 import argparse
-import gzip
 import json
-import re
+import sqlite3
+import sys
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
 import harness
 
-
-def _read_history(history_path: Path) -> list:
-    if not history_path.exists():
-        return []
-    try:
-        with gzip.open(history_path, "rb") as f:
-            raw = f.read()
-    except OSError:
-        return []
-    messages = []
-    for line in raw.split(b"\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            messages.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass
-    return messages
+PHASES = ("planner", "imp", "reviewer", "cleanup")
+OVERFLOW_ENDINGS = ("budget", "turn_cap")
 
 
-def _plan_progress(plan_text: str) -> dict:
-    done = len(re.findall(r"^[ \t]*[-*][ \t]*\[[xX]\]", plan_text, re.M))
-    skipped = len(re.findall(r"^[ \t]*[-*][ \t]*\[○\]", plan_text, re.M))
-    todo = len(re.findall(r"^[ \t]*[-*][ \t]*\[ \]", plan_text, re.M))
-    return {"done": done, "skipped": skipped, "todo": todo, "total": done + skipped + todo}
+def _connect(project_dir: Path) -> Optional[sqlite3.Connection]:
+    db = project_dir / ".jfi" / "JFI.db"
+    if not db.exists():
+        return None
+    conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-# A leaf line's number (e.g. "1.1.1.1") shows its full path from the section
-# root per PLAN_FORMAT_RULES -- dot-count is therefore an exact, mechanical
-# depth signal straight from the numbering the planner is mandated to use,
-# not an indentation guess. Same shape for a parent bullet, just without the
-# checkbox.
-_LEAF_NUM_RE = re.compile(r"^[ \t]*[-*][ \t]*\[[xX ○]\][ \t]*(\d+(?:\.\d+)*)")
-# A top-level parent is often written "- 1. Description" (trailing period),
-# while a nested parent is "- 1.1 Description" (no period) -- both seen in
-# real plans -- so the period before the required whitespace is optional.
-_PARENT_NUM_RE = re.compile(r"^[ \t]*[-*][ \t]+(\d+(?:\.\d+)*)\.?[ \t]+\S")
+def _session_id(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
+    """The harness names the session after the task; otherwise the latest."""
+    row = conn.execute("SELECT session_id FROM sessionrecord WHERE session_id = ?", (task_id,)).fetchone()
+    if row is None:
+        row = conn.execute("SELECT session_id FROM sessionrecord ORDER BY updated_at DESC LIMIT 1").fetchone()
+    return row["session_id"] if row else None
 
 
-def _plan_structure_metrics(plan_text: str) -> dict:
-    """
-    Purely structural stats about the plan's tree shape: how deep it
-    recursed and how many leaves each top-level task ended up with.
+def _plan_metrics(conn: sqlite3.Connection, sid: str) -> dict:
+    nodes = conn.execute("SELECT id, parent_id, level, status, redo_count, escalation_count FROM leaf "
+                         "WHERE session_id = ?", (sid,)).fetchall()
+    by_id = {n["id"]: n for n in nodes}
+    parents = {n["parent_id"] for n in nodes if n["parent_id"] is not None}
+    leaves = [n for n in nodes if n["id"] not in parents]
 
-    Deliberately NOT a judgment call about whether any given leaf's
-    description is "too big" -- flagging that reliably would need real
-    language understanding of the leaf's own prose (see PLAN_FORMAT_RULES'
-    "+"/"and"/"/" heuristic, which is a authoring instruction for the model,
-    not something safe to re-implement here as a pass/fail check: e.g.
-    "division by zero and any unparseable line" is one legitimate leaf about
-    one error-handling contract, not two leaves wearing a trenchcoat, and no
-    regex can tell those two cases apart reliably). A wrong semantic guess
-    here would be worse than no signal, so this only reports the tree's
-    shape -- depth and leaves-per-top-level-task -- the same way
-    plan_rewrite_count reports write_file counts without judging the plan's
-    prose. Read alongside plan_progress's leaf total to spot a plan that's
-    suspiciously flat (many leaves, but max_leaf_depth stuck at 1-2, or one
-    top-level task hoarding most of the leaves while its siblings got one
-    each) -- worth a human/model second look, not an automatic fail.
-    """
-    leaf_depths = []
-    parent_count = 0
-    top_level_leaf_counts: dict = {}
+    def depth(node) -> int:
+        d = 1
+        while node["parent_id"] in by_id:
+            node, d = by_id[node["parent_id"]], d + 1
+        return d
 
-    for line in plan_text.splitlines():
-        m = _LEAF_NUM_RE.match(line)
-        if m:
-            number = m.group(1)
-            parts = number.split(".")
-            leaf_depths.append(len(parts))
-            top_level_leaf_counts[parts[0]] = top_level_leaf_counts.get(parts[0], 0) + 1
-            continue
-        if _PARENT_NUM_RE.match(line):
-            parent_count += 1
-
+    status = Counter((n["status"] or "").lower() for n in leaves)
     return {
-        "leaf_count": len(leaf_depths),
-        "parent_task_count": parent_count,
-        "max_leaf_depth": max(leaf_depths) if leaf_depths else 0,
-        "min_leaf_depth": min(leaf_depths) if leaf_depths else 0,
-        "avg_leaf_depth": round(sum(leaf_depths) / len(leaf_depths), 2) if leaf_depths else 0,
-        "top_level_task_count": len(top_level_leaf_counts),
-        "leaves_per_top_level_task": dict(sorted(
-            top_level_leaf_counts.items(), key=lambda kv: int(kv[0])
-        )),
+        "nodes": len(nodes),
+        "nodes_per_level": dict(Counter(n["level"] or "?" for n in nodes)),
+        "leaves": len(leaves),
+        "done": status.get("done", 0),
+        "skipped": status.get("skipped", 0),
+        "left": len(leaves) - status.get("done", 0) - status.get("skipped", 0),
+        "max_depth": max((depth(n) for n in leaves), default=0),
+        "redos": sum(n["redo_count"] or 0 for n in nodes),
+        "escalations": sum(n["escalation_count"] or 0 for n in nodes),
     }
 
 
-def _run_log_metrics(run_log_text: str) -> dict:
-    started = re.search(r"===== JFI run started ([\d\-T:]+)", run_log_text)
-    phases_completed = re.findall(r"Phase '(\w+)' completed successfully", run_log_text)
-    review_fails = len(re.findall(r"REVIEW FAILED", run_log_text))
-    llm_retry_events = len(re.findall(r"LLM request failed \(attempt", run_log_text))
-    crash_events = len(re.findall(r"HTTP \d{3} — the server returned an HTML error page", run_log_text))
-    reached_pipeline_complete = "PIPELINE COMPLETE" in run_log_text
-    review_loop_cap_hit = "REVIEW LOOP CAP REACHED" in run_log_text
+def _judge_metrics(conn: sqlite3.Connection, sid: str) -> dict:
+    rows = conn.execute("SELECT decided_by, final_status FROM plannerverdict WHERE session_id = ?", (sid,)).fetchall()
+    return {"verdicts": len(rows), "decided_by": dict(Counter(r["decided_by"] or "?" for r in rows)),
+            "final": dict(Counter(r["final_status"] for r in rows))}
+
+
+def _episode_metrics(conn: sqlite3.Connection, sid: str) -> dict:
+    rows = conn.execute("SELECT role, turns, tokens, end_reason, started_at, ended_at FROM episode "
+                        "WHERE session_id = ?", (sid,)).fetchall()
+    endings = Counter(r["end_reason"] or "unfinished" for r in rows)
+    started = min((r["started_at"] for r in rows), default=None)
+    ended = max((r["ended_at"] for r in rows if r["ended_at"]), default=None)
     return {
-        "started_at": started.group(1) if started else None,
-        "phases_completed": phases_completed,
-        "review_failures": review_fails,
-        "llm_retry_events": llm_retry_events,
-        "crash_events": crash_events,
-        "reached_pipeline_complete": reached_pipeline_complete,
-        "review_loop_cap_hit": review_loop_cap_hit,
+        "episodes": len(rows),
+        "per_role": dict(Counter(r["role"] for r in rows)),
+        "endings": dict(endings),
+        "overflows": sum(endings.get(e, 0) for e in OVERFLOW_ENDINGS),
+        "turns": sum(r["turns"] or 0 for r in rows),
+        "tokens": sum(r["tokens"] or 0 for r in rows),
+        "first_episode_at": started,
+        "last_episode_at": ended,
     }
 
 
-def _history_metrics(history: list, plan_basename: str) -> dict:
-    tool_calls_total = 0
-    tool_call_errors = 0
-    tool_name_counts: dict = {}
-    plan_write_file_count = 0
-    stall_nudges = 0
+def _dev_metrics(conn: sqlite3.Connection, sid: str) -> dict:
+    events = Counter(r["type"] for r in conn.execute("SELECT type FROM planevent WHERE session_id = ?", (sid,)))
+    row = conn.execute("SELECT SUM(attempt_count) AS attempts, SUM(reopened_count) AS reopened FROM leaf "
+                       "WHERE session_id = ?", (sid,)).fetchone()
+    return {"attempts": row["attempts"] or 0, "reopened": row["reopened"] or 0,
+            "overflow_events": events.get("overflow", 0), "deferrals": events.get("skip", 0),
+            "events": dict(events)}
 
-    for message in history:
-        if message.get("role") == "user" and "your last turn was entirely reasoning" in str(message.get("content") or ""):
-            stall_nudges += 1
 
-        for call in message.get("tool_calls") or []:
-            function = call.get("function") or {}
-            name = function.get("name") or "?"
-            tool_calls_total += 1
-            tool_name_counts[name] = tool_name_counts.get(name, 0) + 1
-            if name == "write_file":
-                try:
-                    args = json.loads(function.get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                if str(args.get("file_path", "")).endswith(plan_basename):
-                    plan_write_file_count += 1
+def _tool_metrics(conn: sqlite3.Connection, sid: str) -> dict:
+    counts: Counter = Counter()
+    errors: Counter = Counter()
+    for row in conn.execute("SELECT role, content, tool_calls, name FROM historymessage WHERE session_id = ? "
+                            "AND role IN ('assistant', 'tool')", (sid,)):
+        if row["role"] == "assistant" and row["tool_calls"]:
+            for call in json.loads(row["tool_calls"]) or []:
+                counts[(call.get("function") or {}).get("name") or "?"] += 1
+        elif row["role"] == "tool":
+            content = json.loads(row["content"]) if row["content"] else ""
+            if isinstance(content, str) and content.lstrip().startswith("Error"):
+                errors[row["name"] or "?"] += 1
+    total = sum(counts.values())
+    return {"tool_calls_total": total, "tool_call_errors": sum(errors.values()),
+            "tool_call_error_rate": round(sum(errors.values()) / total, 3) if total else 0.0,
+            "tool_name_counts": dict(counts.most_common()), "tool_errors_by_name": dict(errors.most_common())}
 
-        if message.get("role") == "tool" and str(message.get("content") or "").lstrip().startswith("Error"):
-            tool_call_errors += 1
 
-    error_rate = (tool_call_errors / tool_calls_total) if tool_calls_total else 0.0
-    return {
-        "tool_calls_total": tool_calls_total,
-        "tool_call_errors": tool_call_errors,
-        "tool_call_error_rate": round(error_rate, 3),
-        "tool_name_counts": tool_name_counts,
-        # First write_file to plan.md is the planner creating it -- expected
-        # exactly once. Every one after that is a full re-plan instead of
-        # a replace_in_file tick; see the module docstring.
-        "plan_rewrite_count": max(0, plan_write_file_count - 1),
-        "stall_nudges": stall_nudges,
-    }
+def _phases_completed(conn: sqlite3.Connection, sid: str) -> list:
+    """From the `<PHASE>_COMPLETE` markers resume reads (session-level
+    history rows, outside any episode)."""
+    texts = [json.loads(r["content"]) for r in conn.execute(
+        "SELECT content FROM historymessage WHERE session_id = ? AND episode_id IS NULL AND content LIKE ?",
+        (sid, "%_COMPLETE%"))]
+    return [p for p in PHASES if any(isinstance(t, str) and f"{p.upper()}_COMPLETE" in t for t in texts)]
 
 
 def _hidden_tests_status(task_id: str, project_dir: Path) -> Optional[dict]:
-    """Whether this task's hidden_tests_dir (if it declares one) is still
-    present and non-empty after the run -- see the module docstring's
-    hidden_tests bullet for why this specifically needs checking now that
-    a cleanup phase with mv/rm runs at the end of every JFI session."""
     try:
         task = harness.load_task(task_id)
     except (FileNotFoundError, ValueError):
@@ -212,112 +153,91 @@ def _hidden_tests_status(task_id: str, project_dir: Path) -> Optional[dict]:
         return None
     path = project_dir / hidden_dir
     present = path.is_dir()
-    return {
-        "path": hidden_dir,
-        "present": present,
-        "empty": present and not any(path.iterdir()),
-    }
+    return {"path": hidden_dir, "present": present, "empty": present and not any(path.iterdir())}
 
 
 def score_session(project_dir: Path, task_id: str, verify_result: Optional[dict]) -> dict:
-    session_dir = project_dir / "JFI" / task_id
-    run_log_path = session_dir / "run.log"
-    history_path = session_dir / "history.jsonl.gz"
-    plan_path = session_dir / "plan.md"
-
-    run_log_text = run_log_path.read_text(encoding="utf-8", errors="replace") if run_log_path.exists() else ""
-    plan_text = plan_path.read_text(encoding="utf-8", errors="replace") if plan_path.exists() else ""
-    history = _read_history(history_path)
-
-    report = {
-        "task_id": task_id,
-        "project_dir": str(project_dir),
-        "objective_verify": verify_result,
-        "plan_progress": _plan_progress(plan_text) if plan_text else None,
-        "plan_structure": _plan_structure_metrics(plan_text) if plan_text else None,
-        **_run_log_metrics(run_log_text),
-        **_history_metrics(history, Path(plan_path).name),
-        "hidden_tests": _hidden_tests_status(task_id, project_dir),
-    }
-
-    flags = []
-    if report["plan_rewrite_count"] >= 2:
-        flags.append(f"plan.md was rewritten wholesale {report['plan_rewrite_count']} extra time(s) instead of resumed -- likely coherence/context-tracking breakdown")
-    if report["stall_nudges"] >= 5:
-        flags.append(f"{report['stall_nudges']} reasoning-only dead turns -- model repeatedly failed to commit to an action")
-    if report["crash_events"] >= 1:
-        flags.append(f"{report['crash_events']} LLM backend crash(es) (HTML error page) -- likely local server instability, possibly context-window overflow")
-    if report["review_loop_cap_hit"]:
-        flags.append("hit the 3-failed-review cap -- never reached a clean review")
-    hidden_tests = report["hidden_tests"]
-    if hidden_tests and (not hidden_tests["present"] or hidden_tests["empty"]):
-        flags.append(
-            f"hidden test dir '{hidden_tests['path']}' is missing or empty after the run -- "
-            "the cleanup phase (or an earlier one) likely moved/deleted it"
-        )
-    if verify_result and verify_result.get("ran") and not verify_result.get("passed"):
-        flags.append("finished the pipeline but failed the objective hidden-test verification")
-    structure = report["plan_structure"]
-    # Advisory only -- see _plan_structure_metrics' docstring for why this
-    # doesn't try to judge any single leaf. A plan can legitimately never
-    # nest past depth 1 for a genuinely small task; this just surfaces the
-    # shape for a human/model to glance at, the same spirit as story's
-    # honestly-labeled weak grading.
-    if structure and structure["leaf_count"] >= 5 and structure["max_leaf_depth"] <= 1:
-        flags.append(
-            f"plan never nested past depth 1 despite {structure['leaf_count']} leaves -- "
-            "worth a second look for under-decomposition (see plan_structure)"
-        )
-    report["flags"] = flags
-
+    report = {"task_id": task_id, "project_dir": str(project_dir), "objective_verify": verify_result,
+              "hidden_tests": _hidden_tests_status(task_id, project_dir), "session_id": None,
+              "phases_completed": [], "plan": None, "judge": None, "episodes": None, "dev": None, "tools": None}
+    conn = _connect(project_dir)
+    sid = _session_id(conn, task_id) if conn else None
+    if sid:
+        report.update(session_id=sid, phases_completed=_phases_completed(conn, sid), plan=_plan_metrics(conn, sid),
+                      judge=_judge_metrics(conn, sid), episodes=_episode_metrics(conn, sid),
+                      dev=_dev_metrics(conn, sid), tools=_tool_metrics(conn, sid))
+    if conn:
+        conn.close()
+    report["flags"] = _flags(report)
     return report
+
+
+def _flags(report: dict) -> list:
+    flags = []
+    if report["session_id"] is None:
+        return ["no JFI session in .jfi/JFI.db -- JFI never started, or ran somewhere else"]
+    missing = [p for p in PHASES if p not in report["phases_completed"]]
+    if missing:
+        flags.append(f"phases not completed: {', '.join(missing)}")
+    plan, episodes, tools = report["plan"], report["episodes"], report["tools"]
+    if plan["left"]:
+        flags.append(f"{plan['left']} of {plan['leaves']} leaves never finished")
+    if plan["skipped"]:
+        flags.append(f"{plan['skipped']} leaves skipped (a split that couldn't break them up)")
+    if episodes["overflows"] >= 3:
+        flags.append(f"{episodes['overflows']} episodes ran out of budget or turns")
+    if tools["tool_call_error_rate"] > 0.25:
+        flags.append(f"{tools['tool_call_error_rate']:.0%} of tool calls failed")
+    hidden = report["hidden_tests"]
+    if hidden and (not hidden["present"] or hidden["empty"]):
+        flags.append(f"hidden test dir '{hidden['path']}' is missing or empty after the run -- the cleanup "
+                     "phase (or an earlier one) likely moved/deleted it")
+    verify = report["objective_verify"]
+    if verify and verify.get("ran") and not verify.get("passed"):
+        flags.append("failed the objective hidden-test verification")
+    return flags
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("projects_root_or_dir", type=Path, help="A single task's project dir, or a --results-bearing projects root.")
-    parser.add_argument("--results", type=Path, help="bench_results.json from harness.py (default: <arg>/bench_results.json).")
-    parser.add_argument("--out", type=Path, help="Where to write the combined scorecard JSON (default: <arg>/bench_scorecard.json).")
+    parser.add_argument("projects_root_or_dir", type=Path,
+                        help="A single task's project dir, or a --results-bearing projects root.")
+    parser.add_argument("--results", type=Path,
+                        help="bench_results.json from harness.py (default: <arg>/bench_results.json).")
+    parser.add_argument("--out", type=Path,
+                        help="Where to write the combined scorecard JSON (default: <arg>/bench_scorecard.json).")
     args = parser.parse_args()
 
     results_path = args.results or (args.projects_root_or_dir / "bench_results.json")
     if not results_path.exists():
         print(f"error: no results file at {results_path} -- run harness.py first", file=sys.stderr)
         raise SystemExit(1)
-
-    with open(results_path, "r", encoding="utf-8") as f:
-        run_results = json.load(f)
+    run_results = json.loads(results_path.read_text(encoding="utf-8"))
 
     scorecards = []
     for run_result in run_results:
-        task_id = run_result["task_id"]
-        project_dir = Path(run_result["project_dir"])
-        card = score_session(project_dir, task_id, run_result.get("verify"))
+        card = score_session(Path(run_result["project_dir"]), run_result["task_id"], run_result.get("verify"))
         card["harness_outcome"] = run_result.get("outcome")
         scorecards.append(card)
 
     out_path = args.out or (args.projects_root_or_dir / "bench_scorecard.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(scorecards, f, indent=2)
+    out_path.write_text(json.dumps(scorecards, indent=2), encoding="utf-8")
 
-    print(f"{'task':<24} {'harness':<14} {'verify':<8} {'plan':<10} {'depth':<7} {'rewrites':<9} {'stalls':<7} {'crashes':<8} {'tool_err%':<10}")
+    print(f"{'task':<24} {'harness':<14} {'verify':<7} {'leaves':<8} {'episodes':<9} {'overflow':<9} "
+          f"{'reopened':<9} {'tool_err%':<9}")
     for c in scorecards:
         verify = c["objective_verify"] or {}
         verify_str = "n/a" if verify.get("passed") is None else ("PASS" if verify["passed"] else "FAIL")
-        plan = c["plan_progress"] or {}
-        plan_str = f"{plan.get('done', 0)}/{plan.get('total', 0)}" if plan else "n/a"
-        structure = c["plan_structure"] or {}
-        depth_str = (f"{structure.get('avg_leaf_depth', 0)}/{structure.get('max_leaf_depth', 0)}"
-                     if structure else "n/a")
-        print(f"{c['task_id']:<24} {c['harness_outcome']:<14} {verify_str:<8} {plan_str:<10} {depth_str:<7} "
-              f"{c['plan_rewrite_count']:<9} {c['stall_nudges']:<7} {c['crash_events']:<8} {c['tool_call_error_rate']*100:<10.1f}")
+        plan, episodes, dev, tools = c["plan"] or {}, c["episodes"] or {}, c["dev"] or {}, c["tools"] or {}
+        leaves = f"{plan.get('done', 0)}/{plan.get('leaves', 0)}" if plan else "n/a"
+        print(f"{c['task_id']:<24} {str(c['harness_outcome']):<14} {verify_str:<7} {leaves:<8} "
+              f"{episodes.get('episodes', 0):<9} {episodes.get('overflows', 0):<9} {dev.get('reopened', 0):<9} "
+              f"{tools.get('tool_call_error_rate', 0) * 100:<9.1f}")
         for flag in c["flags"]:
-            print(f"    ⚠ {flag}")
-
+            print(f"    ! {flag}")
     print(f"\nFull scorecard: {out_path}")
 
 
 if __name__ == "__main__":
-    import sys
     main()

@@ -786,7 +786,15 @@ def main() -> None:
     wizard_write_target = None
     if sys.stdin.isatty():
         wizard_write_target = ENV_PATH if not env_existed_before else _next_versioned_env_path()
-        values = run_setup_wizard(values, wizard_write_target)
+        try:
+            values = run_setup_wizard(values, wizard_write_target)
+        except (EOFError, KeyboardInterrupt):
+            # Observed with redirected input in Git Bash, which still reports a
+            # terminal: the first prompt raised EOFError with a traceback. Nothing
+            # is written until the wizard's last step, so stopping here is safe.
+            print(f"\n{WARN}Setup stopped before it finished; nothing was written. "
+                  "Run `uv run create-env` in a terminal to set up .env.")
+            raise SystemExit(1)
         backend = values.get("LLM_BACKEND", "").strip().lower()
     elif not _is_configured(values, backend):
         print(f"{WARN}Non-interactive session -- skipping the setup wizard, just checking what's already in .env.")
