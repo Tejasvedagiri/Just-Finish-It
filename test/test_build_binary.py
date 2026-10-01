@@ -34,6 +34,10 @@ def test_the_binary_bundles_streamlit_laya_and_websockets(monkeypatch):
     collected = {args[i + 1] for i, a in enumerate(args) if a in ("--collect-all", "--collect-submodules")}
     assert {"streamlit", "laya", "websockets", "transformers.models.modernbert"} <= collected
     assert "--exclude-module" not in args
+    # A folder build: onefile unpacked 2.2 GB on every launch (18-35 s to start).
+    assert "--onedir" in args and "--onefile" not in args
+    # `jfi --version` printed "unknown" without the package's metadata.
+    assert args[args.index("--copy-metadata") + 1] == "just-finish-it"
 
 
 def test_a_missing_extra_stops_the_build_with_the_command_to_fix_it(monkeypatch, capsys):
@@ -47,3 +51,19 @@ def test_a_missing_extra_stops_the_build_with_the_command_to_fix_it(monkeypatch,
 
     assert "args" not in captured
     assert "uv sync --extra web --extra laya --group dev" in capsys.readouterr().err
+
+
+def test_an_old_onefile_binary_is_removed_but_the_folder_build_is_kept(tmp_path):
+    """Observed 2026-09-30: after the switch to a folder build, the Windows
+    onefile dist/jfi.exe (2.2 GB) stayed beside dist/jfi/."""
+    (tmp_path / "jfi.exe").write_bytes(b"old")
+    (tmp_path / "jfi").mkdir()
+    (tmp_path / "jfi" / "jfi.exe").write_bytes(b"new")
+    build_binary.remove_old_onefile(tmp_path)
+    assert not (tmp_path / "jfi.exe").exists() and (tmp_path / "jfi" / "jfi.exe").exists()
+
+    (tmp_path / "jfi" / "jfi.exe").unlink()
+    (tmp_path / "jfi").rmdir()
+    (tmp_path / "jfi").write_bytes(b"old posix onefile")
+    build_binary.remove_old_onefile(tmp_path)
+    assert not (tmp_path / "jfi").exists()

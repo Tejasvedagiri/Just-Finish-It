@@ -33,9 +33,6 @@ dependencies = [
 # Only needed for `jfi-web` / src/JFI/web/dashboard.py -- the core agent has
 # no dependency on this, so it stays opt-in rather than in the base install.
 web = ["streamlit>=1.38"]
-# Kept so existing `uv sync --extra master` commands still work; websockets
-# is a base dependency now (see above).
-master = ["websockets>=13"]
 # Only needed for LLM_BACKEND=anthropic (see src/JFI/llm/anthropic_stream.py
 # and backend_select.py) -- everything else (the default OpenAI-compatible
 # path, which already covers Ollama/llama.cpp/vLLM/LM Studio) needs no

@@ -51,6 +51,8 @@ class ScopeAnchor:
     files: Sequence[str] = field(default_factory=tuple)
     path: Sequence[str] = field(default_factory=tuple)
     reason: str = ""  # a redo's Laya reason, or the node an escalation came from
+    notes: str = ""
+    references: Sequence[str] = field(default_factory=tuple)  # already resolved (design entries inlined)
 
     def render(self) -> str:
         lines = ["SCOPE (fixed for this whole conversation)",
@@ -61,6 +63,11 @@ class ScopeAnchor:
             lines.append(f"  done_when: {self.done_when}")
         if self.files:
             lines.append(f"  files:     {', '.join(self.files)}")
+        if self.notes:
+            lines.append(f"  notes:     {self.notes}")
+        if self.references:
+            lines.append("  read first:")
+            lines.extend(f"    - {ref}" for ref in self.references)
         if self.path:
             lines.append(f"  path:      {'  >  '.join(self.path)}")
         if self.reason:

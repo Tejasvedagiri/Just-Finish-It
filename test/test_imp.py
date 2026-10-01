@@ -5,6 +5,7 @@ whole point is that "done" means the test passed, not that the model said
 so."""
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from JFI.models import Episode, HistoryMessage, Leaf, SessionRecord, get_engine,
 from JFI.models._util import utcnow
 from JFI.models.enums import LeafStatus
 from JFI.planner.nodes import GOOD, add_node, load_nodes
+from JFI.tool.checkpoint_tools import leaf_diff
 from JFI.tool.code_tools import scaffold_file
 from JFI.tool.note_tools import get_reviewer_notes
 from JFI.tool.runbook_tools import runbook_set
@@ -107,6 +109,9 @@ def test_a_leaf_is_done_only_when_its_own_test_passes(engine, tmp_path):
     assert modes == ["leaf", "finish-up"]  # one episode for the leaf; total()'s stub is left for the finish-up
     assert _status(engine, leaf).status == LeafStatus.DONE
     assert "return a + b" in (tmp_path / "calc/ops.py").read_text()
+    if shutil.which("git"):  # the passing leaf is checkpointed, so the reviewer can see its own diff
+        diff = leaf_diff(engine, _status(engine, leaf).session_id, tmp_path, leaf)
+        assert "+    return a + b" in diff and "tests/test_ops.py" in diff
     with get_session(engine) as db:
         tool_results = [m.content for m in db.exec(HistoryMessage.__table__.select()).all()
                         if m.role == "tool" and m.content.startswith("Error")]
@@ -243,7 +248,7 @@ def test_overflow_sends_the_leaf_to_task_and_dev_continues_with_the_pieces(engin
     def replan():
         _node(engine, "task", big, "implement add(a, b) in calc/ops.py: the actual sum", kind="implement")
 
-    turns = [turn(call("read_symbol", path="calc/ops.py", name="add"))] * 3 + [
+    turns = [turn(call("read_symbol", path="calc/ops.py", name="add"))] * 6 + [  # 3 for the leaf, 3 for its wrap-up
         turn(call("replace_symbol", path="calc/ops.py", name="add", new_source=ADD_IMPL),
              call("mark_leaf_done", leaf_id=big + 1, summary="a", check=f'"{sys.executable}" -c "print(1)"'))]
     monkeypatch.setenv("MAX_EPISODE_TURNS", "3")
@@ -252,9 +257,47 @@ def test_overflow_sends_the_leaf_to_task_and_dev_continues_with_the_pieces(engin
 
     assert result.complete
     with get_session(engine) as db:
-        episodes = [e for e in db.exec(Episode.__table__.select()).all() if e.mode == "leaf"]
-    assert [e.end_reason for e in episodes] == ["turn_cap", "finish"]
+        episodes = [e for e in db.exec(Episode.__table__.select()).all() if e.mode in ("leaf", "wrap-up")]
+    assert [(e.mode, e.end_reason) for e in episodes] == [("leaf", "turn_cap"), ("wrap-up", "turn_cap"),
+                                                          ("leaf", "finish")]
     assert _status(engine, big + 1).status == LeafStatus.DONE
+
+
+def test_a_command_or_path_as_test_id_is_refused_with_the_right_id(engine, tmp_path):
+    """Observed on the QA machine: Dev passed test_id="npx vitest run
+    __tests__/loader.test.js"; the gate put it into test_one and ran
+    "npx vitest run __tests__/npx vitest run __tests__/loader.test.js.test.js"."""
+    runbook_set(engine, "s", "test_one", "npx vitest run __tests__/{test_id}.test.js", notes="e.g. loader")
+    file_node = _calc(engine, tmp_path)
+    leaf = _node(engine, "task", file_node, "implement add(a, b) in calc/ops.py: sum", kind="implement")
+    imp, _ = _imp(engine, tmp_path, [])
+    gate = imp._mark_leaf_done(_status(engine, leaf))
+
+    for wrong in ("npx vitest run __tests__/loader.test.js", "__tests__/loader.test.js"):
+        answer = gate(leaf, "s", test_id=wrong)
+        assert answer.startswith("Error: test_id is only the id") and "try test_id='loader'" in answer
+    assert _status(engine, leaf).status != LeafStatus.DONE
+
+
+def test_a_finished_leaf_that_ran_out_of_turns_is_marked_done_not_split(engine, tmp_path, monkeypatch):
+    """Observed on the calc run (node 8): the leaf's test passed on turn 13,
+    Dev spent turns 14-15 on extra checks and the episode ended on the cap
+    before mark_leaf_done -- so the finished leaf was re-split (~7 minutes).
+    Now a short wrap-up episode checks first."""
+    file_node = _calc(engine, tmp_path)
+    leaf = _node(engine, "task", file_node, "implement add(a, b) in calc/ops.py: sum", kind="implement")
+    tests = TESTS.replace(", total", "").split("\n\n\ndef test_total")[0] + "\n"
+    turns = [turn(call("replace_symbol", path="calc/ops.py", name="add", new_source=ADD_IMPL)),
+             turn(call("write_file", file_path="tests/test_ops.py", content=tests)),
+             turn(call("read_file", path="calc/ops.py")),  # extra checks until the cap
+             turn(call("mark_leaf_done", leaf_id=leaf, summary="done", test_id="tests/test_ops.py::test_add"))]
+    monkeypatch.setenv("MAX_EPISODE_TURNS", "3")
+    splits = []
+    imp, _ = _imp(engine, tmp_path, turns, replan=lambda: splits.append(1))
+    imp.run()
+
+    assert _status(engine, leaf).status == LeafStatus.DONE
+    assert splits == []
 
 
 def test_setup_is_fixed_first_and_the_finish_up_reports_leftover_markers(engine, tmp_path):

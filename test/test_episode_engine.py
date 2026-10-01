@@ -171,6 +171,17 @@ def test_turn_cap(engine):
     assert (result.end_reason, result.turns) == ("turn_cap", 3)
 
 
+def test_the_model_is_warned_two_turns_before_the_cap(engine):
+    """Observed on the calc run: a Dev leaf passed its test on turn 13 of 15,
+    spent the last two turns on extra checks, and the finished leaf was split
+    because the episode ended on the cap. The token budget already warned;
+    the turn cap didn't."""
+    llm = LLM()
+    _run(engine, Console([]), llm, max_turns=5)
+    warned_before = [any("2 turns left" in str(m.get("content")) for m in r["messages"]) for r in llm.requests]
+    assert warned_before == [False, False, False, True, True]
+
+
 def test_budget_stops_before_a_request_that_would_not_fit(engine):
     llm = LLM()
     result = _run(engine, Console([]), llm, budget=50)
@@ -255,7 +266,9 @@ def test_role_tool_sets_reference_known_roles_and_a_finish_tool():
     assert set(ROLE_CORE_TOOLS) == set(ROLES) == set(ROLE_ENV_PREFIXES)
     for role, names in ROLE_CORE_TOOLS.items():
         assert ("mark_leaf_done" if role == "dev" else "finish") in names
-        assert not set(names) & set(OPTIONAL_POOL) - {"start_background_process", "stop_background_process"}
+        # The reviewer always needs these; any other role can still load them.
+        assert not set(names) & set(OPTIONAL_POOL) - {"start_background_process", "stop_background_process",
+                                                      "check_page"}
 
 
 def test_core_tool_schemas_stay_small():

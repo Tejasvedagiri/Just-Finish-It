@@ -1,5 +1,6 @@
-"""The planner's two-score judge (JFI.planner.judge): the rule and base Laya,
-with an LLM tie-break. Laya is faked at its Router boundary and the LLM at
+"""The planner's two-score judge (JFI.planner.judge): the rule and Laya's
+sizing answer (can this task be solved within 20k tokens?), with an LLM
+tie-break. Laya is faked at its Router boundary and the LLM at
 its stream boundary -- CI has neither -- but every decision here is the real
 code: status mapping, agree / tie-break / rule-wins, the missing-Laya path and
 the UNLOAD_LLM_BEFORE_LAYA ordering around LM Studio."""
@@ -11,15 +12,14 @@ import pytest
 
 from JFI.planner import judge as judge_mod
 from JFI.planner.judge import (
-    AGREE, BREAKDOWN, GOOD, LLM, REDO, RULE, RULE_NO_LAYA, JudgeNode, LayaJudge, build_state, fallback_status,
+    AGREE, BREAKDOWN, GOOD, LLM, RULE, RULE_NO_LAYA, JudgeNode, LayaJudge, build_state, fallback_status,
 )
 
 
-def _answer(choice, confidence, redo="D"):
-    return {"answers": {
-        "verdict": {"choice": choice, "answer_confidence": confidence},
-        "redo_reason": {"choice": redo, "answer_confidence": 0.5},
-    }}
+def _answer(p_yes, confidence=None):
+    """Laya's noul answer: P(yes) and its calibrated confidence."""
+    confidence = max(p_yes, 1 - p_yes) if confidence is None else confidence
+    return {"answers": {"solvable": {"type": "noul", "noul": p_yes, "answer_confidence": confidence}}}
 
 
 class FakeRouter:
@@ -34,7 +34,7 @@ class FakeRouter:
         if self.events is not None:
             self.events.append("predict")
         self.batches.append(requests)
-        return [self.script[r["state"]["node"]] for r in requests]
+        return [self.script[r["state"]["input"].split("\n")[0].removeprefix("Task: ")] for r in requests]
 
 
 class FakeLLM:
@@ -68,9 +68,9 @@ def test_the_rule_never_redoes():
         fallback_status("dev")
 
 
-def test_one_laya_batch_per_judge_step_on_the_base_checkpoint():
+def test_one_laya_batch_per_judge_step_on_the_english_checkpoint():
     nodes = [JudgeNode(1, "task", "implement a()"), JudgeNode(2, "task", "implement b()")]
-    router = FakeRouter({"implement a()": _answer("A", 0.9), "implement b()": _answer("A", 0.9)})
+    router = FakeRouter({"implement a()": _answer(0.9), "implement b()": _answer(0.9)})
     made = []
     judge = LayaJudge("goal", router_factory=lambda: made.append(1) or router, log=lambda _: None)
 
@@ -80,11 +80,13 @@ def test_one_laya_batch_per_judge_step_on_the_base_checkpoint():
     assert len(made) == 1, "the Router is built once per session and kept loaded"
     assert len(router.batches) == 2, "one predict_batch per judge step"
     assert [r["model"] for r in router.batches[0]] == ["english", "english"]
+    assert router.batches[0][0]["questions"] == {
+        "solvable": {"type": "noul", "instructions": "Can this be solved with 20k tokens?"}}
 
 
 def test_agreement_decides_without_an_llm_call():
     llm = FakeLLM("1: GOOD")
-    router = FakeRouter({"build the news view": _answer("B", 0.51)})
+    router = FakeRouter({"build the news view": _answer(0.3, 0.6)})
     [v] = _judge(router, llm).judge([JudgeNode(1, "architect", "build the news view")])
 
     assert (v.status, v.decided_by, v.rule_status, v.laya_status) == (BREAKDOWN, AGREE, BREAKDOWN, BREAKDOWN)
@@ -100,8 +102,8 @@ def test_a_confident_disagreement_goes_to_the_llm_in_one_call_for_the_whole_step
                        files=["package.json", "index.html", ".gitignore"]),
              JudgeNode(2, "architect", "theme toggle in src/theme.js"),
              JudgeNode(3, "architect", "overview view")]
-    router = FakeRouter({nodes[0].description: _answer("A", 0.95), nodes[1].description: _answer("A", 0.9),
-                         nodes[2].description: _answer("B", 0.9)})
+    router = FakeRouter({nodes[0].description: _answer(0.95), nodes[1].description: _answer(0.9),
+                         nodes[2].description: _answer(0.1)})
     llm = FakeLLM("1: BREAKDOWN\n2: GOOD")
 
     v1, v2, v3 = _judge(router, llm).judge(nodes)
@@ -115,31 +117,31 @@ def test_a_confident_disagreement_goes_to_the_llm_in_one_call_for_the_whole_step
 
 def test_an_unsure_disagreement_keeps_the_rule(monkeypatch):
     llm = FakeLLM("1: GOOD")
-    router = FakeRouter({"allocation view": _answer("A", 0.74)})
+    router = FakeRouter({"allocation view": _answer(0.74)})
     [v] = _judge(router, llm).judge([JudgeNode(1, "architect", "allocation view")])
 
     assert (v.status, v.decided_by, v.laya_status, v.confidence) == (BREAKDOWN, RULE, GOOD, 0.74)
     assert llm.prompts == []
     monkeypatch.setenv("LAYA_MIN_CONFIDENCE", "0.7")
-    [v] = _judge(FakeRouter({"allocation view": _answer("A", 0.74)}), llm).judge(
+    [v] = _judge(FakeRouter({"allocation view": _answer(0.74)}), llm).judge(
         [JudgeNode(1, "architect", "allocation view")])
     assert v.decided_by == LLM
 
 
-def test_redo_comes_only_from_laya_through_the_tie_break():
-    node = JudgeNode(7, "task", "run npm run dev and open the browser")
-    router = FakeRouter({node.description: _answer("C", 0.9, redo="A")})
-    [v] = _judge(router, FakeLLM("1: REDO")).judge([node])
-    assert (v.status, v.redo_reason, v.decided_by) == (REDO, "operational", LLM)
-
-    [kept] = _judge(FakeRouter({node.description: _answer("C", 0.9, redo="A")}), FakeLLM("1: GOOD")).judge([node])
-    assert (kept.status, kept.redo_reason) == (GOOD, None)
+def test_laya_says_good_from_p_yes_0_4():
+    """The cut-off from the POC (docs/laya_poc.md): at 0.4 Laya gets 88% of the
+    nodes that had to be broken down right; 0.5 gave 67% overall."""
+    node = JudgeNode(1, "architect", "settings view")
+    [below] = _judge(FakeRouter({node.description: _answer(0.39)})).judge([node])
+    [at] = _judge(FakeRouter({node.description: _answer(0.40)})).judge([node])
+    assert (below.laya_status, below.p_yes) == (BREAKDOWN, 0.39)
+    assert at.laya_status == GOOD and at.redo_reason is None, "Laya answers GOOD or BREAKDOWN, never REDO"
 
 
 def test_an_unreadable_or_missing_tie_break_keeps_the_rule():
     node = JudgeNode(1, "architect", "settings view")
     for llm in (FakeLLM("I think it's fine"), FakeLLM("1: REDO"), None):  # REDO wasn't one of the two options
-        [v] = _judge(FakeRouter({node.description: _answer("A", 0.9)}), llm).judge([node])
+        [v] = _judge(FakeRouter({node.description: _answer(0.9)}), llm).judge([node])
         assert (v.status, v.decided_by, v.tiebreak_status) == (BREAKDOWN, RULE, None)
 
 
@@ -168,12 +170,20 @@ def test_a_failing_prediction_uses_the_rule_without_raising():
     assert (v.status, v.decided_by) == (BREAKDOWN, RULE_NO_LAYA)
 
 
-def test_state_keeps_the_node_text_when_trimming():
+def test_laya_reads_the_task_and_its_description_not_the_plans_labels():
+    """POC (docs/laya_poc.md): the old state -- goal, level, path, node,
+    done_when, files -- gave Laya labels it can't interpret (AUC 0.59); the
+    task and its description with the sizing question as the goal gave 0.76."""
     node = JudgeNode(1, "task", "implement search() in app/search.py", done_when="search('a') -> [a]",
-                     path=["p" * 2000])
-    state = build_state("g" * 5000, node)
-    assert state["node"] == node.description and state["done_when"] == node.done_when
-    assert sum(len(v) for v in state.values()) <= judge_mod.STATE_MAX_CHARS
+                     files=["app/search.py"], path=["the search component"],
+                     notes="Case-insensitive substring match over titles; empty query returns [].")
+    assert build_state(node) == {
+        "input": "Task: implement search() in app/search.py\n"
+                 "Description: Case-insensitive substring match over titles; empty query returns [].",
+        "goal": "Can this be solved with 20k tokens?"}
+    assert build_state(JudgeNode(2, "task", "x"))["input"] == "Task: x"
+    long = build_state(JudgeNode(3, "task", "y", notes="z" * 10_000))["input"]
+    assert len(long) == judge_mod.INPUT_MAX_CHARS and long.startswith("Task: y\nDescription: zzz")
 
 
 class FakeLMStudio:
@@ -198,7 +208,7 @@ def test_unload_flag_wraps_prediction_in_lmstudio_unload_and_reload(monkeypatch)
     monkeypatch.setenv("UNLOAD_LLM_BEFORE_LAYA", "true")
     events = []
     node = JudgeNode(1, "task", "implement a()")
-    router = FakeRouter({node.description: _answer("A", 0.9)}, events=events)
+    router = FakeRouter({node.description: _answer(0.9)}, events=events)
 
     [v] = _judge(router, lmstudio=FakeLMStudio(events)).judge([node])
     assert events == ["unload", "predict", "reload"]
@@ -220,20 +230,9 @@ def test_unload_flag_reloads_even_when_laya_fails(monkeypatch):
     assert v.decided_by == RULE_NO_LAYA
 
 
-def _head_tokens(tok, question):
-    """Mirrors laya.common.build_sequence's head layout: the instruction line,
-    then one [MASK] + "<key>: <text>" per option, each option capped at 48."""
-    instruction = len(tok.encode(f"{question['type']} question: {question['instructions']}",
-                                 add_special_tokens=False))
-    option_lengths = [len(tok.encode(f" {k}: {v}", add_special_tokens=False))
-                      for k, v in question["criteria"].items()]
-    return instruction, option_lengths
-
-
-def test_judge_questions_fit_laya_head_budget():
-    """Laya silently truncates an instruction that doesn't fit next to its
-    options in head_max_len -- a longer, clearer question would quietly lose
-    its end. Checked with the checkpoint's real tokenizer when it's in the
+def test_the_sizing_question_fits_layas_head_budget():
+    """Laya silently truncates a question that doesn't fit its head_max_len.
+    Checked with the English checkpoint's real tokenizer when it's in the
     local Hugging Face cache (skipped otherwise, e.g. in CI)."""
     import glob
     import json
@@ -241,28 +240,21 @@ def test_judge_questions_fit_laya_head_budget():
     transformers = pytest.importorskip("transformers")
     snaps = glob.glob(os.path.expanduser(
         "~/.cache/huggingface/hub/models--convaiinnovations--laya/snapshots/*/"))
-    if not snaps:
-        pytest.skip("Laya's checkpoint isn't in the local Hugging Face cache")
-    cfg_path = os.path.join(snaps[0], "rl_agent_config.json")
-    if not os.path.exists(cfg_path):
-        pytest.skip("Laya's checkpoint config isn't in the cache")
-    head_max_len = json.load(open(cfg_path))["head_max_len"]
+    if not snaps or not os.path.exists(os.path.join(snaps[0], "rl_agent_config.json")):
+        pytest.skip("Laya's English checkpoint isn't in the local Hugging Face cache")
+    head_max_len = json.load(open(os.path.join(snaps[0], "rl_agent_config.json")))["head_max_len"]
     tok = transformers.AutoTokenizer.from_pretrained(os.path.join(snaps[0], "tokenizer"))
-    for question in [*judge_mod.QUESTIONS_BY_LEVEL.values(), judge_mod.REDO_QUESTION]:
-        instruction, options = _head_tokens(tok, question)
-        assert max(options) <= 48, (question["instructions"][:40], max(options))
-        room = head_max_len - sum(1 + n for n in options)
-        assert instruction <= room, (question["instructions"][:40], instruction, room)
+    for question in judge_mod.QUESTIONS.values():
+        used = len(tok.encode(f"{question['type']} question: {question['instructions']}", add_special_tokens=False))
+        assert used + 1 <= head_max_len, (question["instructions"], used, head_max_len)
 
 
-def test_each_level_gets_its_own_verdict_question():
+def test_every_level_gets_the_same_sizing_question():
     nodes = [JudgeNode(1, "architect", "a"), JudgeNode(2, "lead", "b"), JudgeNode(3, "task", "c")]
-    router = FakeRouter({"a": _answer("B", 0.9), "b": _answer("B", 0.9), "c": _answer("A", 0.9)})
-    _judge(router).judge(nodes)
-    sent = {r["state"]["level"]: r["questions"]["verdict"]["instructions"] for r in router.batches[0]}
-    assert sent["architect"].startswith("You are a lead")
-    assert sent["lead"].startswith("You are a task planner")
-    assert sent["task"].startswith("You are a developer")
+    router = FakeRouter({"a": _answer(0.1), "b": _answer(0.2), "c": _answer(0.8)})
+    verdicts = _judge(router).judge(nodes)
+    assert len({str(r["questions"]) for r in router.batches[0]}) == 1
+    assert [(v.status, v.decided_by) for v in verdicts] == [(BREAKDOWN, AGREE), (BREAKDOWN, AGREE), (GOOD, AGREE)]
 
 
 def test_laya_runs_only_when_the_flag_is_set(monkeypatch):

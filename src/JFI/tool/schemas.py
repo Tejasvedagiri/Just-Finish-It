@@ -109,8 +109,7 @@ TOOL_SCHEMAS = [
         "function": {
             "name": "replace_in_file",
             "description": (
-                "Replaces one exact substring in a file, leaving the rest untouched. This is the "
-                "correct way to tick a checkbox (e.g. '- [ ] 1.1 Foo' -> '- [x] 1.1 Foo') or to "
+                "Replaces one exact substring in a file, leaving the rest untouched: the way to "
                 "patch a few lines. Prefer this over rewriting a whole file with write_file. "
                 "old_string must match exactly once, including whitespace."
             ),
@@ -154,8 +153,7 @@ TOOL_SCHEMAS += [
                     "directory": {
                         "type": "string",
                         "description": (
-                            "Where to save the screenshot — pass your session's .jfi/<session> "
-                            "folder."
+                            "Where to save the screenshot, e.g. the project's .jfi folder."
                         )
                     }
                 },
@@ -207,8 +205,7 @@ TOOL_SCHEMAS += [
                     "directory": {
                         "type": "string",
                         "description": (
-                            "Where to save downloaded images — pass your session's "
-                            ".jfi/<session> folder."
+                            "Where to save downloaded images, e.g. the project's .jfi folder."
                         )
                     },
                     "max_images": {
@@ -219,6 +216,39 @@ TOOL_SCHEMAS += [
                 "required": ["url", "directory"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_page",
+            "description": (
+                "A web page's end-to-end check: loads the URL in a headless browser, waits for the network to "
+                "settle, and reports console errors, uncaught exceptions and failed or 4xx/5xx requests, plus "
+                "the visible text and a screenshot path. Start the app first (the runbook's run command, as a "
+                "background process), then check the runbook's view URL; a static page with no server can be "
+                "checked as a file:/// URL."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "url": {"type": "string", "description": "e.g. the runbook's view URL, http://localhost:5173"},
+                "timeout": {"type": "integer", "description": "seconds to wait for the page (default 15)"},
+            }, "required": ["url"]},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "http_request",
+            "description": (
+                "Call an HTTP API the project serves and get the status, key headers and the body (JSON "
+                "pretty-printed). Use it instead of curl through execute_command."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "method": {"type": "string", "description": "GET, POST, PUT, PATCH or DELETE"},
+                "url": {"type": "string"},
+                "body": {"type": "string", "description": "request body; JSON is sent as application/json"},
+                "headers": {"type": "object", "description": "extra request headers"},
+            }, "required": ["method", "url"]},
+        },
     },
     {
         "type": "function",
@@ -302,8 +332,7 @@ TOOL_SCHEMAS += [
                     "directory": {
                         "type": "string",
                         "description": (
-                            "Where to save the extracted frames -- pass your session's "
-                            ".jfi/<session> folder."
+                            "Where to save the extracted frames, e.g. the project's .jfi folder."
                         )
                     },
                     "max_frames": {
@@ -515,11 +544,10 @@ TOOL_SCHEMAS += [
         "function": {
             "name": "write_review_report",
             "description": (
-                "Records that the finished work has real problems, triggering another full "
-                "planner -> imp -> testing -> reviewer iteration. Only call this when you found "
-                "genuine issues after personally re-running the project's own mechanical checks — "
-                "a good review needs no call here at all, just reply with a short 'Review: PASS' "
-                "summary instead."
+                "Records work the plan never covered, which starts another planner -> imp -> "
+                "reviewer iteration to add it. A bug in code that was built goes to reopen_leaf "
+                "instead, and a pass is finish (which re-runs the e2e itself). Only call this for "
+                "genuine gaps you confirmed by running the project's own checks."
             ),
             "parameters": {
                 "type": "object",

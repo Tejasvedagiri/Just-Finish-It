@@ -829,6 +829,145 @@ def search_code(root: Path, pattern: str, path: str = ".", regex: bool = False) 
     return cap_result(f"{len(hits)} match(es):\n" + "\n".join(hits), "Narrow the pattern or pass a path.")
 
 
+_STRING_LITERAL = re.compile(r"""(['"`])(?:\\.|(?!\1).)*\1""")
+_IMPORT_LINE = re.compile(r"^\s*(?:import\b|from\b|export\s+\{|(?:const|let|var)\s+.*\brequire\()")
+_CODE_COMMENT = ("#", "//", "/*", "*", "<!--", "--")
+
+
+def find_references(root: Path, name: str, path: str = ".") -> str:
+    """Where a function or class is defined, imported and called, from the
+    same parsers as read_symbol. A change or delete leaf needs every caller;
+    search_code also returns comments, strings and look-alike names."""
+    if not re.fullmatch(r"[A-Za-z_$][\w$]*", name or ""):
+        return f"Error: {name!r} isn't a function or class name."
+    base, error = resolve_path(root, path) if path not in (".", "") else (Path(root).resolve(), "")
+    if error:
+        return error
+    word = re.compile(rf"(?<![\w$]){re.escape(name)}(?![\w$])")
+    groups = {"definition": [], "import": [], "call": [], "other use": []}
+    files = [base] if base.is_file() else _walk(root, base)
+    for file in files:
+        if _suffix(file) not in PYTHON and _suffix(file) not in BRACE_LANGS and _suffix(file) not in HTML_LIKE:
+            continue
+        try:
+            text = file.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if not word.search(text):
+            continue
+        rel = file.relative_to(Path(root).resolve()).as_posix()
+        starts = {start for symbol, start, _ in _symbols(file, text) if symbol == name}
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            code = _STRING_LITERAL.sub('""', line)
+            if not word.search(code) or line.lstrip().startswith(_CODE_COMMENT):
+                continue
+            if any(start <= i < start + 4 for start in starts) and re.search(
+                    rf"\b(def|class|function|func|fn|const|let|var)\s+{re.escape(name)}\b", code):
+                kind = "definition"
+            elif _IMPORT_LINE.search(code):
+                kind = "import"
+            elif re.search(rf"(?<![\w$]){re.escape(name)}\s*\(", code):
+                kind = "call"
+            else:
+                kind = "other use"
+            groups[kind].append(f"{rel}:{i + 1}: {line.strip()[:160]}")
+    found = sum(len(v) for v in groups.values())
+    if not found:
+        return f"No references to {name} (comments and strings don't count)."
+    parts = [f"{found} reference(s) to {name}:"]
+    for kind, hits in groups.items():
+        if hits:
+            parts.append(f"{kind}s ({len(hits)}):" if kind != "other use" else f"other uses ({len(hits)}):")
+            parts.extend(f"  {h}" for h in hits)
+    return cap_result("\n".join(parts), "Pass a path to look in one folder or file.")
+
+
+_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def _patch_files(diff: str):
+    """[(old_path, new_path, [hunk lines...])] from a unified diff."""
+    files, current = [], None
+    for line in diff.replace("\r\n", "\n").rstrip("\n").split("\n"):
+        if line.startswith("--- "):
+            current = [line[4:].split("\t")[0].strip(), None, []]
+            files.append(current)
+        elif line.startswith("+++ ") and current is not None and current[1] is None:
+            current[1] = line[4:].split("\t")[0].strip()
+        elif current is not None and current[1] is not None and (line.startswith(("@@", " ", "+", "-")) or line == ""):
+            current[2].append(line)
+    return files
+
+
+def _strip_prefix(path: str) -> str:
+    return path[2:] if path.startswith(("a/", "b/")) else path
+
+
+def apply_patch(root: Path, diff: str) -> str:
+    """Several edits across one or more files in one call, from a unified
+    diff -- all or nothing: every hunk must match the file's current text
+    exactly once, or no file is written. Modify leaves spent many turns on
+    one replace_in_file per spot, and the turn cap is what ends episodes."""
+    files = _patch_files(diff or "")
+    if not files:
+        return "Error: no unified diff found (expected '--- a/file', '+++ b/file' and '@@ ... @@' hunks)."
+    writes = {}
+    for old_name, new_name, body in files:
+        deleting = new_name == "/dev/null"
+        name = _strip_prefix(old_name if deleting else new_name)
+        target, error = resolve_path(root, name)
+        if error:
+            return error
+        creating = old_name == "/dev/null"
+        if creating:
+            text = ""
+        else:
+            if not target.is_file():
+                return f"Error: {name} doesn't exist; nothing was changed."
+            text = writes.get(target, target.read_text(encoding="utf-8"))
+        hunks, hunk = [], None
+        for line in body:
+            if line.startswith("@@"):
+                if not _HUNK.match(line):
+                    return f"Error: bad hunk header {line!r} in {name}; nothing was changed."
+                hunk = ([], [])
+                hunks.append(hunk)
+            elif hunk is not None:
+                tag, rest = (line[:1], line[1:]) if line else (" ", "")
+                if tag in (" ", "-"):
+                    hunk[0].append(rest)
+                if tag in (" ", "+"):
+                    hunk[1].append(rest)
+        if not hunks:
+            return f"Error: no hunks for {name}; nothing was changed."
+        if deleting:
+            writes[target] = None
+            continue
+        lines = text.split("\n")
+        for old_lines, new_lines in hunks:
+            if creating:
+                lines = new_lines + [""]
+                continue
+            # Whole lines, never substrings: "z = 3" must not match inside "z = 30".
+            size = len(old_lines)
+            at = [i for i in range(len(lines) - size + 1) if size and lines[i:i + size] == old_lines]
+            if len(at) != 1:
+                where = "isn't in" if not at else f"matches {len(at)} places in"
+                return (f"Error: a hunk {where} {name} (its - and context lines must match the file exactly, "
+                        f"once); nothing was changed. read_file the spot and resend the diff.")
+            lines[at[0]:at[0] + size] = new_lines
+        writes[target] = "\n".join(lines)
+    for target, text in writes.items():
+        if text is None:
+            target.unlink()
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+    names = ", ".join(t.relative_to(Path(root).resolve()).as_posix() for t in writes)
+    return f"Applied the patch to {len(writes)} file(s): {names}."
+
+
 def list_dir(root: Path, path: str = ".") -> str:
     base, error = resolve_path(root, path) if path not in (".", "") else (Path(root).resolve(), "")
     if error:
@@ -878,6 +1017,8 @@ def make_code_tools(root: Path) -> Dict[str, Callable]:
         "replace_symbol": lambda path, name, new_source: replace_symbol(root, path, name, new_source),
         "list_symbols": lambda path: list_symbols(root, path),
         "search_code": lambda pattern, path=".", regex=False: search_code(root, pattern, path, regex),
+        "find_references": lambda name, path=".": find_references(root, name, path),
+        "apply_patch": lambda diff: apply_patch(root, diff),
         "list_dir": lambda path=".": list_dir(root, path),
         "read_file": lambda path, start=None, end=None: read_file_range(root, path, start, end),
         "outline_file": lambda path=".": outline_file(root, path),
@@ -924,6 +1065,13 @@ CODE_TOOL_SCHEMAS = [
         "JFI stubs or marked for change/delete.", {"path": _PATH}, ["path"]),
     _fn("search_code", "Search the project's files for text (or a regex) and get file:line matches.",
         {"pattern": {"type": "string"}, "path": _PATH, "regex": {"type": "boolean"}}, ["pattern"]),
+    _fn("find_references", "Where a function or class is defined, imported and called across the project (or "
+        "under path) -- comments and strings excluded. Use it before changing or deleting a function.",
+        {"name": {"type": "string"}, "path": _PATH}, ["name"]),
+    _fn("apply_patch", "Apply a unified diff (--- a/file, +++ b/file, @@ hunks) to one or more files in one call. "
+        "All or nothing: every hunk's - and context lines must match the file exactly once, or nothing is "
+        "written. Use it for several edits at once instead of many replace_in_file calls.",
+        {"diff": {"type": "string"}}, ["diff"]),
     _fn("list_dir", "List one directory level of the project.", {"path": _PATH}, []),
     _fn("read_file", "Read a text file, or a numbered line range of it (start/end, 1-based, inclusive). Prefer "
         "read_symbol for one function.", {"path": _PATH, "start": {"type": "integer"}, "end": {"type": "integer"}},

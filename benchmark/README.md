@@ -107,10 +107,18 @@ top-level -- not nested under `verify`; seconds allowed for `verify.command` its
 ## Running it
 
 ```bash
-uv run build   # make sure dist/jfi reflects the current source
+uv run build   # make sure dist/jfi/ reflects the current source
 python3 benchmark/harness.py --tier polyglot --projects-root /tmp/jfi-bench-runs
 python3 benchmark/score.py /tmp/jfi-bench-runs
 ```
+
+JFI reads its settings from a `.env` in the project folder or any folder above it, so one
+`.env` in the projects root covers every task -- `uv run create-env` writes one. With
+`AUTO_APPROVE_COMMANDS=1` the approval gate never comes up.
+
+On Windows the harness drives JFI through ConPTY instead of tmux and needs pywinpty
+(`pip install pywinpty`, or `uv run --with pywinpty python benchmark/harness.py ...`);
+`run_all.sh` is POSIX-only, so run `harness.py` and `score.py` directly there.
 
 Or, to run every tier unattended in the background and score automatically when done, use
 `run_all.sh` (logs to `$PROJECTS_ROOT/bench_run.log`, defaults to `benchmark/runs/` --
@@ -127,23 +135,24 @@ tmux ls                                 # one bench-<task_id> session per task, 
 `BENCH_TIER=polyglot sh benchmark/run_all.sh` runs just one tier; `BENCH_TIMEOUT=1200` lowers
 the per-task timeout (default 2700s/45min).
 
-`harness.py` drives JFI through a real tmux pty (its console is a full-screen TUI with no
-non-interactive mode), answers the two startup prompts (session name, goal), and -- this is
+`harness.py` drives JFI through a real terminal -- tmux on Linux/macOS, ConPTY on Windows
+(its console is a full-screen TUI with no non-interactive mode) -- answers the two startup prompts (session name, goal), and -- this is
 the part that actually matters for an *unattended* run -- auto-answers two blocking menus
 that would otherwise silently stall a run until timeout: the "Retry, or stop the run?" menu
 after an LLM-backend failure, and JFI's own `execute_command` approval gate. Both were found
 live, mid-development-of-this-benchmark, running the exact same task against a local model.
 
-`score.py` then combines the harness's pass/fail with metrics scraped from JFI's own
-artifacts (`run.log`, `history.jsonl.gz`, `plan.md`) -- see its docstring for exactly which
-metrics and why. As one concrete example of why the process metrics matter even when the
-final pass/fail is all that "counts": a real session run against `google/gemma-4-12b`
-during this work never finished, and `score.py` reconstructs the whole failure automatically
-from the raw artifacts -- 19 wholesale rewrites of `plan.md` instead of resuming it, 10
-reasoning-only dead turns, 9 local-LLM-backend crashes -- the same diagnosis that took manual
-transcript reading to find the first time, now a five-second `score.py` call. A task that
-merely reports PASS/FAIL would have logged this run as an unremarkable failure and thrown
-away the only interesting part.
+`score.py` then combines the harness's pass/fail with metrics read from the project's own
+database, `.jfi/JFI.db` (read-only, plain `sqlite3`): which phases completed, the plan's
+shape and how many leaves finished, how the judge settled the nodes, episodes per role and
+how they ended (`budget` / `turn_cap` endings are overflows), Dev's attempts, reopened
+leaves and deferrals, and the tool-call error rate per tool -- see its docstring for why
+each one. The process metrics matter even when pass/fail is all that "counts": on the stui
+run, a planner that never finished shows up as 63 of 63 leaves left and 13 episodes that
+ran out of turns, where a bare FAIL would have thrown that away.
+
+`benchmark/test_score.py` checks the scorer against a database built with JFI's own models
+(`uv run pytest benchmark/test_score.py`), so a schema change that breaks it shows up there.
 
 ## Evaluation methodology -- how each tier is actually graded, and how honest that grading is
 

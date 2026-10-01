@@ -1,7 +1,5 @@
-"""``uv run export-db`` -- dumps a project's `.jfi/JFI.db` (see JFI.models,
-which covers everything that used to live under a session's own
-JFI/<session>/ folder except .lock) back into plain text files a human can
-read, one pair per session.
+"""``uv run export-db`` -- dumps a project's `.jfi/JFI.db` (see JFI.models)
+into plain text files a human can read, one pair per session.
 
 **Debugging only.** This is a one-way, read-only export: JFI itself never
 reads these files back. The entire point of the DB rewrite was retiring
@@ -146,6 +144,10 @@ def _render_plan_export(session_id: str, engine) -> str:
                 bits = [leaf.level, leaf.kind, display_status(leaf.plan_status, bool(children)) or "unjudged"]
                 if leaf.done_when:
                     bits.append(f"done when: {leaf.done_when}")
+                if leaf.notes:
+                    bits.append(f"notes: {leaf.notes}")
+                if leaf.references:
+                    bits.append(f"refs: {', '.join(leaf.references)}")
                 if leaf.depends_on:
                     bits.append(f"depends on {leaf.depends_on}")
                 if leaf.review_status:

@@ -42,7 +42,7 @@ from JFI.planner.nodes import (
 )
 from JFI.planner.prompts import ROLE_PROMPTS
 from JFI.tool.code_tools import make_code_tools
-from JFI.tool.design_tools import design_index, make_design_tools
+from JFI.tool.design_tools import design_index, make_design_tools, references_text
 from JFI.tool.note_tools import add_reviewer_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.runbook_tools import make_runbook_tools, runbook_index
@@ -52,7 +52,13 @@ NEXT_ROLE = {"architect": "lead", "lead": "task", "task": "task"}
 DEFAULT_REDO_CAP = 2
 DEFAULT_MAX_PLANNER_EPISODES = 200
 ARCHITECT_CONTINUATIONS = 2
-REQUIRED_RUNBOOK = ("setup", "run", "test", "test_one", "build", "e2e")
+# The project's layout lives in the runbook too (src_dir, test_dir, test_naming):
+# on the QA machine the Lead prompt's colocated example put chart-bar.test.js
+# beside its source while the Architect's test_one ran __tests__/{test_id}.test.js,
+# so those tests could never be run through test_one. `script` runs scratch code
+# from a file instead of inline python -c / node -e.
+REQUIRED_RUNBOOK = ("setup", "run", "test", "test_one", "build", "e2e", "script", "src_dir", "test_dir",
+                    "test_naming")
 GOAL_MAX_CHARS = 16_000  # ~4k tokens, a small share of an episode on a 32k window
 FEEDBACK_MAX_CHARS = 12_000
 
@@ -167,7 +173,7 @@ class Planner:
         by_id = {n.id: n for n in all_nodes}
         verdicts = self.judge.judge([
             JudgeNode(n.id, n.level, n.description, done_when=n.done_when or "", files=n.files or [],
-                      path=path_of(by_id, n)) for n in nodes])
+                      path=path_of(by_id, n), notes=n.notes or "") for n in nodes])
         for v in verdicts:
             node = by_id[v.node_id]
             status = v.status
@@ -199,12 +205,12 @@ class Planner:
             db.commit()
 
     def _record_verdict(self, node: Leaf, v, final_status: str) -> None:
-        verdict = v.answers.get("verdict", {})
         with get_session(self.engine) as db:
             db.add(PlannerVerdict(
                 session_id=self.session_id, node_id=node.id, level=node.level,
                 laya_model=CHECKPOINT if v.laya_status else None, laya_verdict=v.laya_status,
-                laya_redo_reason=v.redo_reason, probabilities=verdict.get("probabilities"),
+                laya_redo_reason=v.redo_reason,
+                probabilities={"yes": v.p_yes} if v.p_yes is not None else None,
                 answer_confidence=v.confidence, rule_verdict=v.rule_status, tiebreak_verdict=v.tiebreak_status,
                 decided_by=v.decided_by, final_status=final_status))
             db.commit()
@@ -308,7 +314,9 @@ class Planner:
         else:
             anchor = ScopeAnchor(role=role, node_id=node.id, node=node.description, done_when=node.done_when or "",
                                  files=node.files or [], path=path_of(by_id, node),
-                                 finish=f"{ROLE_FINISH_TOOL[role]}({node.id}, summary)", reason=reason)
+                                 finish=f"{ROLE_FINISH_TOOL[role]}({node.id}, summary)", reason=reason,
+                                 notes=node.notes or "",
+                                 references=references_text(self.engine, self.session_id, node.references))
         scope_id = node.id if node is not None else None
         impl = {**self.pool_tools(role),
                 **make_node_tools(self.engine, self.session_id, role, scope_id),
@@ -342,8 +350,9 @@ class Planner:
             if not load_nodes(self.engine, self.session_id):
                 missing.append("the plan has no nodes yet (add_node every component)")
             with get_session(self.engine) as db:
-                runbook = {r.name: r.command for r in db.exec(
-                    select(RunbookEntry).where(RunbookEntry.session_id == self.session_id))}
+                entries = list(db.exec(select(RunbookEntry).where(RunbookEntry.session_id == self.session_id)))
+                runbook = {r.name: r.command for r in entries}
+                notes = {r.name: r.notes for r in entries}
                 stack = db.exec(select(DesignEntry).where(DesignEntry.session_id == self.session_id,
                                                           DesignEntry.kind == "stack")).first()
                 contracts = db.exec(select(DesignEntry).where(DesignEntry.session_id == self.session_id,
@@ -362,6 +371,10 @@ class Planner:
                 missing.append(f"runbook entries {', '.join(absent)} (runbook_set)")
             if "test_one" in runbook and "{test_id}" not in runbook["test_one"]:
                 missing.append("a {test_id} placeholder in test_one's command")
+            elif "test_one" in runbook and not notes.get("test_one"):
+                missing.append("test_one's notes with one example test id (Dev passes only the id)")
+            if "script" in runbook and "{file}" not in runbook["script"]:
+                missing.append("a {file} placeholder in script's command")
             top_level = [n for n in load_nodes(self.engine, self.session_id) if n.parent_id is None]
             if len(top_level) >= 3 and not contracts:
                 # Observed on the stui run: 16 components and no contract, so

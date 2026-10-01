@@ -37,20 +37,22 @@ from JFI.episode.budget import episode_token_budget
 from JFI.episode.engine import run_episode
 from JFI.episode.roles import ROLE_ENV_PREFIXES
 from JFI.episode.tools import EpisodeTools
-from JFI.imp.prompts import FINISH_UP, PARTIAL_ATTEMPT, SETUP, dev_prompt
+from JFI.imp.prompts import FINISH_UP, PARTIAL_ATTEMPT, SETUP, WRAP_UP, WRAP_UP_REASON, dev_prompt
 from JFI.imp.queue import FINISHED, dev_leaves, next_leaf
 from JFI.models import Leaf, PlanEvent, RunbookEntry, build_indexes, display_number, get_session
 from JFI.models._util import utcnow
 from JFI.models.enums import LeafStatus
 from JFI.planner.nodes import BREAKDOWN, children_of, load_nodes, path_of, target_symbol
+from JFI.tool.checkpoint_tools import checkpoint, ensure_baseline
 from JFI.tool.code_tools import DOC_SUFFIXES, _symbols, make_code_tools, resolve_path, scan_markers
-from JFI.tool.design_tools import design_index, make_design_tools
+from JFI.tool.design_tools import design_index, make_design_tools, references_text
 from JFI.tool.note_tools import add_reviewer_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.result_cap import cap_result
 from JFI.tool.runbook_tools import make_runbook_tools, runbook_index, runbook_set
 
 DEFAULT_MAX_DEV_ATTEMPTS = 3
+WRAP_UP_TURNS = 3
 MAX_DEFERRALS = 3  # two leaves whose tests each reach the other's stub would otherwise swap forever
 COMMAND_TIMEOUT_SECONDS = 600
 OUTPUT_TAIL_CHARS = 4000
@@ -146,6 +148,31 @@ def _passage_problem(document: Path, before: tuple[int, int], done_when: str) ->
     return None
 
 
+def _test_id_problem(test_id: str, test_one) -> Optional[str]:
+    """A test_id that is really a command or a file path. Observed on the QA
+    machine: Dev passed "npx vitest run __tests__/loader.test.js", the gate
+    put it into test_one ("npx vitest run __tests__/{test_id}.test.js") and
+    ran "npx vitest run __tests__/npx vitest run __tests__/loader.test.js.test.js"."""
+    template = test_one.command
+    if "{test_id}" not in template:
+        return None
+    before, after = template.split("{test_id}", 1)
+    prefix = before.split()[-1] if before and not before.endswith(" ") else ""
+    suffix = after.split()[0] if after and not after.startswith(" ") else ""
+    fixed = test_id.strip()
+    if " " in fixed:
+        fixed = fixed.split()[-1]
+    if prefix and fixed.startswith(prefix):
+        fixed = fixed[len(prefix):]
+    if suffix and fixed.endswith(suffix):
+        fixed = fixed[:-len(suffix)]
+    if fixed == test_id:
+        return None
+    notes = f" Its notes: {test_one.notes.rstrip('. ')}." if test_one.notes else ""
+    return (f"Error: test_id is only the id that goes into test_one's {{test_id}}: `{template}`.{notes} "
+            f"You passed {test_id!r}; try test_id={fixed!r}.")
+
+
 def _epoch(moment) -> Optional[float]:
     """A stored (naive UTC, see JFI.models._util) datetime as time.time()."""
     return moment.replace(tzinfo=timezone.utc).timestamp() if moment else None
@@ -166,6 +193,7 @@ class Imp:
     # ---------------------------------------------------------------- run
 
     def run(self) -> ImpResult:
+        ensure_baseline(self.root, self.session_id)
         if not self._setup():
             return ImpResult(False, self.episodes, "stopped")
         while True:
@@ -216,10 +244,35 @@ class Imp:
         if after.status == LeafStatus.DONE:
             return True
         if result.end_reason in ("budget", "turn_cap"):
+            # Observed on the calc run: the leaf's test had passed, but the
+            # episode ended on the turn cap before mark_leaf_done, and the
+            # finished leaf was re-split (~7 minutes). One short wrap-up first.
+            self._wrap_up(after, title, result.end_reason)
+            after = self._leaf(leaf.id)
+            if after.status == LeafStatus.DONE:
+                self.console.record_task_tokens(title, after.tokens or 0, _epoch(after.started_at),
+                                                _epoch(after.ended_at), phase="imp")
+                return True
             self._event(leaf.id, "overflow", f"dev ended on {result.end_reason}")
             self._split(after)
             return True
         return result.end_reason != "error"
+
+    def _wrap_up(self, leaf: Leaf, title: str, reason: str) -> None:
+        nodes = load_nodes(self.engine, self.session_id)
+        by_id = {n.id: n for n in nodes}
+        anchor = ScopeAnchor(role="dev", node_id=leaf.id, node=leaf.description, done_when=leaf.done_when or "",
+                             files=leaf.files or [], path=path_of(by_id, leaf),
+                             reason=WRAP_UP_REASON.format(reason=reason), notes=leaf.notes or "",
+                             references=references_text(self.engine, self.session_id, leaf.references),
+                             finish=f"mark_leaf_done({leaf.id}, summary, test_id=... or check=...)")
+        result = self._episode(anchor, WRAP_UP, self._mark_leaf_done(leaf), "wrap-up", task=title,
+                               max_turns=WRAP_UP_TURNS)
+        with get_session(self.engine) as db:
+            row = db.get(Leaf, leaf.id)
+            row.tokens = (row.tokens or 0) + result.tokens
+            db.add(row)
+            db.commit()
 
     def _split(self, leaf: Leaf) -> None:
         with get_session(self.engine) as db:
@@ -258,6 +311,9 @@ class Imp:
                 if test_one is None:
                     return ('Error: the runbook has no test_one entry. runbook_set("test_one", "<command with '
                             '{test_id}>") for this stack, or pass check="<command>" instead.')
+                problem = _test_id_problem(test_id, test_one)
+                if problem:
+                    return problem
                 command = test_one.command.replace("{test_id}", test_id)
             elif check:
                 command = check
@@ -303,6 +359,7 @@ class Imp:
         with get_session(self.engine) as db:
             row = db.get(Leaf, leaf_id)
             row.status, row.ended_at, row.fix_note = LeafStatus.DONE, utcnow(), None
+            row.checkpoint = checkpoint(self.root, self.session_id, f"leaf {leaf_id}: {row.description}")                 or row.checkpoint
             db.add(row)
             db.commit()
 
@@ -324,6 +381,8 @@ class Imp:
             why.append(PARTIAL_ATTEMPT.format(files=", ".join(leaf.files or []) or "its files"))
         anchor = ScopeAnchor(role="dev", node_id=leaf.id, node=leaf.description, done_when=leaf.done_when or "",
                              files=leaf.files or [], path=path_of(by_id, leaf), reason=" ".join(why),
+                             notes=leaf.notes or "",
+                             references=references_text(self.engine, self.session_id, leaf.references),
                              finish=f"mark_leaf_done({leaf.id}, summary, test_id=... or check=...)")
         return self._episode(anchor, dev_prompt(leaf.kind, leaf.description), self._mark_leaf_done(leaf), "leaf",
                              task=title)
@@ -350,7 +409,7 @@ class Imp:
         return self._episode(anchor, prompt, mark_leaf_done, mode)
 
     def _episode(self, anchor: ScopeAnchor, prompt: str, finish_tool: Callable, mode: str,
-                 task: Optional[str] = None):
+                 task: Optional[str] = None, max_turns: Optional[int] = None):
         self.episodes += 1
         impl = {**self.base_tools,
                 **make_runbook_tools(self.engine, self.session_id, "dev"),
@@ -365,7 +424,7 @@ class Imp:
         return run_episode(self.llm, self.console, self.engine, self.session_id, role="dev", mode=mode,
                            anchor=anchor, system_message=system,
                            tools=EpisodeTools("dev", impl, extra_schemas=[MARK_LEAF_DONE_SCHEMA]),
-                           budget=episode_token_budget(ROLE_ENV_PREFIXES["dev"]))
+                           budget=episode_token_budget(ROLE_ENV_PREFIXES["dev"]), max_turns=max_turns)
 
     # ---------------------------------------------------------------- setup / finish-up
 

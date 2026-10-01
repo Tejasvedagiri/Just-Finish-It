@@ -29,12 +29,18 @@ def table_registry() -> dict:
     from JFI.models import (
         BackgroundProcess,
         ContextEntry,
+        DesignEntry,
+        Directive,
         DonePhase,
+        Episode,
         HistoryMessage,
         ImplementedFile,
         Leaf,
         LogEvent,
+        PlanEvent,
+        PlannerVerdict,
         QueuedItem,
+        RunbookEntry,
         SessionNote,
         SessionRecord,
         UnlockedTool,
@@ -52,6 +58,13 @@ def table_registry() -> dict:
         "ImplementedFile": ImplementedFile,
         "BackgroundProcess": BackgroundProcess,
         "DonePhase": DonePhase,
+        # The episode pipeline's tables (they were missing from the Session DB tab).
+        "Episode": Episode,
+        "PlannerVerdict": PlannerVerdict,
+        "PlanEvent": PlanEvent,
+        "RunbookEntry": RunbookEntry,
+        "DesignEntry": DesignEntry,
+        "Directive": Directive,
     }
 
 

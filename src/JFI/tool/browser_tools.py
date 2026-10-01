@@ -52,10 +52,18 @@ MAX_TEXT_CHARS = 8000
 # in a normal (non-frozen) install — see the module docstring for why a
 # frozen build needs it set explicitly rather than left to Playwright's own
 # lookup.
-_DEFAULT_BROWSERS_PATH = (
-    "~/Library/Caches/ms-playwright" if sys.platform == "darwin" else "~/.cache/ms-playwright"
-)
-os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.path.expanduser(_DEFAULT_BROWSERS_PATH))
+#
+# Windows has its own default (%LOCALAPPDATA%\ms-playwright). Observed: with
+# the Linux path forced here on Windows, `playwright install chromium`
+# succeeded but every browser tool still reported the browser missing.
+if sys.platform == "darwin":
+    _DEFAULT_BROWSERS_PATH = os.path.expanduser("~/Library/Caches/ms-playwright")
+elif sys.platform == "win32":
+    _DEFAULT_BROWSERS_PATH = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~/AppData/Local")),
+                                          "ms-playwright")
+else:
+    _DEFAULT_BROWSERS_PATH = os.path.expanduser("~/.cache/ms-playwright")
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", _DEFAULT_BROWSERS_PATH)
 
 
 def browse_webpage(
@@ -250,3 +258,69 @@ def browse_webpage(
             eval_section = f"\n\nEval result ({eval_js!r}): {eval_result!r}"
 
     return header + body + footer + eval_section
+
+
+CHECK_TEXT_CHARS = 3000
+
+
+def check_page(url: str, screenshot_dir: str = ".jfi/screens", timeout: int = NAV_TIMEOUT_SECONDS_DEFAULT) -> str:
+    """A web page's end-to-end check: load it in a headless browser, wait for
+    the network to settle, and report console errors, uncaught exceptions and
+    failed or 4xx/5xx requests, with the visible text and a screenshot. For a
+    web app (stui), passing unit tests didn't mean the page worked."""
+    # Observed on the react_counter run: the page was a plain index.html with no
+    # server, the reviewer's file:// check_page was refused, and it started a
+    # throwaway http.server just to look at it. A local file is fine to open.
+    if urlparse(url).scheme not in ("http", "https", "file"):
+        return f"Error: only http, https and file URLs are supported, not {url!r}."
+    try:
+        from playwright.sync_api import Error as PlaywrightError
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "Error: check_page needs the 'playwright' package, which is not installed here."
+    problems, failed = [], []
+    timeout_ms = max(1, int(timeout)) * 1000
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch()
+            except PlaywrightError as e:
+                if "executable doesn't exist" in str(e).lower():
+                    return ("Error: Chromium's browser binary is not installed. Run `playwright install chromium` "
+                            "(via execute_command) once, then retry.")
+                return f"Error launching the browser: {e}"
+            try:
+                page = browser.new_page()
+                page.on("console", lambda m: problems.append(f"console {m.type}: {m.text}")
+                        if m.type in ("error", "warning") else None)
+                page.on("pageerror", lambda e: problems.append(f"uncaught exception: {e}"))
+                page.on("requestfailed", lambda r: failed.append(f"{r.method} {r.url} -- {r.failure}"))
+                page.on("response", lambda r: failed.append(f"{r.request.method} {r.url} -> {r.status}")
+                        if r.status >= 400 else None)
+                try:
+                    page.goto(url, timeout=timeout_ms, wait_until="networkidle")
+                except PlaywrightTimeoutError:
+                    return f"Error: {url} did not finish loading within {timeout}s."
+                except PlaywrightError as e:
+                    return f"Error loading {url}: {e}. Is the app running (the runbook's run command)?"
+                title = page.title()
+                text = page.inner_text("body").strip()
+                folder = os.path.abspath(screenshot_dir)
+                os.makedirs(folder, exist_ok=True)
+                n = 1 + sum(1 for f in os.listdir(folder) if f.startswith("check-"))
+                shot = os.path.join(folder, f"check-{n}.png")
+                page.screenshot(path=shot, full_page=True)
+            finally:
+                try:
+                    browser.close()
+                except PlaywrightError:
+                    pass
+    except Exception as e:  # noqa: BLE001 -- the driver itself failing to start
+        return f"Error checking {url}: {e}"
+    verdict = "OK: no console errors, exceptions or failed requests." if not problems and not failed else \
+        f"PROBLEMS: {len(problems)} console error(s)/exception(s), {len(failed)} failed request(s)."
+    parts = [f"{url} -- {title or '(no title)'}", verdict]
+    parts += [f"  {p}" for p in problems[:20]] + [f"  {f}" for f in failed[:20]]
+    parts += [f"Screenshot: {shot} (view_image to look at it)", "Visible text:", text[:CHECK_TEXT_CHARS]]
+    return "\n".join(parts)

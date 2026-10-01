@@ -1,7 +1,4 @@
-import gzip
-import json
 import os
-import pickle
 import re
 from pathlib import Path
 from typing import Dict
@@ -13,9 +10,8 @@ from JFI.session.history_store import append_history_to_db, has_history, load_hi
 from JFI.session.metadata_store import load_metadata_from_db, save_metadata_to_db
 from JFI.tool.plan_db_tools import built_files, make_plan_db_tools
 
-# flock is Unix-only (Linux/macOS) — the ./JFI launcher is already a POSIX
-# shell script, so this project has never targeted Windows directly.
-# Session locking degrades to a no-op there rather than failing to import.
+# flock is Unix-only (Linux/macOS), the project's targets; session locking
+# degrades to a no-op on Windows rather than failing to import.
 try:
     import fcntl
 except ImportError:
@@ -36,69 +32,6 @@ class SessionInUseError(Exception):
 # second SimpleSessionManager for the same session_id within this same
 # process must not trip the cross-process guard.
 _SESSION_LOCKS: dict = {}
-
-# --- append-only history persistence ----------------------------------------
-# history.pkl used to be rewritten *in full* on every single message, so a
-# long session's every turn cost an O(total history) disk write — on a
-# multi-hundred-MB session that turned into a multi-second stall per turn.
-# history.jsonl.gz instead gets one message appended per save, as its own
-# independent gzip member; concatenated gzip members decompress transparently
-# as a single stream on read (that's part of the gzip spec, not a hack), so a
-# plain `gzip.open(path, "rb")` reads the whole history back in one go. It
-# also means a crash mid-write can corrupt at most the one trailing message
-# being flushed — everything in earlier (already-closed) members is
-# unaffected and still loads.
-
-
-def _parse_jsonl(raw: bytes) -> list:
-    messages = []
-    for line in raw.split(b"\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            messages.append(json.loads(line))
-        except json.JSONDecodeError:
-            pass  # skip one corrupt line rather than lose the rest
-    return messages
-
-
-def _read_jsonl_gz(path: Path) -> list:
-    """Reads an append-only, multi-member gzip JSONL history file.
-
-    Tolerant of a truncated/corrupt final member (the one being written when
-    a crash interrupted a save). The naive fix — read in chunks and stop at
-    the first error — doesn't actually work: ``GzipFile.read(n)`` decodes
-    however many members it needs to satisfy the *whole* request, and if that
-    walk reaches the corrupt member it raises without returning ANY bytes for
-    that call, including ones already decoded from perfectly clean earlier
-    members. So the fast path below (one big read) is what normally runs;
-    only if it fails do we fall back to a byte-at-a-time read, which forces
-    each call to return only what's already sitting in the decompressor's
-    internal buffer — that isolates the failure to the single call that
-    finally has to touch the corrupt member, keeping everything before it.
-    """
-    if not path.exists() or path.stat().st_size == 0:
-        return []
-
-    try:
-        with gzip.open(path, "rb") as f:
-            return _parse_jsonl(f.read())
-    except (OSError, EOFError):
-        pass
-
-    buffer = bytearray()
-    try:
-        with gzip.open(path, "rb") as f:
-            while True:
-                chunk = f.read(1)
-                if not chunk:
-                    break
-                buffer += chunk
-    except (OSError, EOFError):
-        pass  # keep whatever decoded before the corrupt member was reached
-    return _parse_jsonl(bytes(buffer))
-
 
 class SimpleSessionManager(SessionManager):
     """SessionManager backed by the project's `.jfi/JFI.db` (history,
@@ -143,25 +76,12 @@ class SimpleSessionManager(SessionManager):
         # file (a process mutex, not data); JFI.db is everything else.
         self.db_engine = get_engine(self._project_root)
 
-        # Old file-based history/metadata paths -- kept only for the
-        # one-time legacy migration below; no longer written to.
-        self.history_path = self.session_path / "history.jsonl.gz"
-        self._legacy_history_path = self.session_path / "history.pkl"
-        self.metadata_path = self.session_path / "metadata.json"
-
-        # A session is "resuming" once it has ANY history in the DB, or a
-        # legacy file still needs migrating in.
-        self.is_resuming = (
-            has_history(self.db_engine, self.session_id)
-            or self.history_path.exists()
-            or self._legacy_history_path.exists()
-        )
+        self.is_resuming = has_history(self.db_engine, self.session_id)
 
         # How many of self.history's messages are already durably persisted
         # to the DB — set by load_history(), advanced by save_history().
         self._flushed_count = 0
         self.history = self.load_history()
-        self._repair_dangling_tool_calls()
         self.metadata = self.load_metadata()
 
     def plan_db_tools(self) -> Dict:
@@ -299,112 +219,12 @@ class SimpleSessionManager(SessionManager):
     # -------------------------------------------------------------- history
 
     def load_history(self):
-        """Loads the conversation from the DB (see JFI.session.history_store)
-        -- full cutover replacement for history.jsonl.gz. A session that
-        still only has the old file (created before this cutover) gets it
-        migrated in once, here, the same one-time-migrate-then-append
-        pattern the old pickle -> gzip migration already used."""
-        if has_history(self.db_engine, self.session_id):
-            history = load_history_from_db(self.db_engine, self.session_id)
-            self._flushed_count = len(history)
-            if history:
-                self.console.display_system(
-                    f"Resumed existing session '{self.session_id}' with {len(history)} past messages."
-                )
-            return history
-
-        # No DB history yet — migrate an old-format file if present.
-        if self.history_path.exists():
-            history = _read_jsonl_gz(self.history_path)
-            self.console.display_system(
-                f"Resumed existing session '{self.session_id}' with {len(history)} past messages "
-                "(migrating history.jsonl.gz to the DB)."
-            )
-            append_history_to_db(self.db_engine, self.session_id, history)
-            self._flushed_count = len(history)
-            return history
-
-        if self._legacy_history_path.exists():
-            try:
-                with open(self._legacy_history_path, "rb") as f:
-                    history = pickle.load(f)
-                self.console.display_system(
-                    f"Resumed existing session '{self.session_id}' with {len(history)} past messages "
-                    "(migrating history.pkl to the DB)."
-                )
-                append_history_to_db(self.db_engine, self.session_id, history)
-                self._flushed_count = len(history)
-                return history
-            except Exception as e:
-                self.console.display_system(f"Error loading history: {e}. Starting fresh.")
-
-        return []
-
-    def _repair_dangling_tool_calls(self) -> None:
-        """
-        Fixes a specific broken resume state: the session was killed or
-        crashed while runner.execute_tool_call's loop was mid-way through a
-        multi-tool-call turn — the assistant's tool-call message and each
-        tool's result are separate append_raw calls, so an interrupt can land
-        after the assistant message but before any (or all) of its results.
-        On resume the transcript then either ends with an assistant message
-        carrying tool_calls with no results at all, or has one further along
-        whose tool_calls only got SOME of their results recorded before the
-        interrupt. Either way, at least one tool_call_id from the most recent
-        assistant turn has no matching "role": "tool" reply anywhere after
-        it — and most OpenAI-compatible servers reject the very next request
-        outright with "Cannot continue an assistant message that contains
-        tool calls", so the session could never resume at all.
-
-        Synthesizes a failure tool-result for each unanswered tool_call_id
-        from that turn, which makes the transcript structurally valid again
-        and tells the model plainly what happened so it can check whether the
-        work actually landed before retrying or moving on. Persisted
-        immediately so the fix survives even if this run is interrupted again
-        before the next real save.
-        """
-        if not self.history:
-            return
-
-        # Walk back to the most recent assistant message, if any; a plain
-        # (non-tool-calls) reply after it, or no assistant message at all,
-        # means there is nothing to repair.
-        last_assistant = None
-        last_assistant_idx = None
-        for i in range(len(self.history) - 1, -1, -1):
-            if self.history[i].get("role") == "assistant":
-                last_assistant, last_assistant_idx = self.history[i], i
-                break
-        if last_assistant is None or not last_assistant.get("tool_calls"):
-            return
-
-        answered_ids = {
-            m.get("tool_call_id")
-            for m in self.history[last_assistant_idx + 1:]
-            if m.get("role") == "tool"
-        }
-        missing = [c for c in last_assistant["tool_calls"] if c.get("id") not in answered_ids]
-        if not missing:
-            return
-
-        self.console.display_system(
-            f"⚠️  Last run stopped mid-turn ({len(missing)} tool call(s) made but never "
-            "recorded a result) — synthesizing failure results so this session can resume."
-        )
-        for call in missing:
-            function = call.get("function") or {}
-            self.history.append({
-                "role": "tool",
-                "tool_call_id": call.get("id"),
-                "name": function.get("name", "unknown"),
-                "content": (
-                    "Error: this tool call was interrupted before its result was recorded "
-                    "(the previous run stopped mid-turn — killed, crashed, or force-quit). "
-                    "Treat it as not completed: verify whether the work was actually done "
-                    "(e.g. read_file the target) before retrying or moving on."
-                ),
-            })
-        self.save_history()
+        """Loads the conversation from the DB (see JFI.session.history_store)."""
+        history = load_history_from_db(self.db_engine, self.session_id) if self.is_resuming else []
+        self._flushed_count = len(history)
+        if history:
+            self.console.display_system(f"Resumed existing session '{self.session_id}' with {len(history)} past messages.")
+        return history
 
     def save_history(self):
         """

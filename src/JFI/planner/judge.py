@@ -1,15 +1,28 @@
-"""The planner's judge: gives every plan node a status -- GOOD, BREAKDOWN or
-REDO -- from two scores (laya_plan.md §5):
+"""The planner's judge: gives every plan node a status -- GOOD or BREAKDOWN --
+from two scores (laya_plan.md §5). REDO comes from elsewhere (an escalation,
+the redo cap), never from the judge:
 
 - **the rule** (`fallback_status`): deterministic, no model -- components
   and files break down, function-level nodes are accepted, never REDO;
-- **Laya**: its published `english` checkpoint, asked one question per node.
+- **Laya**: its published `english` checkpoint, asked one yes/no question per
+  node -- can this task be solved within 20k tokens? -- given only the task
+  and its description (the node's notes). P(yes) >= LAYA_YES_THRESHOLD is
+  GOOD, otherwise BREAKDOWN.
 
 They agree: that's the verdict. They disagree and Laya is confident
 (answer_confidence >= LAYA_MIN_CONFIDENCE, default 0.75): one short LLM call
 breaks the tie between the two answers. They disagree and Laya isn't
 confident: the rule decides. Every score is kept on the Verdict and stored as
 a PlannerVerdict row, so the dashboard shows them side by side.
+
+Why this question (benchmark/laya_poc.py, docs/laya_poc.md): the first state
+-- goal, level, path, node, done_when, files, "is this clean enough?" A/B/C --
+gave Laya labels it can't interpret, its confidence never passed 0.55, and it
+ranked nodes barely better than chance (AUC 0.59). Asked whether the task and
+its description can be solved within 20k tokens, it separates the nodes Dev
+finished in one episode from the ones that had to be broken down (AUC 0.76
+over 67 nodes from 4 runs; median P(yes) 0.56 vs 0.18). `multilingual` stayed
+at 0.92-0.999 on everything; the budget number itself barely mattered.
 
 Why not a fine-tuned Laya: fine-tunes on this repo's plan nodes scored well on
 their own held-out data but overfitted to the node's level -- on a live run
@@ -31,68 +44,14 @@ from typing import Callable, Dict, List, Optional, Sequence
 GOOD, BREAKDOWN, REDO = "GOOD", "BREAKDOWN", "REDO"
 LEVELS = ("architect", "lead", "task")
 CHECKPOINT = "english"
-
-# One short persona question per level: the role that RECEIVES the node asks
-# whether it's clean enough to work on. Neutral A/B/C/D keys: Laya's README
-# documents its checkpoints following yes/no/true/false label words instead
-# of the text being judged.
-#
-# Budget: Laya packs "choice question: <instructions>" and every "[MASK] A: ..."
-# option into head_max_len tokens (192 on `english`), options first, and
-# silently truncates the instruction to whatever is left; each option is also
-# cut at 48 tokens. test_judge_questions_fit_laya_head_budget checks every
-# question here against those limits, so an edit that would be truncated
-# fails loudly.
-_VERDICT_OPTIONS = {
-    "A": "clean: small and clear, ready to build as it is",
-    "B": "break down: clear, but too big; split it into smaller tasks",
-    "C": "redo: not real work; a command to run the app, or too vague",
-}
-
-QUESTIONS_BY_LEVEL = {
-    "architect": {
-        "type": "choice",
-        "instructions": "You are a lead, tasked with breaking a component down into files. "
-                        "Is this task clean enough?",
-        "criteria": _VERDICT_OPTIONS,
-    },
-    "lead": {
-        "type": "choice",
-        "instructions": "You are a task planner, tasked with breaking a file down into functions. "
-                        "Is this task clean enough?",
-        "criteria": _VERDICT_OPTIONS,
-    },
-    "task": {
-        "type": "choice",
-        "instructions": "You are a developer, tasked with writing one function and its test. "
-                        "Is this task clean enough?",
-        "criteria": _VERDICT_OPTIONS,
-    },
-}
-
-REDO_QUESTION = {
-    "type": "choice",
-    "instructions": "Why is this task not real work?",
-    "criteria": {
-        "A": "it is a command to install, run, stop, view or test the app",
-        "B": "it is too vague to build",
-        "C": "it repeats another task",
-        "D": "it does not fit the design",
-    },
-}
-
-
-def questions_for(level: str) -> dict:
-    return {"verdict": QUESTIONS_BY_LEVEL[level], "redo_reason": REDO_QUESTION}
-
-
-STATUS_BY_KEY = {"A": GOOD, "B": BREAKDOWN, "C": REDO}
-_REDO_REASON_BY_KEY = {"A": "operational", "B": "vague", "C": "duplicate", "D": "design"}
-
-# Laya's English checkpoint leaves ~320 tokens for the state after its option
-# budget (laya_plan.md §3.2 rule 2); ~4 chars/token.
-GOAL_MAX_CHARS = 300
-STATE_MAX_CHARS = 1200
+SIZING_QUESTION = "Can this be solved with 20k tokens?"
+# P(yes) at or above this is GOOD. On the POC's 67 nodes (20k): 0.4 gives 73%
+# accuracy and gets 88% of the broken-down nodes right -- wrongly skipping a
+# breakdown costs more than an extra split. 0.5 gave 67%.
+LAYA_YES_THRESHOLD = 0.4
+QUESTIONS = {"solvable": {"type": "noul", "instructions": SIZING_QUESTION}}
+GOAL_MAX_CHARS = 300  # the goal as the LLM tie-break sees it
+INPUT_MAX_CHARS = 2000  # the task + description; English Laya reads 512 tokens
 CHILD_TIMEOUT_SECONDS = 900  # includes loading the checkpoint from disk
 
 # How the final status was reached, stored as PlannerVerdict.decided_by.
@@ -107,6 +66,7 @@ class JudgeNode:
     done_when: str = ""
     files: Sequence[str] = ()
     path: Sequence[str] = ()  # ancestor descriptions, root first
+    notes: str = ""  # what to implement and how: Laya reads it as the task's description
 
 
 @dataclass
@@ -119,6 +79,7 @@ class Verdict:
     confidence: Optional[float] = None
     tiebreak_status: Optional[str] = None
     redo_reason: Optional[str] = None
+    p_yes: Optional[float] = None  # Laya's P(solvable within the budget)
     answers: Dict[str, dict] = field(default_factory=dict)  # Laya's raw answers
 
 
@@ -167,22 +128,13 @@ def _rule_verdict(node: JudgeNode, decided_by: str) -> Verdict:
     return Verdict(node_id=node.node_id, status=status, decided_by=decided_by, rule_status=status)
 
 
-def build_state(goal: str, node: JudgeNode) -> dict:
-    state = {
-        "goal": goal[:GOAL_MAX_CHARS],
-        "level": node.level,
-        "path": " > ".join(node.path),
-        "node": node.description,
-        "done_when": node.done_when,
-        "files": ", ".join(node.files),
-    }
-    # Trim the path first (least specific), then the goal, so the node's own
-    # text -- the thing actually being judged -- survives intact.
-    for key in ("path", "goal"):
-        overflow = sum(len(v) for v in state.values()) - STATE_MAX_CHARS
-        if overflow > 0:
-            state[key] = state[key][: max(0, len(state[key]) - overflow)]
-    return state
+def build_state(node: JudgeNode) -> dict:
+    """What Laya reads: the task and its description, and the question as the
+    goal -- plain text it can judge, not the plan's labels."""
+    text = f"Task: {node.description}"
+    if node.notes:
+        text += f"\nDescription: {node.notes}"
+    return {"input": text[:INPUT_MAX_CHARS], "goal": SIZING_QUESTION}
 
 
 def _env_flag(name: str) -> bool:
@@ -248,8 +200,7 @@ opinions offered:
 - GOOD: one small, clear piece of work, ready to build as it is (one function, one config file,
   one contiguous copy);
 - BREAKDOWN: several separate pieces of work (several files, functions, sections or steps) that
-  should be split first;
-- REDO: not real work -- an operational step (install, run, test, open) or too vague to build.
+  should be split first.
 
 {items}
 
@@ -311,8 +262,7 @@ class LayaJudge:
         if self._import_error:
             return [_rule_verdict(n, RULE_NO_LAYA) for n in nodes]
 
-        requests = [{"state": build_state(self.goal, node), "questions": questions_for(node.level),
-                     "model": CHECKPOINT} for node in nodes]
+        requests = [{"state": build_state(node), "questions": QUESTIONS, "model": CHECKPOINT} for node in nodes]
         try:
             raw = self._predict(requests)
         except ImportError as e:
@@ -359,13 +309,12 @@ class LayaJudge:
         """Both scores for one node; decided_by is LLM when a tie-break is
         still needed (resolved in judge(), once for the whole step)."""
         rule = fallback_status(node.level, node.description, node.files)
-        verdict = answers["verdict"]
-        laya = STATUS_BY_KEY[verdict["choice"]]
-        confidence = verdict.get("answer_confidence")
-        redo_reason = _REDO_REASON_BY_KEY.get(answers["redo_reason"]["choice"], "design") \
-            if "redo_reason" in answers else "design"
+        answer = answers["solvable"]
+        p_yes = answer["noul"]
+        laya = GOOD if p_yes >= LAYA_YES_THRESHOLD else BREAKDOWN
+        confidence = answer.get("answer_confidence")
         v = Verdict(node_id=node.node_id, status=rule, decided_by=RULE, rule_status=rule, laya_status=laya,
-                    confidence=confidence, redo_reason=redo_reason, answers=answers)
+                    confidence=confidence, p_yes=p_yes, answers=answers)
         if laya == rule:
             v.decided_by = AGREE
         elif confidence is not None and confidence >= min_confidence():

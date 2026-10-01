@@ -91,6 +91,12 @@ class Leaf(SQLModel, table=True):
     paused: bool = Field(default=False)
     # Observable finish condition; on implement/modify leaves it's the unit test case.
     done_when: Optional[str] = None
+    # What the next layer needs beyond the short description: what to build and
+    # how, edge cases, what not to touch.
+    notes: Optional[str] = None
+    # Where the context lives: design entries ("contract:main->calc"), source
+    # ranges ("page.html L1376-1402"), docs or URLs.
+    references: Optional[list[str]] = Field(default=None, sa_column=Column(JSON))
     # Files the node creates or changes, plus its test file.
     files: Optional[list[str]] = Field(default=None, sa_column=Column(JSON))
     # Leaf ids that must be done first (validated acyclic on write).
@@ -102,6 +108,8 @@ class Leaf(SQLModel, table=True):
     # The reviewer's failure text when a done leaf is re-opened (G8).
     fix_note: Optional[str] = None
     reopened_count: int = Field(default=0)
+    # The git checkpoint taken when the leaf passed (JFI.tool.checkpoint_tools).
+    checkpoint: Optional[str] = None
 
     created_at: datetime = Field(default_factory=utcnow)
 

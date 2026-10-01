@@ -12,6 +12,7 @@ from sqlmodel import select
 
 from JFI.models import QueuedItem, SessionRecord, get_session
 from JFI.session.pipeline import CURRENT_PIPELINE
+from JFI.session.project_memory import carry_over
 
 
 def _record(db, session_id: str, repo_path: str) -> SessionRecord:
@@ -19,6 +20,8 @@ def _record(db, session_id: str, repo_path: str) -> SessionRecord:
     if record is None:
         record = SessionRecord(session_id=session_id, repo_path=repo_path, pipeline_version=CURRENT_PIPELINE)
         db.add(record)
+        db.flush()
+        carry_over(db, session_id)
         db.commit()
     return record
 

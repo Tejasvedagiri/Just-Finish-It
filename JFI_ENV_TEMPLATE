@@ -161,8 +161,7 @@ MODEL=qwen3:8b
 # --- Optional: fleet dashboard (Just-Finish-It-Fleet) -------------------
 
 # Reports this session's live status to a "master" fleet dashboard (the
-# separate Just-Finish-It-Fleet repo, `npm run master`; this side needs
-# `uv sync --extra master`) over a WebSocket --
+# separate Just-Finish-It-Fleet repo, `npm run master`) over a WebSocket --
 # e.g. ws://203.0.113.5:8765/report. Unlike JFI_WEB_BRIDGE (file-based,
 # local-dashboard-only), the master can run on a completely different
 # machine from this session: the two only ever talk over this one socket,
@@ -209,7 +208,8 @@ MODEL=qwen3:8b
 # fixed rule (components and files break down, function-level nodes are
 # accepted). With LAYA=1 it gets a second score from Laya, a small non-generative decision model (its
 # published `english` checkpoint, downloaded from Hugging Face on first use
-# and loaded once per session). They agree: that's the verdict. They disagree and
+# and loaded once per session), asked whether the node's task and description
+# can be solved within 20k tokens. They agree: that's the verdict. They disagree and
 # Laya is at least LAYA_MIN_CONFIDENCE sure: one short LLM call (the Architect's
 # model) breaks the tie. Otherwise the rule decides. Without the `laya` extra
 # (a source install without `uv sync --extra laya`; the binary always bundles it) the rule

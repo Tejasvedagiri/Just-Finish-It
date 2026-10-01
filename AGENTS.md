@@ -2,8 +2,7 @@
 
 Working conventions for any agent (human-directed AI or otherwise) making
 changes in this repo. This is about *how* to work here — see `README.md`
-for what JFI is and how to run it (but see "Docs that have drifted" below
-before trusting README's file/path details).
+for what JFI is and how to run it, and `TODO.md` for what is still open.
 
 ## Read first: how the pipeline works
 
@@ -43,12 +42,18 @@ every phase to them. There is no long, compressed conversation any more:
 every LLM call is one short episode.
 
 The planner's judge is a fixed rule; `LAYA=1` in `.env` adds a second score
-from Laya's published `english` checkpoint, and an LLM breaks the tie when
+from Laya's published `english` checkpoint ("Can this be solved with 20k
+tokens?", given the node's task and description), and an LLM breaks the tie when
 they disagree and Laya is confident (`LAYA_MIN_CONFIDENCE`). Laya isn't fine-tuned:
 fine-tunes overfitted to the node's level (see `docs/phase-planner.md`).
 
 Both are a reference now: record later design changes in the `docs/phase-*.md`
 page they touch.
+
+[`docs/feature-description.md`](docs/feature-description.md) records what the
+`feature/description` branch added after the rewrite (checkpoints, project
+memory, node notes, the browser tools, the onedir binary) and the end-to-end
+benchmark runs that checked it.
 
 ## Repo shape
 
@@ -94,7 +99,7 @@ Where things live:
 | `src/JFI/utils/` | Small shared helpers that belong to no one subsystem (`text_sanitize.py`: strips leaked chat-template tokens from model output). Not the repo-root `utils/`, which is dev-only scripts. |
 | `src/JFI/web/` | Optional Streamlit `jfi-web` dashboard (`dashboard.py`) and its console-script `launcher.py` (`--extra web`). |
 | `src/JFI/create_env.py`, `src/build_binary/`, `src/export_db/` | `uv run create-env` / `build` / `export-db` console scripts. |
-| `test/` | pytest suite. `benchmark/` is a separate, non-shipped eval harness (see its README). `utils/` and `docs/` are dev-only. |
+| `test/` | pytest suite. `benchmark/` is a separate, non-shipped eval harness (see its README). `utils/` and `docs/` are dev-only. Open work is in `TODO.md`. |
 
 ## Before you start: check `uv run` vs plain `python3`
 
@@ -110,9 +115,15 @@ venv, not system Python. If you're unsure a command is right, try
   root (`SESSION_PATH`, default cwd) — no per-session subfolders. The real
   store is `.jfi/JFI.db` (SQLite, WAL mode; or `DB_BACKEND=mysql|postgres`
   + `DATABASE_URL`), **one DB per project**, every table keyed by
-  `session_id`. The only files left beside it are `.lock`,
-  `llm_debug.jsonl`, and the `web_status.json`/`web_answer.json` bridge
-  files. `models/__init__.py`'s docstring has the old-file → table map.
+  `session_id`. Beside it: `.lock`, `llm_debug.jsonl`, the
+  `web_status.json`/`web_answer.json` bridge files, `checkpoints.git/` (the
+  per-leaf git checkpoints, `tool/checkpoint_tools.py` -- a private repo
+  whose work tree is the project; the project's own git is never touched),
+  `screens/` (`check_page` screenshots) and `scratch/` (Dev's scratch
+  scripts). `models/__init__.py`'s docstring has the old-file → table map.
+- A new session starts from the project's previous session's runbook and
+  lasting design (`session/project_memory.py`, run when its
+  `SessionRecord` is created).
 - `.jfi/.lock` is **project-wide**: only one JFI session (any name) can run
   against a project at a time.
 - The plan, history, context cache, reviewer notes / review report / plan
@@ -191,12 +202,11 @@ venv, not system Python. If you're unsure a command is right, try
    in one file can silently break assertions in another test file that
    string-matches prompt content.
    - The Anthropic tests need `--extra anthropic` synced (see below).
-   - **On Windows** the suite doesn't fully pass: `test_session_lock.py`
-     fails to import (`fcntl` is POSIX-only — pass
-     `--ignore=test/test_session_lock.py`), `test_process_tools.py`'s
-     stop tests need `os.getpgid` (3 failures). Compare against that
-     baseline rather than chasing it, and don't "fix" the locking or
-     process-group code for Windows as a side effect of an unrelated
+   - **On Windows** pass `--ignore=test/test_session_lock.py`: it fails to
+     import (`fcntl` is POSIX-only). Everything else passes there; the
+     background-process stop has a Windows path (`_stop_windows`, ending the
+     process tree) and its POSIX SIGKILL-fallback test is skipped. Don't
+     change the locking code for Windows as a side effect of an unrelated
      change. The project targets Linux/macOS.
 2. `uv run ruff check <changed files>` (or `uv run ruff check .` — the
    repo currently has 2 pre-existing `E741` warnings under
@@ -205,7 +215,7 @@ venv, not system Python. If you're unsure a command is right, try
 3. If you touched anything under `src/JFI/` that ships in the binary,
    `uv run build` to confirm PyInstaller still packages cleanly — cheap
    insurance, catches missing-import surprises before they reach a user
-   running `dist/jfi` instead of from source.
+   running `dist/jfi/jfi` instead of from source.
 
 ## `uv sync --extra` — list every extra you want, every time
 
@@ -213,8 +223,8 @@ venv, not system Python. If you're unsure a command is right, try
 `anthropic`) that was previously synced but isn't named in that exact
 command — it's not additive across separate invocations. Always list every
 extra you need together: `uv sync --extra web --extra laya --extra
-anthropic --group dev`. (`websockets`, once the `master` extra, is a base
-dependency now for exactly this reason. `uv run build` needs `web` and
+anthropic --group dev`. (`websockets` used to be a `master` extra and is a
+base dependency now for exactly this reason. `uv run build` needs `web` and
 `laya` and refuses to run without them.)
 
 ## Testing philosophy observed in this repo
@@ -260,16 +270,10 @@ what it learns -- the model doesn't do it unprompted.
 
 ## Docs that have drifted (trust the code)
 
-- `README.md`'s Getting started, Configuration, Resuming and build sections
-  are current (clone → `uv sync` → `create-env` → run in the project folder
-  → `uv run build`). Its "Project layout" tree is still stale: no
-  `models/`, `plan_db_tools.py`, `anthropic_stream.py`, `export_db/`,
-  `episode/`, `planner/`, `imp/`, `review/` or `utils/`.
-- `manager/web_bridge.py`'s and `web/dashboard.py`'s docstrings still say
-  the bridge files live in `.jfi/<session>/`; they're directly in `.jfi/`.
-- Many docstrings cite `/todo.md` or `todo_v1.md §N` for rationale; both
-  files have been removed. Don't add new references to them. Put the
-  reasoning in the docstring itself.
+- Old docstrings may cite `/todo.md` or `todo_v1.md §N` for rationale; both
+  files were removed (the root `TODO.md` is a different, current list of
+  open work). Don't add new references to them; put the reasoning in the
+  docstring itself.
 
 If you touch one of these areas, fixing the matching doc in the same
 change is welcome.

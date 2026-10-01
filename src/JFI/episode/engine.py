@@ -47,6 +47,7 @@ from JFI.tool.result_cap import cap_result
 # at WARN_AT, and from PRUNE_AT on shrink all but the newest KEEP_RECENT
 # tool results to a stub (the DB history keeps them in full).
 WARN_AT = 0.6
+TURNS_LEFT_WARNING = 2
 PRUNE_AT = 0.75
 KEEP_RECENT = 4
 STUB_CHARS = 300
@@ -113,6 +114,7 @@ def run_episode(llm, console, engine, session_id: str, *, role: str, mode: str, 
     result = EpisodeResult(episode_id, "turn_cap", 0, 0)
     failures: Dict[tuple, int] = {}
     warned = False
+    turn_warned = False
 
     while True:
         if console.should_stop():
@@ -128,6 +130,14 @@ def run_episode(llm, console, engine, session_id: str, *, role: str, mode: str, 
         if result.turns >= turn_cap:
             result.end_reason = "turn_cap"
             break
+        if turn_cap - result.turns == TURNS_LEFT_WARNING and not turn_warned:
+            # Observed on the calc run: a Dev leaf passed its test on turn 13,
+            # spent turns 14-15 on extra checks and ended on the cap -- so the
+            # finished leaf was sent back to be split.
+            turn_warned = True
+            add({"role": "user", "content": (
+                f"TURNS: {TURNS_LEFT_WARNING} turns left in this conversation. If the work is done, call "
+                f"{anchor.finish} now; otherwise do the one most important remaining step.")})
         schemas = tools.schemas()
         request_estimate = estimate_tokens(messages, schemas)
         if request_estimate > budget * PRUNE_AT and _prune_old_results(messages):

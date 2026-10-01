@@ -13,6 +13,7 @@ import pytest
 from JFI import runner
 from JFI.manager.abstract_manager import AbstractManager
 from JFI.models import PlanEvent, PlannerVerdict, SessionRecord, get_engine, get_session
+from sqlmodel import select
 from JFI.planner.judge import BREAKDOWN, GOOD, REDO, FallbackJudge, Verdict
 from JFI.planner.loop import Planner
 from JFI.planner.nodes import load_nodes
@@ -107,7 +108,9 @@ def engine(bare_engine):
     from JFI.tool.runbook_tools import runbook_set
     design_set(bare_engine, "s", "stack", "stack", "python 3.12, uv, pytest")
     for name in REQUIRED_RUNBOOK:
-        runbook_set(bare_engine, "s", name, "uv run pytest {test_id}" if name == "test_one" else f"uv run {name}")
+        command = {"test_one": "uv run pytest {test_id}", "script": "uv run python {file}", "src_dir": "calc/",
+                   "test_dir": "tests/", "test_naming": "calc/ops.py -> tests/test_ops.py"}.get(name, f"uv run {name}")
+        runbook_set(bare_engine, "s", name, command, notes="e.g. tests/test_calc.py::test_add")
     return bare_engine
 
 
@@ -166,6 +169,33 @@ def test_nothing_reaches_the_lead_while_an_architect_node_is_unsettled(engine, t
     lead_b = [finish(2)]
     _planner(engine, tmp_path, Console(architect + lead_a + lead_b), Judge()).run()
     assert seen[0] == [1, 2]
+
+
+def test_laya_reads_each_nodes_notes_and_its_p_yes_is_stored(engine, tmp_path):
+    """The sizing question (docs/laya_poc.md) reads the task and its
+    description -- the node's notes -- so the loop must hand Laya the notes,
+    and the verdict row keeps P(yes) for the dashboard and later POC runs."""
+    from JFI.planner.judge import LayaJudge
+
+    class Router:
+        sent = []
+
+        def predict_batch(self, requests):
+            self.sent.extend(requests)
+            return [{"answers": {"solvable": {"noul": 0.2, "answer_confidence": 0.8}}} for _ in requests]
+
+    router = Router()
+    judge = LayaJudge("calc", router_factory=lambda: router, log=lambda _: None)
+    architect = [turn(call("add_node", description="component a in a/", done_when="a works",
+                           notes="Parses the input file into rows; a bad row is skipped with a warning.")),
+                 finish(0)]
+    _planner(engine, tmp_path, Console(architect + [finish(1)]), judge).run()
+    assert router.sent[0]["state"]["input"] == ("Task: component a in a/\nDescription: Parses the input file into "
+                                                "rows; a bad row is skipped with a warning.")
+    with get_session(engine) as db:
+        verdict = db.exec(select(PlannerVerdict).where(PlannerVerdict.node_id == 1)).first()
+    assert (verdict.laya_model, verdict.laya_verdict, verdict.probabilities, verdict.decided_by) == (
+        "english", BREAKDOWN, {"yes": 0.2}, "agree")
 
 
 def test_redo_goes_back_to_the_creator_and_is_capped(engine, tmp_path, monkeypatch):
@@ -280,7 +310,7 @@ def test_duplicate_leaf_for_the_same_function_is_refused(engine, tmp_path):
     from JFI.planner.nodes import add_node
     add_node(engine, "s", "architect", None, "calc component", files=["calculator.py"])
     add_node(engine, "s", "lead", 1, "calculator.py: parse and evaluate", files=["calculator.py"])
-    files = ["calculator.py", "test_calculator.py"]
+    files = ["calculator.py", "tests/test_calculator.py"]
     assert add_node(engine, "s", "task", 2, "implement parse(line) in calculator.py: split", files=files) \
         .startswith("Added")
     assert add_node(engine, "s", "task", 2, "implement evaluate(a, op, b) in calculator.py: math", files=files) \
@@ -291,6 +321,103 @@ def test_duplicate_leaf_for_the_same_function_is_refused(engine, tmp_path):
     # splitting a leaf restates its own function: that's the normal split, not a duplicate
     assert add_node(engine, "s", "task", 4, "implement evaluate(a, op, b) in calculator.py: core", files=files) \
         .startswith("Added")
+
+
+def test_words_before_a_bracket_are_not_functions(engine):
+    """Observed on the stui runs: "copied verbatim (L1376-1402)" and
+    "exactly (…)" were read as functions verbatim() and exactly(), and valid
+    nodes were refused as duplicates of each other."""
+    from JFI.planner.nodes import add_node
+    add_node(engine, "s", "architect", None, "data component", files=["src/data.js"])
+    add_node(engine, "s", "lead", 1, "src/data.js: copy the data", files=["src/data.js"])
+    files = ["src/data.js", "tests/data.test.js"]
+    for what in ("holdings", "dividends"):
+        added = add_node(engine, "s", "task", 2, f"copy the {what} array verbatim (L10-20) into src/data.js",
+                         files=files)
+        assert added.startswith("Added"), added
+
+
+def test_depends_on_errors_list_the_real_ids(engine):
+    """Observed on the stui runs: ~29 depends_on errors were positions ([1],
+    [1, 2]) instead of ids, and the error didn't say which ids exist."""
+    from JFI.planner.nodes import add_node
+    add_node(engine, "s", "architect", None, "calc component", files=["calc/ops.py"])
+    add_node(engine, "s", "lead", 1, "calc/ops.py: add and sub", files=["calc/ops.py"])
+    add_node(engine, "s", "task", 2, "implement add(a, b) in calc/ops.py: sum", files=["calc/ops.py"])
+    answer = add_node(engine, "s", "task", 2, "implement sub(a, b) in calc/ops.py: difference",
+                      files=["calc/ops.py"], depends_on=[99])
+    assert "not positions" in answer and "Ids here: 3 (implement add(a, b)" in answer
+
+
+def test_a_test_file_must_follow_the_runbooks_test_dir(engine):
+    """Observed on the QA machine: chart-bar.test.js landed beside its source
+    while test_one ran __tests__/{test_id}.test.js, so it could never run."""
+    from JFI.planner.nodes import add_node
+    from JFI.tool.runbook_tools import runbook_set
+    runbook_set(engine, "s", "test_dir", "__tests__/")
+    add_node(engine, "s", "architect", None, "charts component", files=["src/components/chart-bar.js"])
+    wrong = add_node(engine, "s", "lead", 1, "src/components/chart-bar.js: the bar chart",
+                     files=["src/components/chart-bar.js", "src/components/chart-bar.test.js"])
+    assert wrong.startswith("Error: the runbook puts tests under __tests__/")
+    right = add_node(engine, "s", "lead", 1, "src/components/chart-bar.js: the bar chart",
+                     files=["src/components/chart-bar.js", "__tests__/chart-bar.test.js"])
+    assert right.startswith("Added")
+    runbook_set(engine, "s", "test_dir", "beside the source")
+    assert add_node(engine, "s", "lead", 1, "src/views/news.js: the news view",
+                    files=["src/views/news.js", "__tests__/news.test.js"]).startswith("Error")
+
+
+def test_tests_at_the_repo_root_are_accepted(engine):
+    """Observed on the react_counter run: test_dir "." refused every path for
+    test_index.py (it became the folder "/") and the Task planner escalated."""
+    from JFI.planner.nodes import add_node
+    from JFI.tool.runbook_tools import runbook_set
+    runbook_set(engine, "s", "test_dir", ".")
+    add_node(engine, "s", "architect", None, "counter page", files=["index.html"])
+    for page, path in (("index.html", "test_index.py"), ("about.html", "./test_about.py")):
+        assert add_node(engine, "s", "lead", 1, f"{page} page, tested by {path}",
+                        files=[page, path]).startswith("Added"), path
+    refused = add_node(engine, "s", "lead", 1, "help.html page", files=["help.html", "tests/test_help.py"])
+    assert refused.startswith("Error: the runbook puts tests at the repo root")
+
+
+def test_notes_and_references_reach_the_next_layers_brief(engine, tmp_path):
+    """The user: "add a new column ... of what should be implemented and what
+    docs can be referenced for context". A reference naming a design entry
+    is shown with its text, so the next layer needn't design_get it."""
+    from JFI.planner.nodes import add_node
+    from JFI.tool.design_tools import design_set, references_text
+    design_set(engine, "s", "contract", "main->calc", "calc.evaluate(line) -> float, raises CalcError")
+    add_node(engine, "s", "architect", None, "calc component", files=["calc/ops.py"],
+             notes="keep evaluate pure: no printing", references=["contract:main->calc", "spec.md L10-30"])
+    node = load_nodes(engine, "s")[0]
+    assert node.notes == "keep evaluate pure: no printing"
+    assert references_text(engine, "s", node.references) == [
+        "contract:main->calc -- calc.evaluate(line) -> float, raises CalcError", "spec.md L10-30"]
+    from JFI.episode.brief import ScopeAnchor
+    brief = ScopeAnchor(role="lead", node_id=node.id, node=node.description, finish="finish(1, summary)",
+                        notes=node.notes, references=references_text(engine, "s", node.references)).render()
+    assert "notes:     keep evaluate pure" in brief and "- contract:main->calc -- calc.evaluate" in brief
+
+
+def test_notes_say_what_to_do_first_in_plain_text(engine, tmp_path):
+    """Observed on the react_counter run: a Task leaf's notes read "Replace the
+    JFI comment at index.html L3. &lt;head&gt; holds only &lt;title&gt;..." --
+    where to edit first, the purpose never, and HTML entities for <head>."""
+    from JFI.planner.nodes import add_node, update_node
+    refused = add_node(engine, "s", "architect", None, "page head in index.html", files=["index.html"],
+                       notes="Replace the JFI comment at index.html L3. <head> holds only <title>.")
+    assert refused.startswith("Error: notes must start with WHAT this item must do") and "references" in refused
+    assert add_node(engine, "s", "architect", None, "Fill &lt;head&gt; in index.html: title and style",
+                    files=["index.html"], done_when="&lt;title&gt; is Counter",
+                    notes="The page's &lt;head&gt;: title it 'Counter'.").startswith("Added")
+    node = load_nodes(engine, "s")[0]
+    assert (node.description, node.done_when, node.notes) == (
+        "Fill <head> in index.html: title and style", "<title> is Counter", "The page's <head>: title it 'Counter'.")
+    assert update_node(engine, "s", "architect", node.id,
+                       notes="Fill the JFI line at L5 with the scripts").startswith("Error: notes must start")
+    from JFI.planner.prompts import RULES
+    assert "Notes explain the work" in RULES and "never a node" in RULES
 
 
 def test_fallback_accepts_a_node_that_already_names_one_function():
@@ -375,15 +502,18 @@ def test_the_architect_cannot_finish_without_the_base_later_roles_need(bare_engi
                   call("design_set", kind="stack", key="stack", text="python, no unit tests")),
              finish(0),
              turn(call("design_set", kind="stack", key="stack", text="python 3.12, pytest"),
-                  *[call("runbook_set", name=n, command="pytest {test_id}" if n == "test_one" else f"npm run {n}")
-                    for n in ("setup", "run", "test", "test_one", "build", "e2e")]),
+                  *[call("runbook_set", name=n, notes="e.g. tests/test_calc.py::test_add",
+                         command={"test_one": "pytest {test_id}", "script": "python {file}"}.get(n, f"npm run {n}"))
+                    for n in ("setup", "run", "test", "test_one", "build", "e2e", "script", "src_dir", "test_dir",
+                              "test_naming")]),
              finish(0)] + [finish(1)] * 3
     _planner(bare_engine, tmp_path, Console(turns)).run()
     with get_session(bare_engine) as db:
         results = [m.content for m in db.exec(HistoryMessage.__table__.select()).all()
                    if m.role == "tool" and "not finished yet" in (m.content or "")]
     assert len(results) == 1
-    assert "runbook entries setup, run, test, test_one, build, e2e" in results[0]
+    assert ("runbook entries setup, run, test, test_one, build, e2e, script, src_dir, test_dir, test_naming"
+            in results[0])
     assert "a test framework in the stack" in results[0]
 
 

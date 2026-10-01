@@ -7,9 +7,11 @@ history.jsonl.gz, plan.md, metadata.json under JFI/<task>/).
 
 JFI's console is a full-screen prompt_toolkit TUI with no non-interactive
 mode -- there is no flag or stdin pipe that skips the UI -- so this drives
-it the only way that actually works: a real pty via tmux, with send-keys
-for the two startup prompts (session name, goal) and polling of the pane
-content for known blocking prompts and the completion marker.
+it the only way that actually works: a real terminal, with keystrokes for
+the two startup prompts (session name, goal) and polling of the screen for
+known blocking prompts and the completion marker. On Linux/macOS that
+terminal is tmux; on Windows it's ConPTY through pywinpty (`pip install
+pywinpty`), the driver the Windows calc runs used.
 
 This exists because an earlier ad-hoc version of this exact script (built
 during a manual eval session, living only in a throwaway scratchpad) hit
@@ -38,15 +40,18 @@ Usage:
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
 TASKS_DIR = BENCHMARK_DIR / "tasks"
-DEFAULT_JFI_BIN = BENCHMARK_DIR.parent / "dist" / "jfi"
+# `uv run build` is a onedir build: the executable is dist/jfi/jfi(.exe).
+DEFAULT_JFI_BIN = BENCHMARK_DIR.parent / "dist" / "jfi" / ("jfi.exe" if os.name == "nt" else "jfi")
 
 POLL_INTERVAL = 5
 PROMPT_TIMEOUT = 60          # waiting for the two startup prompts
@@ -95,44 +100,120 @@ def list_tasks(tier: str = None) -> list:
     return ids
 
 
-def tmux(*args):
-    return subprocess.run(["tmux", *args], capture_output=True, text=True)
+class Tmux:
+    """A JFI run in a detached tmux session (Linux/macOS)."""
+
+    KEYS = {"Enter": "Enter", "Right": "Right", "C-c": "C-c"}
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def _tmux(self, *args):
+        return subprocess.run(["tmux", *args], capture_output=True, text=True)
+
+    def start(self, command: str, cwd: Path) -> str:
+        self._tmux("kill-session", "-t", self.name)  # clear any stale session from a prior attempt
+        r = self._tmux("new-session", "-d", "-s", self.name, "-x", "220", "-y", "50", "-c", str(cwd), command)
+        return r.stderr.strip() if r.returncode != 0 else ""
+
+    def type(self, text: str):
+        self._tmux("send-keys", "-t", self.name, "-l", text)
+
+    def key(self, key: str):
+        self._tmux("send-keys", "-t", self.name, self.KEYS[key])
+
+    def text(self) -> str:
+        r = self._tmux("capture-pane", "-t", self.name, "-p", "-S", "-2000")
+        return r.stdout if r.returncode == 0 else ""
+
+    def alive(self) -> bool:
+        return self._tmux("has-session", "-t", self.name).returncode == 0
+
+    def kill(self):
+        self._tmux("kill-session", "-t", self.name)
 
 
-def pane_text(session):
-    r = tmux("capture-pane", "-t", session, "-p", "-S", "-2000")
-    return r.stdout if r.returncode == 0 else ""
+class ConPty:
+    """A JFI run in a Windows pseudo-console (pywinpty). The screen is the
+    raw output stream with escape codes stripped and whitespace squashed --
+    prompt_toolkit redraws in place, so needles are matched without spaces."""
+
+    KEYS = {"Enter": "\r", "Right": "\x1b[C", "C-c": "\x03"}
+    ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][A-Za-z0-9]|\x1b[=>]")
+
+    def __init__(self, name: str):
+        self.name, self.proc, self.chunks = name, None, []
+
+    def start(self, command: str, cwd: Path) -> str:
+        try:
+            from winpty import PtyProcess
+        except ImportError:
+            return "pywinpty is not installed (pip install pywinpty)"
+        self.proc = PtyProcess.spawn(command, cwd=str(cwd), env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                                     dimensions=(50, 220))
+        threading.Thread(target=self._read, daemon=True).start()
+        return ""
+
+    def _read(self):
+        while self.proc.isalive():
+            try:
+                self.chunks.append(self.proc.read(65536))
+            except EOFError:
+                break
+            except Exception:
+                time.sleep(0.2)
+
+    def type(self, text: str):
+        self.proc.write(text)
+
+    def key(self, key: str):
+        self.proc.write(self.KEYS[key])
+
+    def text(self) -> str:
+        return re.sub(r"\s+", "", self.ANSI.sub("", "".join(self.chunks)[-200_000:]))
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.isalive()
+
+    def kill(self):
+        if self.alive():
+            self.proc.terminate(force=True)
 
 
-def session_alive(session):
-    return tmux("has-session", "-t", session).returncode == 0
+def terminal(name: str):
+    return ConPty(name) if os.name == "nt" else Tmux(name)
 
 
-def wait_for(session, needle, timeout, log):
-    """Polls the pane for `needle`, auto-answering AUTO_PROMPTS in the
-    meantime. Returns the pane text once `needle` appears or the session
-    dies (caller must check `needle in text` to tell those apart), or None
-    on timeout."""
+def seen(term, needle: str, text: str) -> bool:
+    return (re.sub(r"\s+", "", needle) if isinstance(term, ConPty) else needle) in text
+
+
+def wait_for(term, needle, timeout, log):
+    """Polls the screen for `needle`, auto-answering AUTO_PROMPTS in the
+    meantime. Returns the screen text once `needle` appears or the run
+    dies (caller must check with seen() to tell those apart), or None on
+    timeout."""
     deadline = time.time() + timeout
     auto_actions = 0
     prompt_was_up = None
     while time.time() < deadline:
-        text = pane_text(session)
-        if needle in text:
+        text = term.text()
+        if seen(term, needle, text):
             return text
-        if not session_alive(session):
+        if not term.alive():
             log(f"session died while waiting for {needle!r}")
             return text
+        recent = text[-20_000:]
         handled = None
         for prompt_needle, keys, description in AUTO_PROMPTS:
-            if prompt_needle in text:
+            if seen(term, prompt_needle, recent):
                 handled = prompt_needle
                 if prompt_was_up != prompt_needle:
                     if auto_actions < MAX_AUTO_ACTIONS:
                         auto_actions += 1
                         log(f"{description} ({auto_actions}/{MAX_AUTO_ACTIONS})")
                         for key in keys:
-                            tmux("send-keys", "-t", session, key)
+                            term.key(key)
                     else:
                         log(f"hit MAX_AUTO_ACTIONS ({MAX_AUTO_ACTIONS}) on {prompt_needle!r} -- leaving it for inspection")
                 break
@@ -157,9 +238,18 @@ def run_verify(task: dict, project_dir: Path, log) -> dict:
         if src.is_dir():
             shutil.copytree(src, project_dir, dirs_exist_ok=True)
 
+    run_as = command
+    if os.name == "nt":
+        # On Windows `python3` is usually the Microsoft Store alias, not an
+        # interpreter, and the verify commands are POSIX shell (`>/dev/null
+        # 2>&1`, `&&`), which cmd.exe can't run -- Git Bash can.
+        if command.startswith("python3 "):
+            command = f'"{Path(sys.executable).as_posix()}" {command[len("python3 "):]}'
+        bash = shutil.which("bash")
+        run_as = [bash, "-c", command] if bash else command
     log(f"running objective verify: {command}")
     try:
-        proc = subprocess.run(command, shell=True, cwd=project_dir, capture_output=True,
+        proc = subprocess.run(run_as, shell=isinstance(run_as, str), cwd=project_dir, capture_output=True,
                                text=True, timeout=int(task.get("verify_timeout", 120)))
         output = (proc.stdout or "") + (proc.stderr or "")
         return {"ran": True, "passed": proc.returncode == 0, "returncode": proc.returncode, "output": output[-4000:]}
@@ -197,58 +287,60 @@ def run_task(task_id: str, project_dir: Path, jfi_bin: Path, timeout: int, log_p
             shutil.copytree(src, project_dir / hidden_tests_dir, dirs_exist_ok=True)
             log(f"placed hidden reference tests at {hidden_tests_dir}/ (visible to the model, do-not-edit)")
 
-    tmux("kill-session", "-t", session)  # clear any stale session from a prior attempt
-
-    log(f"launching {jfi_bin} in {project_dir} as tmux session {session}")
-    r = tmux("new-session", "-d", "-s", session, "-x", "220", "-y", "50", "-c", str(project_dir), str(jfi_bin))
-    if r.returncode != 0:
-        log(f"FAILED to start tmux session: {r.stderr.strip()}")
+    term = terminal(session)
+    log(f"launching {jfi_bin} in {project_dir} as {type(term).__name__} session {session}")
+    error = term.start(str(jfi_bin), project_dir)
+    if error:
+        log(f"FAILED to start the terminal: {error}")
         result["outcome"] = "launch_failed"
         result["ended_at"] = time.time()
         return result
 
-    if wait_for(session, "session name to begin", PROMPT_TIMEOUT, log) is None:
+    if wait_for(term, "session name to begin", PROMPT_TIMEOUT, log) is None:
         log("TIMEOUT waiting for session-name prompt")
-        tmux("kill-session", "-t", session)
+        term.kill()
         result["outcome"] = "launch_failed"
         result["ended_at"] = time.time()
         return result
 
-    tmux("send-keys", "-t", session, "-l", task_id)
-    tmux("send-keys", "-t", session, "Enter")
+    term.type(task_id)
+    term.key("Enter")
 
-    if wait_for(session, "What is your goal", PROMPT_TIMEOUT, log) is None:
+    if wait_for(term, "What is your goal", PROMPT_TIMEOUT, log) is None:
         log("TIMEOUT waiting for goal prompt")
-        tmux("kill-session", "-t", session)
+        term.kill()
         result["outcome"] = "launch_failed"
         result["ended_at"] = time.time()
         return result
 
-    tmux("send-keys", "-t", session, "-l", task["prompt"])
-    tmux("send-keys", "-t", session, "Enter")
+    term.type(" ".join(task["prompt"].split()))  # one line: a newline would submit the goal early
+    time.sleep(1)
+    term.key("Enter")
 
     log(f"goal submitted, waiting up to {timeout}s for PIPELINE COMPLETE")
-    text = wait_for(session, "PIPELINE COMPLETE", timeout, log)
+    text = wait_for(term, "PIPELINE COMPLETE", timeout, log)
     if text is None:
         log(f"TIMEOUT after {timeout}s -- leaving session '{session}' running for inspection")
+        if isinstance(term, ConPty):
+            term.kill()  # a pseudo-console can't outlive this process anyway
         result["outcome"] = "timeout"
         result["ended_at"] = time.time()
         return result
 
-    if "PIPELINE COMPLETE" not in text:
+    if not seen(term, "PIPELINE COMPLETE", text):
         log("session ended WITHOUT reaching PIPELINE COMPLETE (crashed or was stopped early)")
-        tmux("kill-session", "-t", session)
+        term.kill()
         result["outcome"] = "session_died"
         result["ended_at"] = time.time()
         result["verify"] = run_verify(task, project_dir, log)
         return result
 
-    if session_alive(session):
+    if term.alive():
         log("pipeline complete -- sending Ctrl-C to stop gracefully")
-        tmux("send-keys", "-t", session, "C-c")
-        if wait_for(session, "SESSION TERMINATED", STOP_CONFIRM_TIMEOUT, log) is None:
+        term.key("C-c")
+        if wait_for(term, "SESSION TERMINATED", STOP_CONFIRM_TIMEOUT, log) is None:
             log("graceful stop did not confirm in time; force-killing session")
-        tmux("kill-session", "-t", session)
+        term.kill()
     else:
         log("session ended on its own right at pipeline completion")
 

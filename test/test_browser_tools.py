@@ -16,12 +16,20 @@ import JFI.tool.browser_tools as browser_tools
 
 
 def test_sets_playwright_browsers_path_default_when_unset(monkeypatch):
+    """Each OS's own Playwright default. Observed on Windows: the Linux path was
+    forced there, so `playwright install chromium` succeeded but every browser
+    tool still reported the browser missing."""
     monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
     importlib.reload(browser_tools)
     try:
-        assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == os.path.expanduser(
-            "~/.cache/ms-playwright" if sys.platform != "darwin" else "~/Library/Caches/ms-playwright"
-        )
+        if sys.platform == "darwin":
+            expected = os.path.expanduser("~/Library/Caches/ms-playwright")
+        elif sys.platform == "win32":
+            expected = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~/AppData/Local")),
+                                    "ms-playwright")
+        else:
+            expected = os.path.expanduser("~/.cache/ms-playwright")
+        assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == expected
     finally:
         monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
         importlib.reload(browser_tools)
@@ -349,3 +357,36 @@ def test_normal_eval_js_unaffected_by_the_timeout_wrapper(monkeypatch):
     assert result.startswith("Success:")
     assert "Eval result" in result
     assert "42" in result
+
+
+def test_check_page_reports_console_errors_and_failed_requests(tmp_path):
+    """For a web app (stui), passing unit tests didn't mean the page worked:
+    the reviewer had no way to see a broken page. Real browser, real page."""
+    pytest.importorskip("playwright")
+    import http.server
+    import threading
+
+    html = b'<html><title>T</title><body>Hello<script>console.error("boom"); fetch("/missing")</script></body></html>'
+
+    class Page(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200 if self.path == "/" else 404)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            if self.path == "/":
+                self.wfile.write(html)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Page)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        out = browser_tools.check_page(f"http://127.0.0.1:{server.server_port}/", screenshot_dir=str(tmp_path))
+    finally:
+        server.shutdown()
+    if "browser binary is not installed" in out:
+        pytest.skip("Chromium isn't installed here (playwright install chromium)")
+    assert out.splitlines()[1].startswith("PROBLEMS:")
+    assert "console error: boom" in out and "/missing -> 404" in out and "Hello" in out
+    assert (tmp_path / "check-1.png").exists()

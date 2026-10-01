@@ -60,12 +60,12 @@ def _dashboard_path() -> str:
     """
     Location of dashboard.py to hand to `streamlit run`.
 
-    Inside a frozen PyInstaller onefile binary, `Path(__file__)` for a
+    Inside a frozen PyInstaller binary, `Path(__file__)` for a
     module compiled into the bundle's own archive isn't a real file on disk
     -- streamlit needs an actual path to exec as a script. build_binary
     adds dashboard.py as a raw --add-data entry instead (at JFI/web/
-    dashboard.py), which PyInstaller's bootloader extracts to sys._MEIPASS
-    at startup, so that's where it lives when frozen.
+    dashboard.py), which lives under sys._MEIPASS (the dist/jfi/_internal
+    folder) when frozen.
     """
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         return str(Path(sys._MEIPASS) / "JFI" / "web" / "dashboard.py")

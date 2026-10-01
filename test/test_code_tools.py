@@ -451,3 +451,39 @@ def test_json_is_scaffolded_as_valid_json(root):
     scaffold_file(root, "real.json", "p", fill=["version"])
     assert unscaffold_file(root, "real.json").startswith("Error")
     assert scaffold_file(root, "bad.json", "p", [{"signature": "export function f()", "does": "x"}]).startswith("Error")
+
+
+# ---------------------------------------------------------------- find_references / apply_patch
+
+def test_find_references_separates_definitions_calls_and_imports_and_skips_comments(tmp_path):
+    """A change or delete leaf needs every caller; search_code also returned
+    comments, strings and look-alike names."""
+    from JFI.tool.code_tools import find_references
+    (tmp_path / "calc").mkdir()
+    (tmp_path / "calc" / "ops.py").write_text("def add(a, b):\n    return a + b\n\n\ndef add_all(xs):\n"
+                                              "    # add every item\n    return sum(add(0, x) for x in xs)\n")
+    (tmp_path / "main.py").write_text('from calc.ops import add\n\nprint(add(1, 2), "add")\n')
+    out = find_references(tmp_path, "add")
+    assert "definitions (1):\n  calc/ops.py:1: def add(a, b):" in out
+    assert "imports (1):\n  main.py:1: from calc.ops import add" in out
+    assert "calc/ops.py:7:" in out and "main.py:3:" in out
+    assert "calc/ops.py:6" not in out  # the comment
+    assert "add_all" not in out.split("definitions")[1].split("calls")[0]  # a look-alike name
+
+
+def test_apply_patch_is_all_or_nothing(tmp_path):
+    from JFI.tool.code_tools import apply_patch
+    (tmp_path / "a.py").write_text("x = 1\ny = 2\n")
+    (tmp_path / "b.py").write_text("z = 3\n")
+    good = ("--- a/a.py\n+++ b/a.py\n@@ -1,2 +1,2 @@\n x = 1\n-y = 2\n+y = 20\n"
+            "--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n-z = 3\n+z = 30\n"
+            "--- /dev/null\n+++ b/c.py\n@@ -0,0 +1 @@\n+w = 4\n")
+    assert apply_patch(tmp_path, good).startswith("Applied the patch to 3 file(s)")
+    assert (tmp_path / "a.py").read_text() == "x = 1\ny = 20\n"
+    assert (tmp_path / "b.py").read_text() == "z = 30\n" and (tmp_path / "c.py").read_text() == "w = 4\n"
+
+    stale = ("--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 10\n"
+             "--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n-z = 3\n+z = 300\n")  # b.py no longer has z = 3
+    answer = apply_patch(tmp_path, stale)
+    assert answer.startswith("Error: a hunk isn't in b.py") and "nothing was changed" in answer
+    assert (tmp_path / "a.py").read_text() == "x = 1\ny = 20\n", "the first file wasn't written either"

@@ -35,10 +35,8 @@ class HistoryMessage(SQLModel, table=True):
     # Set on a role="tool" message, linking it back to the tool_calls
     # entry it answers.
     tool_call_id: Optional[str] = None
-    # Also set on a role="tool" message (the function name) -- every real
-    # construction site (runner.py's tool-call loop,
-    # SimpleSessionManager._repair_dangling_tool_calls' own synthesized
-    # entries) includes this; stored directly rather than reconstructed by
+    # Also set on a role="tool" message (the function name) -- the episode
+    # engine always includes it; stored directly rather than reconstructed by
     # looking up the matching tool_calls entry in an earlier row, which
     # would be fragile if history ever gets edited or partially loaded.
     name: Optional[str] = None

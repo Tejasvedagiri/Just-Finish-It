@@ -20,8 +20,17 @@ markdown `render_plan_markdown` renders for the dashboards.
 - **`plan_status`** is the judge's verdict: GOOD / BREAKDOWN / REDO. Every
   verdict is also kept as a `PlannerVerdict` row.
 - **Node fields** the planner fills: `kind`, `done_when`, `files`,
-  `depends_on` (ordering between nodes, acyclic), plus the counters its
-  guards use (`redo_count`, `escalation_count`, `attempt_count`, ...).
+  `depends_on` (ordering between nodes, acyclic), `notes` (what to implement
+  and how: steps, edge cases, the contract, what not to touch) and
+  `references` (where the context is: design entries like
+  `contract:main->calc`, source ranges like `page.html L1376-1402`, docs or
+  URLs), plus the counters its guards use (`redo_count`, `escalation_count`,
+  `attempt_count`, ...). The description stays at most 200 characters; detail
+  goes in `notes`. The next layer's brief shows notes and references (design
+  entries inlined). The dashboards' Task | Judge table has Notes and References columns, and a node's detail shows its notes as points (`note_points`: numbered steps nest under the line before them, every other sentence is a bullet) and its references as a list.
+  The judge reads the description only.
+- **`checkpoint`**: the git commit taken when the leaf passed
+  (`tool/checkpoint_tools.py`).
 - **Order:** siblings sort by a gap-numbered `sort_key` (10, 20, 30…).
 - **Numbers like `1.2.3` are computed** (`display_number`) and never
   stored. Nothing ever renumbers anything.
@@ -48,7 +57,7 @@ bar, the fleet dashboard and `export-db`. It's display only.
 | Tool | Does |
 |------|------|
 | `get_plan()` | whole tree, never truncated |
-| `get_leaf(id)` | one leaf's full detail |
+| `get_leaf(id)` | one leaf's full detail, with done_when, files, notes, references and fix note |
 
 The reviewer has `get_plan` in its core tools (to find the leaf that owns a
 bug). The planner's roles get their own `get_plan` / `get_node` /

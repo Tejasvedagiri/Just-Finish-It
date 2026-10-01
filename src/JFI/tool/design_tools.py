@@ -86,6 +86,21 @@ def design_index(engine, session_id: str) -> str:
     return design_index_from(rows)
 
 
+def references_text(engine, session_id: str, references) -> list[str]:
+    """A node's references for its brief: a "kind:key" naming a design entry
+    is shown with that entry's text, so the episode doesn't spend turns on
+    design_get (16% of all tool calls on the real runs); anything else (a
+    source range, a doc, a URL) is shown as written."""
+    lines = []
+    with get_session(engine) as db:
+        rows = list(db.exec(select(DesignEntry).where(DesignEntry.session_id == session_id)))
+    by_ref = {f"{r.kind}:{r.key}": r for r in rows}
+    for ref in references or []:
+        row = by_ref.get(str(ref).strip())
+        lines.append(f"{ref} -- {row.text}" if row else str(ref))
+    return lines
+
+
 def make_design_tools(engine, session_id: str, role: str = "") -> Dict[str, Callable]:
     return {
         "design_set": lambda kind, key, text: design_set(engine, session_id, kind, key, text, role),

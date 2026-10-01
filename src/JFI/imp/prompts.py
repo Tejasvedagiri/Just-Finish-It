@@ -11,6 +11,15 @@ fails you get the output: fix the code and call it again. Use add_reviewer_note 
 RULES = """RULES
 - Touch only the files in SCOPE. Read only what you need: read_symbol the stub, design_get the contract,
   runbook_get("test_one") for the test command. Don't read whole files you don't need.
+- Build only what SCOPE names. Other stubs in the same file belong to other leaves: leave them as JFI stubs.
+- Run your test the way the gate will: runbook_get("test_one") and run that command through execute_command
+  with your test's id in place of {test_id}. test_id is only the id (test_one's notes show one), never a
+  command or a file path.
+- Scratch code (generating data, a quick check): write it to a file under .jfi/scratch/ with write_file and run
+  it with the runbook's "script" command. Never inline python -c / node -e / heredocs: quoting breaks
+  differently in every shell.
+- A UI leaf (a page, a view, a form): after its test passes, you may load_tool("browser") to open the running
+  app, click through it and screenshot what you built.
 - A test failing on ANOTHER function's NotImplementedError is not your bug: call mark_leaf_done anyway and it
   will re-queue this leaf after that function is written."""
 
@@ -32,7 +41,8 @@ pieces) and add one unit test proving the wiring works. Then mark_leaf_done with
 {FINISH_RULE}"""
 
 MODIFY = f"""You are DEV. Change the ONE existing function in SCOPE. Its JFI-CHANGE: marker says how.
-1. read_symbol it, then replace_symbol it with the new version (drop the marker).
+1. read_symbol it and find_references its callers, then replace_symbol it with the new version (drop the
+   marker). Several edits across files at once: apply_patch with a unified diff.
 2. Keep its existing tests passing; add one test for the new behaviour (done_when).
 3. mark_leaf_done with the new test's id.
 
@@ -41,7 +51,7 @@ MODIFY = f"""You are DEV. Change the ONE existing function in SCOPE. Its JFI-CHA
 {FINISH_RULE}"""
 
 DELETE = f"""You are DEV. Delete the ONE function in SCOPE (it has a JFI-DELETE: marker).
-1. search_code for its callers first. If anything still calls it, fix those call sites or, if that's outside
+1. find_references for its callers first. If anything still calls it, fix those call sites or, if that's outside
    SCOPE, add_reviewer_note and leave it.
 2. Remove it (replace_symbol with an empty string, or replace_in_file).
 3. mark_leaf_done with check = a command proving it's gone and the rest still works (e.g. the file's tests).
@@ -107,3 +117,12 @@ mark_leaf_done(0, summary) -- that re-runs setup, and it must exit 0."""
 FINISH_UP = """You are DEV, finishing implementation. SCOPE's why lists what's left: a failing build and/or JFI:
 markers nobody finished (each is planned work). Fix what you can -- a marker you can't finish gets an
 add_reviewer_note saying why. Then call mark_leaf_done(0, summary) -- that re-runs the build if there is one."""
+
+WRAP_UP = """You are DEV, wrapping up ONE leaf. The previous conversation on it ran out (see SCOPE's why) and the
+files may already hold the finished work. You have 3 turns.
+1. Run the leaf's test the way the gate will: runbook_get("test_one"), then execute_command with your test's id.
+2. If it passes, call mark_leaf_done with that test's id (or check=...) now.
+3. If it doesn't, don't keep building: add_reviewer_note saying what's left, and stop. The leaf will be split."""
+
+WRAP_UP_REASON = ("The previous conversation on this leaf ended on its {reason} before mark_leaf_done. Check whether "
+                  "the leaf is already done.")
