@@ -21,9 +21,9 @@ Every JFI session runs four phases in order:
 
 | Phase     | What it does |
 |-----------|--------------|
-| **planner** | Architect → Lead → Task, each in short episodes. The Architect maps the project (components, runbook, design contracts); Leads break each component into files; Tasks break files into functions. After each layer a **judge** labels every node GOOD / BREAKDOWN / REDO: a fixed rule, plus a [Laya](https://github.com/NandhaKishorM/laya) score with `LAYA=1` (see [Configuration](#configuration-env)). |
+| **planner** | Architect → Lead → Task, each in short episodes. The Architect maps the project (components, runbook, design contracts) and plans the app's entry point (the runbook's `entry`, e.g. `src/main.js`) as its own component; Leads break each component into files; Tasks break files into functions. Every node carries notes (what to build and why) and references for the next layer. After each layer a **judge** labels every node GOOD or BREAKDOWN: a fixed rule, plus with `LAYA=1` a [Laya](https://github.com/NandhaKishorM/laya) score that asks whether the node's task can be solved within 20k tokens (see [Configuration](#configuration-env)). |
 | **imp** | One short **Dev** episode per GOOD leaf, in dependency order: implement the one function (or change) and its unit test, then `mark_leaf_done`, which is refused until the test passes. Each passing leaf is committed as a git checkpoint in `.jfi/checkpoints.git` (your own git is never touched). Problems worth flagging go to the reviewer as notes. |
-| **reviewer** | Re-runs the project's checks itself (the runbook's end-to-end check; for a web app it also loads the page with `check_page`), reads the Dev notes, and signs off, reopens the leaf that owns a bug (`leaf_diff` shows which leaf changed what), or writes a review report for missing work, which schedules another iteration. Up to 3 failed reviews per session before JFI stops. |
+| **reviewer** | Re-runs the project's checks itself (the runbook's end-to-end check; for a web app it also loads the page with `check_page` and clicks through the goal's flows with `browser`), reads the Dev notes, and signs off, reopens the leaf that owns a bug (`leaf_diff` shows which leaf changed what), or writes a review report for missing work, which schedules another iteration. Up to 3 failed reviews per session before JFI stops. |
 | **cleanup** | Tidies the working directory: moves anything worth keeping into `.jfi/` and deletes the rest. Never touches the deliverable or `.jfi/` itself. |
 
 ### How one run actually flows
@@ -353,7 +353,7 @@ Just-Finish-It/
 ├── src/export_db/                # `uv run export-db`: a project's JFI.db as readable text
 │
 ├── test/                         # pytest suite (see "Tests" below)
-├── benchmark/                    # the eval harness and its tasks (not shipped; see its README)
+├── benchmark/                    # the eval harness, its tasks, score.py, and laya_poc.py (the judge's Laya check; not shipped)
 ├── utils/                        # dev-only: capture_theme_screenshots.py (real TUI screenshots for docs/images/)
 └── docs/                         # pipeline.md and the phase pages, plan-tree.md, create_env_sizing.md, Themes.md, feature-description.md,
                                   # and the rewrite's design and build log (laya_plan.md, laya_impl_phases.md)
@@ -396,7 +396,7 @@ Each episode gets only its role's tools (`ROLE_CORE_TOOLS` in `src/JFI/episode/r
 | `get_node` / `list_nodes` / `get_plan` | Read the plan. |
 | `escalate` | Send the parent node back to the layer above when the node can't be fixed at this layer. |
 | `design_set` / `design_get` | The design: stack, components, contracts, conventions, assumptions, a document's outline. |
-| `runbook_set` / `runbook_get` | How to set up, run, stop, test (`test`, `test_one`), build, check (`e2e`) and run a scratch script (`script`), plus the layout: `src_dir`, `test_dir`, `test_naming`. Operating the app is never a plan node. |
+| `runbook_set` / `runbook_get` | How to set up, run, stop, test (`test`, `test_one`), build, check (`e2e`) and run a scratch script (`script`), the file the app starts from (`entry`), plus the layout: `src_dir`, `test_dir`, `test_naming`. Operating the app is never a plan node. |
 | `scaffold_file` / `unscaffold_file` | Create a file of stubs (a declaration and what it does; the body is generated), or remove one. |
 | `mark_change` | Mark an existing function for Dev to change or delete. |
 | `finish` | End the episode. The Architect's also requires the runbook, design and test setup (or the outline, for a document). |
@@ -421,7 +421,7 @@ Each episode gets only its role's tools (`ROLE_CORE_TOOLS` in `src/JFI/episode/r
 | `add_reviewer_note` / `get_reviewer_notes` | Dev's notes for the reviewer. |
 | `reopen_leaf` | Reviewer: send a built leaf back to Dev with a fix note. |
 | `leaf_diff` | Reviewer: what one leaf changed (its git checkpoint), or which leaves changed a file. |
-| `check_page` | Reviewer (optional for others): load a URL in a headless browser and report console errors, exceptions, failed requests, the visible text and a screenshot. |
+| `check_page` | Reviewer (optional for others): load a URL in a headless browser -- the runbook's `view`, or a static page as `file:///...` -- and report console errors, exceptions, failed requests, the visible text and a screenshot. |
 | `write_review_report` | Reviewer: record work the plan never covered, which starts another iteration. |
 | `finish` | Reviewer's pass re-runs the runbook's `e2e` itself; a pass the e2e refutes is refused. |
 
@@ -456,7 +456,10 @@ On Windows, add `--ignore=test/test_session_lock.py` (it needs POSIX `fcntl`); e
 Highlights:
 
 - `test_planner.py` / `test_imp.py` / `test_reviewer.py` — each phase against a scripted model and a real SQLite DB (Dev's gate runs real pytest).
-- `test_laya_judge.py` — the rule, Laya's score, the LLM tie-break, and the `LAYA` flag.
+- `test_laya_judge.py` — the rule, Laya's sizing score (task + description, 20k tokens, the 0.4 cut-off), the LLM tie-break, and the `LAYA` flag.
+- `test_checkpoint_tools.py` — per-leaf git checkpoints, `leaf_diff` and `revert`, against real git (the project's own repo untouched).
+- `test_browser_session.py` / `test_browser_tools.py` — `browser` and `check_page` against a real headless Chromium and a real page.
+- `test_project_memory.py` — a new session starting from the last session's runbook and design.
 - `test_episode_engine.py` — episodes: budget, turn cap, isolation, forced input, retries.
 - `test_phase_messages.py` / `test_phase_completion.py` — phase keys and completion-marker detection.
 - `test_session_manager.py` — history append/resume semantics and metadata persistence.

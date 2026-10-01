@@ -100,7 +100,7 @@ def bare_engine(tmp_path):
 
 
 @pytest.fixture
-def engine(bare_engine):
+def engine(bare_engine, tmp_path):
     """A session whose base is already complete (stack + required runbook), so
     the Architect's finish gate only matters in the tests about it."""
     from JFI.planner.loop import REQUIRED_RUNBOOK
@@ -109,8 +109,12 @@ def engine(bare_engine):
     design_set(bare_engine, "s", "stack", "stack", "python 3.12, uv, pytest")
     for name in REQUIRED_RUNBOOK:
         command = {"test_one": "uv run pytest {test_id}", "script": "uv run python {file}", "src_dir": "calc/",
-                   "test_dir": "tests/", "test_naming": "calc/ops.py -> tests/test_ops.py"}.get(name, f"uv run {name}")
+                   "test_dir": "tests/", "test_naming": "calc/ops.py -> tests/test_ops.py",
+                   "entry": "main.py"}.get(name, f"uv run {name}")
         runbook_set(bare_engine, "s", name, command, notes="e.g. tests/test_calc.py::test_add")
+    # The app's entry point is already there: the Architect's finish only asks
+    # for an entry node in the tests about it.
+    (tmp_path / "main.py").write_text("from calc import ops\n")
     return bare_engine
 
 
@@ -502,19 +506,56 @@ def test_the_architect_cannot_finish_without_the_base_later_roles_need(bare_engi
                   call("design_set", kind="stack", key="stack", text="python, no unit tests")),
              finish(0),
              turn(call("design_set", kind="stack", key="stack", text="python 3.12, pytest"),
+                  call("add_node", description="wire calc into main.py: read lines and start the REPL",
+                       done_when="python main.py runs", files=["main.py"]),
                   *[call("runbook_set", name=n, notes="e.g. tests/test_calc.py::test_add",
-                         command={"test_one": "pytest {test_id}", "script": "python {file}"}.get(n, f"npm run {n}"))
-                    for n in ("setup", "run", "test", "test_one", "build", "e2e", "script", "src_dir", "test_dir",
-                              "test_naming")]),
+                         command={"test_one": "pytest {test_id}", "script": "python {file}",
+                                  "entry": "main.py"}.get(n, f"npm run {n}"))
+                    for n in ("setup", "run", "test", "test_one", "build", "e2e", "script", "entry", "src_dir",
+                              "test_dir", "test_naming")]),
              finish(0)] + [finish(1)] * 3
     _planner(bare_engine, tmp_path, Console(turns)).run()
     with get_session(bare_engine) as db:
         results = [m.content for m in db.exec(HistoryMessage.__table__.select()).all()
                    if m.role == "tool" and "not finished yet" in (m.content or "")]
     assert len(results) == 1
-    assert ("runbook entries setup, run, test, test_one, build, e2e, script, src_dir, test_dir, test_naming"
-            in results[0])
+    assert ("runbook entries setup, run, test, test_one, build, e2e, script, entry, src_dir, test_dir, "
+            "test_naming" in results[0])
     assert "a test framework in the stack" in results[0]
+
+
+def test_the_app_entry_point_must_be_planned(engine, tmp_path):
+    """Observed on the QA machine's stui run: index.html imported /src/main.js
+    but no node owned it, so nothing wired the shell and views together and
+    Vite failed mid-imp. The runbook's entry must be built by a plan node, or
+    already be in the project."""
+    from JFI.planner.loop import Planner
+    from JFI.planner.nodes import add_node
+    from JFI.tool.design_tools import design_set
+    from JFI.tool.runbook_tools import runbook_set
+    runbook_set(engine, "s", "entry", "src/main.js")
+    design_set(engine, "s", "contract", "main->shell", "main.js calls initShell(root) from shell.js")
+    add_node(engine, "s", "architect", None, "scaffold Vite: index.html loads /src/main.js", files=["index.html"])
+    add_node(engine, "s", "architect", None, "app shell in src/components/shell.js",
+             files=["src/components/shell.js"])
+    planner = Planner(Console([]), engine, "s", "a dashboard", tmp_path, lambda role: LLM(), FallbackJudge())
+    from JFI.episode.brief import ScopeAnchor
+    finish = planner._architect_finish(ScopeAnchor(role="architect", node_id=None, node="the goal",
+                                                   finish="finish(0, summary)"))
+
+    refused = finish(0, "done")
+    assert "a plan node that builds the entry point src/main.js" in refused and "depends_on" in refused
+    add_node(engine, "s", "architect", None, "wire the shell and views together in src/main.js and start the app",
+             files=["src/main.js"], depends_on=[2])
+    assert not finish(0, "done").startswith("Error")
+
+    runbook_set(engine, "s", "entry", "app/cli.py")
+    assert "entry point app/cli.py" in finish(0, "done")
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "cli.py").write_text("print('existing app')\n")
+    assert not finish(0, "done").startswith("Error"), "an entry point the project already has needs no node"
+    runbook_set(engine, "s", "entry", "start the app")
+    assert "the entry file in entry's command" in finish(0, "done")
 
 
 def test_a_lead_that_hits_the_turn_cap_is_continued_not_sent_back(engine, tmp_path, monkeypatch):

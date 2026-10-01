@@ -52,11 +52,15 @@ that isn't a node never gets built. You have a limited number of turns, so make 
 5. Write the runbook: runbook_set for setup, run, stop, view, test, test_one (how to run ONE test, with a
    {{test_id}} placeholder, and notes giving one example id), build, e2e -- the one end-to-end check the reviewer
    will run (often just the full test suite command) -- and script (how to run a scratch file, with a {{file}}
-   placeholder, e.g. "python {{file}}" or "node {{file}}"). Record the layout in the runbook too: src_dir (where
+   placeholder, e.g. "python {{file}}" or "node {{file}}"), and entry -- the file the app starts from (e.g.
+   src/main.js for Vite, main.py for a CLI). The entry point is its own component node: "wire the components
+   together and start the app", files=[the entry file], depends_on the components it imports; a page that loads
+   it (index.html) doesn't build it. Record the layout in the runbook too: src_dir (where
    source lives, e.g. src/), test_dir (where tests live, e.g. __tests__/ or "beside the source") and test_naming
    (how a source file maps to its test file, and how a test id maps to it -- e.g. "src/data/loader.js ->
    __tests__/loader.test.js, id loader"); test_one must agree with them. finish refuses until setup, run, test,
-   test_one, build, e2e, script, src_dir, test_dir and test_naming exist. A stop command stops only this app
+   test_one, build, e2e, script, entry (owned by a node), src_dir, test_dir and test_naming exist. A stop
+   command stops only this app
    (Ctrl+C in its terminal, or its own pid) -- never kill every process by name (e.g. taskkill /IM node.exe),
    which takes down unrelated programs.
    A runbook or design that already has entries was carried over from this project's last session: runbook_get

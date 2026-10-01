@@ -14,7 +14,7 @@ tools, ended by the role's `finish` tool (or the token budget / turn cap).
 
 | Role | Writes | Level of its nodes |
 |------|--------|--------------------|
-| **Architect** | The whole map once: components, the runbook (`setup`, `run`, `test`, `test_one`, `build`, `e2e`, `script`, and the layout: `src_dir`, `test_dir`, `test_naming`) and design contracts | `architect` |
+| **Architect** | The whole map once: components, the runbook (`setup`, `run`, `test`, `test_one`, `build`, `e2e`, `script`, `entry`, and the layout: `src_dir`, `test_dir`, `test_naming`) and design contracts | `architect` |
 | **Lead** | One component broken into files | `lead` |
 | **Task** | One file broken into functions (or copies, config lines, ...) | `task` |
 
@@ -45,9 +45,21 @@ history for the phase-level resume.
 
 The Architect's `finish` is refused until the runbook has every required entry
 (`REQUIRED_RUNBOOK` in `planner/loop.py`), `test_one`'s notes give an example id,
-`script` has its `{file}` placeholder, the stack names a test framework, and a
-plan with 3+ components has at least one design contract. Its conversation may
-be continued up to `ARCHITECT_CONTINUATIONS` times.
+`script` has its `{file}` placeholder, the `entry` file is built by a plan
+node (or already in the project), the stack names a test framework, and a plan
+with 3+ components has at least one design contract. Its conversation may be
+continued up to `ARCHITECT_CONTINUATIONS` times.
+
+**The entry point is planned, through the runbook.** `entry` is the file the
+app starts from (`src/main.js` for Vite, `main.py` for a CLI). On the QA
+machine's stui run, `index.html` imported `/src/main.js` but no node owned it:
+nothing wired the shell and the views together, and Vite failed mid-imp. The
+Architect's prompt makes the entry point its own component ("wire the
+components together and start the app", `depends_on` the components it
+imports), and `finish` refuses until some node's `files` include the entry
+file -- unless the project already has it (extending an existing app). Once
+planned, the Lead scaffolds it with the rest, so the file exists before Dev
+starts.
 
 **Where tests live is the runbook's, not a prompt example.** On the QA
 machine's stui run the Lead prompt's hard-coded colocated example

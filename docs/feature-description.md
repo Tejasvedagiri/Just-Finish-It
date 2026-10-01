@@ -84,6 +84,12 @@ What they showed:
 
 ## Planner
 
+- **The app's entry point is planned** (2026-10-01, after the QA machine's
+  stui run: `index.html` imported `/src/main.js`, no node owned it, and Vite
+  failed mid-imp). New runbook entry `entry` (the file the app starts from);
+  the Architect makes it its own component that wires the others together,
+  and `finish` refuses until a node's `files` include it or the project
+  already has it.
 - Nodes carry `notes` (what to implement and how) and `references` (design
   entries, source ranges, docs) (#29); the next layer's brief shows them,
   design entries inlined (#19).

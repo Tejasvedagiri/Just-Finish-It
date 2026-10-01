@@ -226,7 +226,7 @@ def _unknown_ids(nodes: Sequence[Leaf], parent_id: Optional[int], missing: Seque
 _TEST_FILE = re.compile(r"(^|/)(tests?|__tests__|spec)/|(\.|_)(test|spec)\.[^/]+$|(^|/)test_[^/]+$", re.I)
 
 
-def _repo_path(path: str) -> str:
+def repo_path(path: str) -> str:
     path = path.strip().replace("\\", "/")
     while path.startswith("./"):
         path = path[2:]
@@ -255,12 +255,12 @@ def _test_path_problem(engine, session_id: str, files: Sequence[str]) -> Optiona
         # Observed on the react_counter run: test_dir "." (the repo root) became
         # the folder "/", so every path was refused -- test_index.py,
         # ./test_index.py, tests/test_index.py -- and the Task planner escalated.
-        folder = _repo_path(test_dir)
+        folder = repo_path(test_dir)
         if folder in ("", "."):
-            wrong = [t for t in tests if "/" in _repo_path(t)]
+            wrong = [t for t in tests if "/" in repo_path(t)]
             where = "at the repo root"
         else:
-            wrong = [t for t in tests if not _repo_path(t).startswith(folder + "/")]
+            wrong = [t for t in tests if not repo_path(t).startswith(folder + "/")]
             where = f"under {folder}/"
     if not wrong:
         return None
