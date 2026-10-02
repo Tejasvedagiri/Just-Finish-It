@@ -7,9 +7,14 @@ several GB), and websockets for the fleet dashboard. The build refuses to run
 without them rather than silently shipping a binary that lacks them.
 
 Usage: `uv sync --extra web --extra laya --group dev`, then `uv run build`.
-Output is a folder, dist/jfi/, with the executable dist/jfi/jfi (jfi.exe on
-Windows) inside. A onefile build unpacked its 2.2 GB (torch) on every launch:
-18-35 s before `jfi --version` even answered.
+On Windows/Linux, output is a folder, dist/jfi/, with the executable
+dist/jfi/jfi (jfi.exe on Windows) inside -- a onefile build unpacked its
+2.2 GB (torch) on every launch there: 18-35 s before `jfi --version` even
+answered. On macOS the output is a single file, dist/jfi, that can be copied
+anywhere on its own -- requested over the onedir folder despite that same
+per-launch unpack cost, because a onedir build's executable is useless
+without its `_internal/` directory alongside it, and that's easy to leave
+behind when copying just the binary out of dist/jfi/.
 """
 
 import sys
@@ -33,12 +38,17 @@ def _missing_extras() -> list[str]:
     return [extra for module, extra in REQUIRED.items() if importlib.util.find_spec(module) is None]
 
 
-def remove_old_onefile(dist: Path) -> None:
-    """An earlier onefile build: dist/jfi on Linux/macOS, which the folder
-    build needs the name of, and dist/jfi.exe on Windows, which was left
-    beside dist/jfi/ (2.2 GB) after the switch to a folder build."""
-    for old in (dist / BINARY_NAME, dist / f"{BINARY_NAME}.exe"):
-        if old.is_file():
+def remove_stale_build(dist: Path) -> None:
+    """--onefile and --onedir both claim dist/jfi (dist/jfi.exe on Windows),
+    one as a plain file and the other as a directory -- switching between
+    them (e.g. a macOS onefile build after an older onedir one) leaves the
+    other kind behind, which PyInstaller then refuses to overwrite."""
+    import shutil
+    for name in (BINARY_NAME, f"{BINARY_NAME}.exe"):
+        old = dist / name
+        if old.is_dir():
+            shutil.rmtree(old)
+        elif old.is_file():
             old.unlink()
 
 
@@ -67,11 +77,12 @@ def main() -> None:
         )
         raise SystemExit(1)
 
+    onefile = sys.platform == "darwin"
     build_dir = PROJECT_ROOT / "build" / "pyinstaller"
     args = [
         str(ENTRY_POINT),
         "--name", BINARY_NAME,
-        "--onedir",
+        "--onefile" if onefile else "--onedir",
         # `jfi --version` reads the installed package's metadata; without it
         # the binary printed "unknown".
         "--copy-metadata", "just-finish-it",
@@ -113,10 +124,14 @@ def main() -> None:
         "--workpath", str(build_dir),
         "--specpath", str(build_dir),
     ]
-    remove_old_onefile(PROJECT_ROOT / "dist")
+    remove_stale_build(PROJECT_ROOT / "dist")
     PyInstaller.__main__.run(args)
 
-    output_path = PROJECT_ROOT / "dist" / BINARY_NAME / (BINARY_NAME + (".exe" if sys.platform == "win32" else ""))
+    output_path = (
+        PROJECT_ROOT / "dist" / BINARY_NAME
+        if onefile
+        else PROJECT_ROOT / "dist" / BINARY_NAME / (BINARY_NAME + (".exe" if sys.platform == "win32" else ""))
+    )
     if sys.platform == "darwin":
         # PyInstaller's own re-sign step (see its "Re-signing the EXE" log
         # line above) leaves arm64 builds with a signature the OS's launch
