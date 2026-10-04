@@ -228,3 +228,56 @@ def test_a_session_start_warns_when_the_server_reloaded_the_model_smaller():
     assert detect.startup_warning({**env, "CONTEXT_SIZE": "4096"}, get_json=lambda url, **k: small) is None
     assert detect.startup_warning({**env, "LLM_BACKEND": "anthropic"}, get_json=lambda url, **k: small) is None
     assert detect.startup_warning(env, get_json=lambda url, **k: None) is None  # server down: silent
+
+
+# ------------------------------------------------------------------ PARALLEL_LLM
+
+def test_lm_studio_and_llama_cpp_report_how_many_requests_they_serve_at_once(monkeypatch):
+    """The planner caps PARALLEL_LLM by these (JFI.llm.parallel); create-env
+    reads the same numbers so its suggestion matches what a run will use."""
+    monkeypatch.setattr(detect, "lms_path", lambda os_name=None: "lms")
+    ps = json.dumps([{"modelKey": "qwen/qwen3.8-27b", "contextLength": 40960, "parallel": 4}])
+    get = lambda url, **k: LMSTUDIO_MODELS if url.endswith("/api/v0/models") else None  # noqa: E731
+    qwen, glimmer = detect.detect_models("lmstudio", "http://127.0.0.1:1234/v1", get_json=get,
+                                         run=_runner({"lms ls": LMS_LS, "lms ps": ps}))
+    assert (qwen.parallel, glimmer.parallel) == (4, None)
+
+    def llama(url, **k):
+        if url.endswith("/props"):
+            return {"total_slots": 2, "default_generation_settings": {"n_ctx": 65536}}
+        return {"data": [{"id": "gemma-4-31b.gguf"}]}
+    [m] = detect.detect_models("llamacpp", "http://127.0.0.1:8080/v1", get_json=llama)
+    assert m.parallel == 2
+
+
+def test_parallel_is_capped_by_how_many_episodes_the_loaded_context_holds():
+    """Observed on LM Studio (qwen3.8-27b, 40,960 context, parallel=4): two
+    requests at once ran, four failed with "Context size has been exceeded"
+    -- the slots share one context. At CONTEXT_SIZE=20480 that's 2."""
+    loaded = detect.Detected(model=detect.ServerModel("qwen/qwen3.8-27b", True, 40960, 262144, parallel=4))
+    capped = detect.suggest_parallel("lmstudio", loaded, 20480)
+    assert capped.value == "2"
+    assert "CONTEXT_SIZE to 10240" in capped.reason and "81920-token context for 4" in capped.reason
+    assert detect.suggest_parallel("lmstudio", loaded, 10240).value == "4"
+
+
+def test_parallel_is_one_when_the_server_reports_nothing_and_as_is_when_hosted():
+    not_loaded = detect.Detected(model=detect.ServerModel("meta/muse-glimmer", False, None, 131072))
+    suggestion = detect.suggest_parallel("lmstudio", not_loaded, 32768)
+    assert suggestion.value == "1" and "lms load meta/muse-glimmer --parallel N" in suggestion.reason
+    ollama = detect.Detected(model=detect.ServerModel("qwen3:32b", True, 16384, 40960))
+    assert detect.suggest_parallel("ollama", ollama, 16384).value == "1"
+    one_slot = detect.Detected(model=detect.ServerModel("m", True, 65536, parallel=1))
+    assert detect.suggest_parallel("llamacpp", one_slot, 16384).value == "1"
+    hosted = detect.Detected(hosted=True)
+    assert detect.suggest_parallel("anthropic", hosted, 200000).value == str(detect.HOSTED_PARALLEL)
+
+
+def test_a_parallel_setting_the_server_cant_serve_is_noted():
+    loaded = detect.ServerModel("qwen/qwen3.8-27b", True, 40960, 262144, parallel=4)
+    note = detect.parallel_shortfall("4", "20480", "lmstudio", loaded)
+    assert "PARALLEL_LLM is 4" in note and "run 2 at a time" in note
+    assert detect.parallel_shortfall("2", "20480", "lmstudio", loaded) is None
+    assert detect.parallel_shortfall("1", "40960", "lmstudio", loaded) is None
+    # Nothing reported (a vLLM box, LM Studio without `lms`): the runtime explains it, not create-env.
+    assert detect.parallel_shortfall("4", "20480", "custom", detect.ServerModel("m", True, 40960)) is None

@@ -1,0 +1,66 @@
+[
+  {
+    "id": "s01",
+    "title": "Neon Harbor",
+    "artist": "The Glass Pilots",
+    "album": "Low Tide",
+    "duration": 2.0,
+    "file": "music/neon-harbor.wav"
+  },
+  {
+    "id": "s02",
+    "title": "Paper Satellites",
+    "artist": "Juniper Static",
+    "album": "Signal Fires",
+    "duration": 2.0,
+    "file": "music/paper-satellites.wav"
+  },
+  {
+    "id": "s03",
+    "title": "Slow Orbit",
+    "artist": "Mara Quell",
+    "album": "Driftwood",
+    "duration": 2.0,
+    "file": "music/slow-orbit.wav"
+  },
+  {
+    "id": "s04",
+    "title": "Midnight Ferry",
+    "artist": "Neon Wolves",
+    "album": "Crossings",
+    "duration": 2.0,
+    "file": "music/midnight-ferry.wav"
+  },
+  {
+    "id": "s05",
+    "title": "Copper Rain",
+    "artist": "Juniper Static",
+    "album": "Signal Fires",
+    "duration": 2.0,
+    "file": "music/copper-rain.wav"
+  },
+  {
+    "id": "s06",
+    "title": "Tidewater",
+    "artist": "The Glass Pilots",
+    "album": "Low Tide",
+    "duration": 2.0,
+    "file": "music/tidewater.wav"
+  },
+  {
+    "id": "s07",
+    "title": "Lantern Season",
+    "artist": "Odette Vance",
+    "album": "Small Hours",
+    "duration": 2.0,
+    "file": "music/lantern-season.wav"
+  },
+  {
+    "id": "s08",
+    "title": "Kite Weather",
+    "artist": "Mara Quell",
+    "album": "Driftwood",
+    "duration": 2.0,
+    "file": "music/kite-weather.wav"
+  }
+]

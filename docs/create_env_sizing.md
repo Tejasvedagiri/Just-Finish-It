@@ -101,6 +101,7 @@ CONTEXT_SIZE [38144]   <- LM Studio has qwen3.8-27b loaded with a 38,144-token c
 | **`LAYA_DEVICE`** | free VRAM after the model | `cuda` if ≥ 4 GB VRAM free with the model loaded, else `cpu` | cpu (2.8 GB free) |
 | **`UNLOAD_LLM_BEFORE_LAYA`** | free RAM | on if free RAM < 6 GB (Laya's ~3.5 GB plus headroom) | off |
 | **`LAYA`** | whether the `laya` extra is installed | offered only when it is; default off | off |
+| **`PARALLEL_LLM`** | the loaded model's `parallel` (`lms ps`) / llama.cpp's `total_slots`, its loaded context | min(slots, loaded context // `CONTEXT_SIZE`, 10); hosted: 4; Ollama or nothing reported: 1 (added with `feature/parllel`, see `docs/phase-planner.md`) | 1 (38,144 loaded = one 38,144 episode) |
 | **`MODEL`** | the server's model list | prefer the **loaded** model; if none is loaded, mark which ones fit in VRAM (`sizeBytes` ≤ free VRAM) | qwen/qwen3.8-27b |
 
 Not computed (they're preferences, not sizing): `TEMPERATURE`,

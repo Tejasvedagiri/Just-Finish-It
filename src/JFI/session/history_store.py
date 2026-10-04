@@ -16,9 +16,13 @@ runner.py builds it conditionally), so nothing downstream needs to change
 because history now comes from the DB instead of a file.
 """
 
+import threading
+
 from sqlmodel import select
 
 from JFI.models import HistoryMessage, get_session
+
+_APPEND_LOCK = threading.Lock()
 
 
 def has_history(engine, session_id: str) -> bool:
@@ -61,7 +65,9 @@ def append_history_to_db(engine, session_id: str, messages: list[dict], episode_
     rows, continuing this session's own seq counter."""
     if not messages:
         return
-    with get_session(engine) as db:
+    # seq is max+1, read then written: two parallel planner episodes
+    # (PARALLEL_LLM) appending at once would both take the same seq.
+    with _APPEND_LOCK, get_session(engine) as db:
         existing_max = db.exec(
             select(HistoryMessage.seq)
             .where(HistoryMessage.session_id == session_id)

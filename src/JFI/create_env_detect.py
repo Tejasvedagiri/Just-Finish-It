@@ -197,6 +197,7 @@ class ServerModel:
     params: str = ""
     quantization: str = ""
     arch: str = ""
+    parallel: Optional[int] = None  # requests the server runs at once (LM Studio's `parallel`, llama.cpp's slots)
 
 
 def _root(url: str) -> str:
@@ -239,6 +240,8 @@ def _lmstudio(url: str, get_json: Callable, run: Callable) -> Optional[List[Serv
         quant = entry.get("quantization")
         if isinstance(quant, dict) and quant.get("name"):
             m.quantization = quant["name"]
+        if m.loaded and isinstance(entry.get("parallel"), int):
+            m.parallel = entry["parallel"]
     return models
 
 
@@ -269,12 +272,13 @@ def _llamacpp(url: str, get_json: Callable) -> Optional[List[ServerModel]]:
     if not isinstance(props, dict):
         return None
     ctx = props.get("n_ctx") or (props.get("default_generation_settings") or {}).get("n_ctx")
+    slots = props.get("total_slots") if isinstance(props.get("total_slots"), int) else None
     models = []
     for m in listed.get("data") or [{"id": "the loaded model"}]:
         meta = m.get("meta") or {}
         models.append(ServerModel(id=m.get("id", "?"), loaded=True, loaded_context=ctx,
                                   max_context=meta.get("n_ctx_train"),
-                                  size_gb=(meta.get("size") or 0) / GB or None))
+                                  size_gb=(meta.get("size") or 0) / GB or None, parallel=slots))
     return models
 
 
@@ -448,6 +452,61 @@ def compute(model_id: str, detected: Detected, guess_context: Callable[[str], in
             detected.warnings.append(f"{m.id} is {m.size_gb:.1f} GB but the {where} is {total:.1f} GB: it will "
                                      f"run partly from RAM, much slower.")
     return out
+
+
+# JFI.llm.parallel.MAX_PARALLEL_LLM -- not imported: that module needs httpx,
+# and create-env runs before dependencies are installed.
+MAX_PARALLEL_LLM = 10
+HOSTED_PARALLEL = 4
+
+
+def suggest_parallel(backend: str, detected: Detected, context_size: int) -> Suggestion:
+    """PARALLEL_LLM the way the planner will cap it at runtime
+    (JFI.llm.parallel.effective_parallel): what the server serves at once, and
+    no more episodes than its loaded context holds whole -- the slots share
+    one context, and four 11.5k-token requests on a 40k LM Studio load
+    failed with "Context size has been exceeded". A value above that cap
+    only costs a notice at runtime, but it's no faster either."""
+    if detected.hosted:
+        return Suggestion("PARALLEL_LLM", str(HOSTED_PARALLEL),
+                          "a hosted API serves concurrent requests; raise it if your rate limits allow")
+    if backend == "ollama":
+        return Suggestion("PARALLEL_LLM", "1", "Ollama doesn't report how many requests it serves at once, "
+                                               "so JFI runs one at a time whatever this says")
+    m = detected.model
+    if not m or not m.parallel:
+        how = (f"load it with `lms load {m.id} --parallel N` and rerun create-env" if m and backend == "lmstudio"
+               else "start it with `--parallel N` (llama-server) for more")
+        return Suggestion("PARALLEL_LLM", "1", f"the server didn't report how many requests it serves at once; {how}")
+    if m.parallel <= 1:
+        return Suggestion("PARALLEL_LLM", "1", f"the server serves {m.id} one request at a time; "
+                                               "reload it with `--parallel N` for more")
+    slots = min(m.parallel, MAX_PARALLEL_LLM)
+    whole = max(1, m.loaded_context // context_size) if m.loaded_context and context_size > 0 else slots
+    if whole >= slots:
+        return Suggestion("PARALLEL_LLM", str(slots), f"the server serves {m.id} with parallel={m.parallel}")
+    return Suggestion("PARALLEL_LLM", str(whole),
+                      f"the server serves {m.id} with parallel={m.parallel}, but its {m.loaded_context:,}-token "
+                      f"context holds {whole} episode(s) of CONTEXT_SIZE={context_size:,} -- lower CONTEXT_SIZE "
+                      f"to {m.loaded_context // slots} or reload it with a {context_size * slots}-token context "
+                      f"for {slots}")
+
+
+def parallel_shortfall(env_parallel: Optional[str], env_context: Optional[str], backend: str,
+                       model: Optional[ServerModel]) -> Optional[str]:
+    """A note when .env's PARALLEL_LLM is more than the server reports it
+    serves -- the planner caps it at runtime, so this says why it'll be
+    slower than asked. Silent when the server reports nothing."""
+    try:
+        wanted, context = int(env_parallel or ""), int(env_context or "")
+    except ValueError:
+        return None
+    if wanted <= 1 or not model or not model.loaded or not (model.parallel or backend == "ollama"):
+        return None
+    cap = suggest_parallel(backend, Detected(model=model), context)
+    if int(cap.value) >= min(wanted, MAX_PARALLEL_LLM):
+        return None
+    return f"PARALLEL_LLM is {wanted} but the planner will run {cap.value} at a time: {cap.reason}."
 
 
 def context_mismatch(env_context: Optional[str], model: Optional[ServerModel]) -> Optional[str]:

@@ -498,7 +498,15 @@ def _configure_llm(values: dict, updates: dict, prefix: str = "",
     suggestions = {s.name: s for s in detect.compute(model, found, lambda m: guess_context_size(backend, m))}
     for warning in found.warnings:
         print(f"{WARN}{warning}")
-    _ask(values, updates, suggestions["CONTEXT_SIZE"], key=key("CONTEXT_SIZE"))
+    context = _ask(values, updates, suggestions["CONTEXT_SIZE"], key=key("CONTEXT_SIZE"))
+    # PARALLEL_LLM has no per-phase form: the shared server's answer sizes it,
+    # and the planner caps it again per role's own server at runtime.
+    if not prefix:
+        try:
+            context_size = int(context)
+        except ValueError:
+            context_size = int(suggestions["CONTEXT_SIZE"].value)
+        suggestions["PARALLEL_LLM"] = detect.suggest_parallel(backend, found, context_size)
     return backend, model, suggestions
 
 
@@ -584,6 +592,11 @@ def _configure_pipeline(values: dict, updates: dict, sizing: dict | None = None)
     print("\n--- Planner and Dev ---")
     for name, default, suffix in _PLANNER_KNOBS:
         updates[name] = _prompt_text(f"{name}{suffix}", values.get(name, default))
+    print("   PARALLEL_LLM: how many Lead / Task breakdown episodes run at once (1-10).")
+    if "PARALLEL_LLM" in sizing:
+        _ask(values, updates, sizing["PARALLEL_LLM"])
+    else:
+        updates["PARALLEL_LLM"] = _prompt_text("PARALLEL_LLM", values.get("PARALLEL_LLM", "1"))
 
     print("\n--- Planner judge ---")
     if not _laya_installed():
@@ -807,6 +820,10 @@ def main() -> None:
         mismatch = detect.context_mismatch(values.get("CONTEXT_SIZE"), loaded)
         if mismatch:
             print(f"{CROSS} {mismatch}")
+        too_parallel = detect.parallel_shortfall(values.get("PARALLEL_LLM"), values.get("CONTEXT_SIZE"), backend,
+                                                 loaded)
+        if too_parallel:
+            print(f"{WARN}{too_parallel}")
 
     if not values:
         config_ok = False
