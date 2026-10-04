@@ -27,7 +27,7 @@ the fact.** No task is scored by asking a human (or another LLM) "does this look
 | `polyglot` | Aider's polyglot benchmark | Clean-room implementation against a spec, verified by a hidden reference test suite | Yes -- 5 problems x 2 languages = 10 tasks (Python + JavaScript) |
 | `terminal` | Terminal-Bench | Building a small app and having it actually work end-to-end (real stdin/stdout, not just "files exist") | Yes -- 1 task |
 | `html` | Terminal-Bench's "does it actually work" spirit, applied to static frontend output | Producing correct, structured HTML/CSS with no build tooling in the way | Yes -- 3 tasks |
-| `webapp` | Terminal-Bench + real framework tooling | A real npm-based frontend stack (React, Next.js) actually compiling/running, not just static markup | Yes -- 2 tasks |
+| `webapp` | Terminal-Bench + real framework tooling | A real npm-based frontend stack (React, Next.js) actually compiling/running, not just static markup; a multi-module app driven in a real browser | Yes -- 3 tasks |
 | `data_engineering` | Aider-style hidden-test grading, applied to data work | Parsing/cleaning/aggregating a fixed dataset and matching exact reference values (pandas + stdlib) | Yes -- 2 tasks |
 | `story` | No direct industry analogue -- see Evaluation methodology below | Following a creative-writing brief through JFI's own plan-driven pipeline | Yes -- 2 tasks |
 | `swebench` | SWE-bench | Reading and correctly modifying an *existing* codebase to resolve a real issue | Not yet -- see `tasks/swebench/README.md` for exactly what's needed and how to plug real instances in |
@@ -67,6 +67,17 @@ to avoid, because a real signal on modern frontend stacks was worth the cost:
   static HTML with no dev server to keep alive during grading -- avoiding the port/process
   flakiness a live Next.js server would add, while still exercising real framework scaffolding,
   routing, and a real npm build.
+- `music_player`: a browser music player -- library, search, play/pause, next/prev, shuffle,
+  playlists saved in localStorage -- as plain ES modules, one per concern (the prompt asks for
+  that, so the plan has several independent files: it's the task for comparing serial and
+  parallel Dev). Its song library (`music/`: `library.json` and eight 2-second WAV tones from
+  `make_music.py`) is the task's `hidden_tests_dir`, placed in the project before the run. The
+  checker serves the project over HTTP and drives it in headless Chromium through Playwright
+  (JFI's own dependency, so no npm), reading which song plays from the `<audio>` element itself;
+  then the model's own `node --test` suite must pass. 31 checks. Self-tested on 2026-10-02: a
+  small reference player passed 31/31 three runs in a row (~13 s each); copies of it with no
+  auto-advance, no persistence, a shuffle that repeats songs, and a shuffle that never
+  randomizes each failed exactly the matching check.
 
 `data_engineering` tasks provide a fixed input dataset alongside the hidden test suite (both
 under `hidden_tests_dir`, visible to the model, do-not-edit) and check exact reference values
@@ -235,7 +246,10 @@ tells you:
 - `webapp` is the most infrastructure-dependent tier: `react_counter`'s verify needs network
   access twice (once for the model's own CDN script tags to work at all, once for `jsdom` to
   fetch the same CDN URLs at grading time), and `nextjs_static`'s verify needs network access
-  for `npm install` plus tens of seconds for a real compile. Both are self-tested against a
+  for `npm install` plus tens of seconds for a real compile. `music_player`'s needs no network
+  but does need Playwright's Chromium (`playwright install chromium`) and Node for `node
+  --test`, and the Python that runs `verify.command` must have `playwright` -- the harness's
+  own interpreter on Windows; on Linux/macOS the `python3` on PATH. All three are self-tested against a
   correct and a deliberately-wrong reference solution (see below), but they're the least
   reproducible tasks here if the sandbox has no internet access or npm registry is unreachable
   -- unlike every other tier, which runs fully offline once the model's own session is done.

@@ -24,6 +24,9 @@ re-judged.
 
 import os
 import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -31,10 +34,12 @@ from typing import Callable, List, Optional
 from JFI.episode.brief import ScopeAnchor, build_system_message
 from JFI.episode.budget import episode_token_budget
 from JFI.episode.engine import make_finish, run_episode
+from JFI.episode.parallel_console import ParallelConsole
 from JFI.episode.roles import ROLE_ENV_PREFIXES, ROLE_FINISH_TOOL
 from JFI.episode.tools import EpisodeTools
 from sqlmodel import select
 
+from JFI.llm.parallel import effective_parallel
 from JFI.models import DesignEntry, Leaf, PlanEvent, PlannerVerdict, RunbookEntry, get_session
 from JFI.planner.judge import CHECKPOINT, JudgeNode
 from JFI.planner.nodes import (
@@ -103,6 +108,13 @@ class Planner:
         self.pool_tools = pool_tools or (lambda role: {})
         self.episodes = 0
         self.failed: Optional[str] = None
+        # PARALLEL_LLM: Lead / Task breakdowns of one level run side by side.
+        # The plan tools read the tree, check it (duplicates, file owners,
+        # depends_on) and then write, so they run one at a time across
+        # episodes; otherwise two Leads could both claim the same file.
+        self._write_lock = threading.RLock()
+        self._render_lock, self._ask_lock = threading.RLock(), threading.RLock()
+        self._parallel_notices: dict = {}
 
     # ---------------------------------------------------------------- run
 
@@ -136,7 +148,7 @@ class Planner:
             elif kind == "redo":
                 self._redo(nodes[0])
             else:
-                self._breakdown(nodes[0])
+                self._breakdowns(nodes)
 
     def _architect(self, mode: str):
         """One Architect conversation, continued (up to ARCHITECT_CONTINUATIONS
@@ -252,11 +264,60 @@ class Planner:
             else:
                 self._set_status(node.id, REDO, after.redo_reason, bump_redo=True)
 
-    def _breakdown(self, node: Leaf) -> None:
+    def _parallel_for(self, role: str):
+        """Probed at every batch, not once: LM Studio loads a model on its
+        first request, so before the Architect has run nothing is loaded and
+        there's no parallel setting to read."""
+        workers, why = effective_parallel(self.llm_for_role(role))
+        notice = f"{role.capitalize()} episodes: {workers} at a time ({why})."
+        if self._parallel_notices.get(role) != notice:
+            self._parallel_notices[role] = notice
+            self.console.display_system(notice)
+        return workers, why
+
+    def _breakdowns(self, nodes: List[Leaf]) -> None:
+        """The level's unsplit nodes: the first one alone, or with
+        PARALLEL_LLM, all of them `workers` at a time. Each node's episodes
+        only add under that node and only escalate that node, so siblings
+        don't step on each other; the loop re-reads the DB after the batch."""
+        role = NEXT_ROLE[nodes[0].level]
+        workers, why = self._parallel_for(role) if role in ("lead", "task") and len(nodes) > 1 else (1, "")
+        if workers <= 1:
+            self._breakdown(nodes[0])
+            return
+        running: dict = {}
+
+        def publish() -> None:
+            with self._write_lock:
+                rows = sorted(running.values(), key=lambda r: r["started_at"])
+            self.console.set_status(parallel={"role": role, "workers": workers, "why": why, "running": rows})
+
+        def one(node: Leaf) -> None:
+            if self.failed or self.console.should_stop() or self.episodes >= max_planner_episodes():
+                return
+            with self._write_lock:
+                running[node.id] = {"node_id": node.id, "task": node.description, "started_at": time.time()}
+            publish()
+            try:
+                self._breakdown(node, ParallelConsole(self.console, f"{role} · node {node.id}",
+                                                      self._render_lock, self._ask_lock))
+            finally:
+                with self._write_lock:
+                    running.pop(node.id, None)
+                publish()
+
+        try:
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"jfi-{role}") as pool:
+                for future in [pool.submit(one, n) for n in nodes]:
+                    future.result()
+        finally:
+            self.console.set_status(parallel={})
+
+    def _breakdown(self, node: Leaf, console=None) -> None:
         role = NEXT_ROLE[node.level]
         mode = "split" if node.level == "task" else "breakdown"
         self._event(node.id, "breakdown", f"{role} {mode}")
-        result = self._episode(role, mode, node)
+        result = self._episode(role, mode, node, console=console)
         if result is not None and result.end_reason == "turn_cap":
             # Running out of turns isn't proof the node is too big -- only
             # running out of budget is -- and it isn't proof the node is fully
@@ -271,13 +332,13 @@ class Planner:
             added = ("You had added these nodes under it:\n" + "\n".join(f"- {c.id}: {c.description}" for c in done)
                      + "\nKeep them; add only what's still missing, then finish.") if done else \
                 "You hadn't added any nodes yet. Add them, then finish."
-            result = self._episode(role, mode, node, reason=(
+            result = self._episode(role, mode, node, console=console, reason=(
                 "your previous conversation on this node hit its turn limit before it finished. What it did is "
                 "saved: files it scaffolded are on disk (outline_file / list_dir them); don't redo them. " + added))
         if result is not None and result.end_reason == "error" and \
                 not children_of(load_nodes(self.engine, self.session_id), node.id):
             self._event(node.id, "error", f"{role} {mode} ended on an LLM error; retrying once")
-            result = self._episode(role, mode, node, reason=(
+            result = self._episode(role, mode, node, console=console, reason=(
                 "your previous conversation on this node was cut off by a model-server error. What it did is "
                 "saved: files it scaffolded are on disk (outline_file / list_dir them). Add the nodes, then finish."))
         nodes = load_nodes(self.engine, self.session_id)
@@ -302,10 +363,12 @@ class Planner:
 
     # ---------------------------------------------------------------- episodes
 
-    def _episode(self, role: str, mode: str, node: Optional[Leaf], reason: str = ""):
-        if self.console.should_stop():
+    def _episode(self, role: str, mode: str, node: Optional[Leaf], reason: str = "", console=None):
+        console = console or self.console
+        if console.should_stop():
             return None
-        self.episodes += 1
+        with self._write_lock:
+            self.episodes += 1
         nodes = load_nodes(self.engine, self.session_id)
         by_id = {n.id: n for n in nodes}
         if node is None:
@@ -326,22 +389,29 @@ class Planner:
                                  references=references_text(self.engine, self.session_id, node.references))
         scope_id = node.id if node is not None else None
         impl = {**self.pool_tools(role),
-                **make_node_tools(self.engine, self.session_id, role, scope_id),
-                **make_runbook_tools(self.engine, self.session_id, role),
-                **make_design_tools(self.engine, self.session_id, role),
+                **self._locked(make_node_tools(self.engine, self.session_id, role, scope_id)),
+                **self._locked(make_runbook_tools(self.engine, self.session_id, role)),
+                **self._locked(make_design_tools(self.engine, self.session_id, role)),
                 **make_code_tools(self.root),
                 "finish": self._architect_finish(anchor) if role == "architect" and node is None
                 else make_finish(anchor)}
         system = build_system_message(anchor, ROLE_PROMPTS[(role, mode)],
                                       [runbook_index(self.engine, self.session_id),
                                        design_index(self.engine, self.session_id)])
-        self.console.set_status(stage=role.capitalize(), task=anchor.node[:140])
-        self.console.display_rule(f"PLANNER · {role.upper()} {mode}"
-                                  + (f" — node {node.id}" if node is not None else ""))
-        return run_episode(self.llm_for_role(role), self.console, self.engine, self.session_id,
+        console.set_status(stage=role.capitalize(), task=anchor.node[:140])
+        console.display_rule(f"PLANNER · {role.upper()} {mode}" + (f" — node {node.id}" if node is not None else ""))
+        return run_episode(self.llm_for_role(role), console, self.engine, self.session_id,
                            role=role, mode=mode, anchor=anchor, system_message=system,
                            tools=EpisodeTools(role, impl),
                            budget=episode_token_budget(ROLE_ENV_PREFIXES[role]))
+
+    def _locked(self, tools: dict) -> dict:
+        def guard(fn):
+            def call(*args, **kwargs):
+                with self._write_lock:
+                    return fn(*args, **kwargs)
+            return call
+        return {name: guard(fn) for name, fn in tools.items()}
 
     def _architect_finish(self, anchor: ScopeAnchor):
         """The Architect's finish refuses until the base it owns is complete:

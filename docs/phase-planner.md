@@ -80,6 +80,44 @@ recent earlier session's runbook (unverified) and its stack, component,
 contract and convention design entries (`session/project_memory.py`); the
 Architect's prompt says to keep what still fits the goal and correct the rest.
 
+## Parallel breakdowns (`PARALLEL_LLM`)
+
+With `PARALLEL_LLM=N` (1-10) a breakdown step takes all of the level's unsplit
+nodes, not just the first, and runs their Lead (or Task) episodes `N` at a time
+(`Planner._breakdowns`); the loop re-reads the DB once the batch is done. The
+Architect, judging and redos stay one at a time.
+
+`N` is capped by what the role's model server serves at once
+(`JFI.llm.parallel`), probed at every batch because LM Studio only loads a
+model on its first request:
+
+| Backend | Cap |
+|---|---|
+| LM Studio | the loaded model's `parallel` from `lms ps --json`; not loaded or no `lms`: 1 |
+| llama.cpp, or a local server answering `/props` | `total_slots` |
+| Anthropic, or an OpenAI-compatible API on a non-local host | none |
+| Ollama, any other local server | 1 (none of them reports it) |
+
+The planner prints the result once per change ("Lead episodes: 4 at a time
+(LM Studio serves qwen/qwen3.8-27b with parallel=4)").
+
+What keeps siblings apart: a breakdown episode only adds under, and only
+escalates, its own node. The plan, runbook and design tools read the tree,
+check it (duplicates, file owners, `depends_on`) and then write, so they run
+under one lock across episodes -- otherwise two Leads could both pass the
+file-owner check for the same file. History rows take their `seq` under a lock
+too. Each episode's reply is collected and then drawn whole under a
+`── lead · node N` label (`episode/parallel_console.py`), so streams don't
+interleave; the output caps still cut a runaway reply off while it's collected.
+The LLM-failure Retry/Stop menu is asked one episode at a time, and a `!`
+interjection goes to whichever episode reads it first.
+
+The status bar's one `task` can only name one of the batch, so the status
+snapshot carries `parallel` (`role`, `workers`, `why`, `running`: `node_id`,
+`task`, `started_at`; `{}` once the batch ends). `jfi-web` lists it under
+"Current item" and the fleet dashboard (`Just-Finish-It-Fleet`'s
+`renderParallelPanel`) under Current task.
+
 ## The judge (`LAYA`)
 
 By default every node is judged by the rule alone. With `LAYA=1` in `.env`,

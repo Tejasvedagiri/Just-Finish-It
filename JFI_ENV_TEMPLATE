@@ -198,6 +198,14 @@ MODEL=qwen3:8b
 # PLANNER_ESCALATION_CAP=1
 # MAX_PLANNER_EPISODES=200
 
+# How many Lead / Task breakdown episodes run at once (1-10; 1 or unset =
+# one at a time). Only as many as the model server serves in parallel: LM
+# Studio's loaded model's "parallel" (lms load <model> --parallel N, or the
+# load dialog), llama.cpp's slots (llama-server --parallel N); hosted APIs
+# and Anthropic use it as is; Ollama and other local servers stay at 1
+# (they don't report it). The planner prints what it used and why.
+# PARALLEL_LLM=1
+
 # v2 Dev: how many fresh episodes one leaf gets before it's sent back to Task
 # to be split into smaller pieces (default 3).
 # MAX_DEV_ATTEMPTS=3

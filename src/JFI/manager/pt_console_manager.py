@@ -387,6 +387,7 @@ class PromptToolkitConsoleManager(AbstractManager):
         self._phase_plan = None  # (ticked, total) checkbox progress, current phase's section only
         self._plan_markdown: Optional[str] = None  # the plan as checklist markdown, for a remote view
         self._plan_detail: Optional[dict] = None  # Task | Judge rows, runbook, design -- see set_status
+        self._parallel: Optional[dict] = None  # the planner's side-by-side episodes -- see set_status
         self._task: Optional[str] = None  # current plan item's text (imp/testing only)
         self._task_started_at: Optional[float] = None  # wall-clock start of the current task
         self._stage: str = ""  # short sub-phase tag, e.g. planner's Arc/Lead/Journy/Func/Task
@@ -1346,7 +1347,8 @@ class PromptToolkitConsoleManager(AbstractManager):
                    plan: Optional[tuple] = None, phase_plan: Optional[tuple] = None,
                    tokens: Optional[tuple] = None, task: Optional[str] = None,
                    stage: Optional[str] = None, plan_markdown: Optional[str] = None,
-                   task_started_at: Optional[float] = None, plan_detail: Optional[dict] = None) -> None:
+                   task_started_at: Optional[float] = None, plan_detail: Optional[dict] = None,
+                   parallel: Optional[dict] = None) -> None:
         with self._lock:
             if plan is not None:
                 self._plan = plan
@@ -1356,6 +1358,8 @@ class PromptToolkitConsoleManager(AbstractManager):
                 self._plan_markdown = plan_markdown
             if plan_detail is not None:
                 self._plan_detail = plan_detail
+            if parallel is not None:
+                self._parallel = parallel or None
             if tokens is not None:
                 self._tokens = tokens
             if task is not None:
@@ -1467,6 +1471,7 @@ class PromptToolkitConsoleManager(AbstractManager):
                 # along in the snapshot. See set_status.
                 "plan_markdown": self._plan_markdown,
                 "plan_detail": self._plan_detail,
+                "parallel": self._parallel,
             }
 
     def submit_external_answer(self, key: str) -> None:

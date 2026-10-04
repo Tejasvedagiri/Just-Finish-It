@@ -180,7 +180,8 @@ class AbstractManager(ABC):
                    plan: Optional[tuple] = None, phase_plan: Optional[tuple] = None,
                    tokens: Optional[tuple] = None, task: Optional[str] = None,
                    stage: Optional[str] = None, plan_markdown: Optional[str] = None,
-                   task_started_at: Optional[float] = None, plan_detail: Optional[dict] = None) -> None:
+                   task_started_at: Optional[float] = None, plan_detail: Optional[dict] = None,
+                   parallel: Optional[dict] = None) -> None:
         """`stage` is a short sub-phase tag shown alongside the phase itself
         (the episode's role: "Architect"/"Lead"/"Task"/"Judge"/"Dev"/
         "Reviewer"/...) -- distinct from `task` (what that episode is working
@@ -198,7 +199,12 @@ class AbstractManager(ABC):
 
         `plan_detail` is plan_db_tools.plan_status_fields' Task | Judge rows,
         runbook and design -- for get_status_snapshot, so the fleet dashboard
-        can show the same tables the Streamlit one reads from the DB."""
+        can show the same tables the Streamlit one reads from the DB.
+
+        `parallel` is the planner's running batch of side-by-side episodes
+        (PARALLEL_LLM): {"role", "workers", "why", "running": [{"node_id",
+        "task", "started_at"}]}, or {} once the batch is done. One `task`
+        can only name one of them, so dashboards list these instead."""
         pass
 
     def mark_phase_done(self, phase: str) -> None:

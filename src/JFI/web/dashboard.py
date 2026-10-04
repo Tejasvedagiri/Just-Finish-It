@@ -199,6 +199,7 @@ def _render_status(status: dict) -> None:
 
     if status.get("task"):
         st.caption(f"Current item: {status['task']}")
+    _render_parallel(status.get("parallel"))
 
     st.caption(
         f"Tokens this run — read: {status.get('tokens_read', 0):,} · "
@@ -221,6 +222,21 @@ def _render_status(status: dict) -> None:
                     + (f" · {where}" if where else "")
                     + f" · {p['status']} · {p['elapsed']}s"
                 )
+
+
+def _render_parallel(parallel: dict | None) -> None:
+    """PARALLEL_LLM: the planner's side-by-side episodes. "Current item"
+    names only whichever of them set it last."""
+    running = (parallel or {}).get("running") or []
+    if not running:
+        return
+    role = str(parallel.get("role") or "").title()
+    with st.expander(f"{role} episodes in parallel: {len(running)} of {parallel.get('workers')}", expanded=True):
+        if parallel.get("why"):
+            st.caption(parallel["why"])
+        now = time.time()
+        for r in running:
+            st.caption(f"**node {r['node_id']}** · {r['task']} · running {int(now - r['started_at'])}s")
 
 
 def _render_node_detail(judge_rows: list) -> None:
