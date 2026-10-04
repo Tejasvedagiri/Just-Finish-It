@@ -461,9 +461,9 @@ class TestIsConfigured:
 # [TEMP, FREQ, COMPRESSION, STREAM, REASONING, TIMEOUT, THEME, BRIDGE, FLEET,
 #  MAX_EPISODE_TURNS, TOOL_RESULT_MAX_TOKENS,
 #  PLANNER_ITEM_MAX_CHARS, PLANNER_REDO_CAP, PLANNER_ESCALATION_CAP, MAX_PLANNER_EPISODES, MAX_DEV_ATTEMPTS,
-#  LAYA, AUTO_APPROVE, REVIEW_LOOP_APPROVAL, LOG_LLM_CALL_DEBUG, SHOW_STREAM_PROMPTS, FLARESOLVERR_URL, PER_PHASE]
-_TAIL = [""] * 23
-EPISODE_TURNS, LAYA_ANSWER, AUTO_APPROVE = 9, 16, 17
+#  PARALLEL_LLM, LAYA, AUTO_APPROVE, REVIEW_LOOP_APPROVAL, LOG_LLM_CALL_DEBUG, SHOW_STREAM_PROMPTS, FLARESOLVERR_URL, PER_PHASE]
+_TAIL = [""] * 24
+EPISODE_TURNS, PARALLEL, LAYA_ANSWER, AUTO_APPROVE = 9, 16, 17, 18
 
 
 class TestRunSetupWizard:
@@ -653,6 +653,38 @@ class TestRunSetupWizard:
         assert values["TEMPERATURE"] == "0.3"
         assert values["STREAM_OUTPUT_CAP"] == "20000"
         assert values["THEME"] == "dark-ocean"
+
+    def test_parallel_llm_is_computed_from_the_servers_slots_and_context(self, tmp_path, monkeypatch):
+        """PARALLEL_LLM is asked with the number the planner will really use:
+        LM Studio's loaded parallel=4, but a 40,960-token context holds only
+        two 20,480-token episodes (four at once overflowed it on a real run)."""
+        env_path = tmp_path / ".env"
+        env_path.write_text("MODEL=old\n", encoding="utf-8")
+        monkeypatch.setattr(create_env, "ENV_PATH", env_path)
+        monkeypatch.setattr(create_env, "fetch_openai_compatible_models", lambda url, key: ["qwen/qwen3.8-27b"])
+        monkeypatch.setattr(create_env, "_detect_models", lambda backend, url, key: [
+            detect.ServerModel("qwen/qwen3.8-27b", True, 40960, 262144, parallel=4)])
+
+        answers = iter(["3", "", "", "1", "20480", *_TAIL])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+
+        values = create_env.run_setup_wizard({})
+
+        assert (values["CONTEXT_SIZE"], values["PARALLEL_LLM"]) == ("20480", "2")
+
+    def test_parallel_llm_can_be_overridden(self, tmp_path, monkeypatch):
+        env_path = tmp_path / ".env"
+        env_path.write_text("MODEL=old\n", encoding="utf-8")
+        monkeypatch.setattr(create_env, "ENV_PATH", env_path)
+        monkeypatch.setattr(create_env, "fetch_anthropic_models", lambda key: None)
+
+        tail = list(_TAIL)
+        tail[PARALLEL] = "6"
+        answers = iter(["5", "claude-sonnet-5", "", *tail])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+        monkeypatch.setattr(create_env.getpass, "getpass", lambda *a, **k: "sk-ant-fake")
+
+        assert create_env.run_setup_wizard({})["PARALLEL_LLM"] == "6"
 
     def test_pipeline_knobs_and_the_judge_are_asked(self, tmp_path, monkeypatch):
         """The user: "There is a lot of env variables not asked." Saying yes to LAYA asks

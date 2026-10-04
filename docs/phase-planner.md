@@ -101,6 +101,15 @@ model on its first request:
 The planner prints the result once per change ("Lead episodes: 4 at a time
 (LM Studio serves qwen/qwen3.8-27b with parallel=4)").
 
+`uv run create-env` asks for `PARALLEL_LLM` with the same cap as its default
+(`create_env_detect.suggest_parallel`, stdlib so it can't import
+`JFI.llm.parallel`): LM Studio's `parallel` (`lms ps`) or llama.cpp's
+`total_slots`, cut to `loaded context // CONTEXT_SIZE`; 4 for a hosted API; 1
+for Ollama or a server that reports nothing. The reason names what to change
+for more (`--parallel N`, a lower `CONTEXT_SIZE` or a bigger loaded context).
+The check without a terminal warns when `.env`'s `PARALLEL_LLM` is more than
+the loaded model serves.
+
 What keeps siblings apart: a breakdown episode only adds under, and only
 escalates, its own node. The plan, runbook and design tools read the tree,
 check it (duplicates, file owners, `depends_on`) and then write, so they run
