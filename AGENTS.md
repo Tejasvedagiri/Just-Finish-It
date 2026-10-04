@@ -215,7 +215,7 @@ venv, not system Python. If you're unsure a command is right, try
 3. If you touched anything under `src/JFI/` that ships in the binary,
    `uv run build` to confirm PyInstaller still packages cleanly — cheap
    insurance, catches missing-import surprises before they reach a user
-   running `dist/jfi/jfi` instead of from source.
+   running `dist/jfi` instead of from source.
 
 ## `uv sync --extra` — list every extra you want, every time
 

@@ -123,10 +123,10 @@ Answer two prompts — a **session name** and your **goal** (be as detailed as y
 
 ```bash
 uv sync --extra web --extra laya --group dev
-uv run build        # -> dist/jfi (one file) on macOS, dist/jfi/ (run dist/jfi/jfi) on Linux, dist\\jfi\\jfi.exe on Windows
+uv run build        # -> dist/jfi (one file; dist\\jfi.exe on Windows)
 ```
 
-The output runs without Python or uv installed. On macOS it's a single file (`dist/jfi`) you can copy anywhere on its own; on Linux/Windows it's a folder, and the executable needs its `_internal/` directory alongside it, so keep that folder together. Put it on your `PATH`, then in your project folder (with its `.env`) just run `jfi`. It bundles everything, the optional parts included: the Streamlit dashboard, Laya for `LAYA=1` (torch + transformers, so the binary is several GB), and websockets for the fleet. The build stops with the `uv sync` command to run if any of them is missing. See [`uv run build`](#uv-run-build--standalone-binary).
+The output runs without Python or uv installed. It's a single file (`dist/jfi`, `dist\jfi.exe` on Windows) you can copy anywhere on its own. Put it on your `PATH`, then in your project folder (with its `.env`) just run `jfi`. It bundles everything, the optional parts included: the Streamlit dashboard, Laya for `LAYA=1` (torch + transformers, so the binary is several GB), and websockets for the fleet. The build stops with the `uv sync` command to run if any of them is missing. See [`uv run build`](#uv-run-build--standalone-binary).
 
 ### Configuration (`.env`)
 
@@ -317,10 +317,10 @@ Builds a single native `jfi` executable with PyInstaller — the machine that ru
 
 ```bash
 uv sync --extra web --extra laya --group dev   # everything the binary bundles, plus pyinstaller
-uv run build          # macOS -> dist/jfi (one file); Linux -> dist/jfi/ (the executable is dist/jfi/jfi)
+uv run build          # -> dist/jfi (one file; dist\\jfi.exe on Windows)
 ```
 
-`src/JFI/runner.py` is built with PyInstaller, bundling prompt_toolkit, the openai client, and every other dependency — including the optional ones: Streamlit (for `jfi-web`), Laya with torch and transformers (for `LAYA=1`), and websockets (for the fleet). `uv run build` refuses to run without them. On macOS the result is a single file (`dist/jfi`) that can be copied anywhere on its own; on Linux/Windows it's a folder build (`dist/jfi/`: the executable plus `_internal/`, which has to stay alongside it) because there a single-file build unpacked 2.2 GB on every launch, while on macOS that same per-launch unpack cost was accepted in exchange for not needing to keep `_internal/` alongside the executable. Laya's checkpoint itself isn't bundled: it downloads from Hugging Face the first time `LAYA=1` runs. It reads the `.env` in the folder it's started from, like `uv run jfi`. Build logic lives in `src/build_binary/__init__.py`.
+`src/JFI/runner.py` is built with PyInstaller, bundling prompt_toolkit, the openai client, and every other dependency — including the optional ones: Streamlit (for `jfi-web`), Laya with torch and transformers (for `LAYA=1`), and websockets (for the fleet). `uv run build` refuses to run without them. The result is always a single file (`dist/jfi`, `dist\jfi.exe` on Windows) that can be copied anywhere on its own. The cost: it unpacks its 2.2 GB (torch) on every launch, 18-35 s before it starts on Windows; a folder build started faster but its executable was useless without the `_internal/` directory beside it. Laya's checkpoint itself isn't bundled: it downloads from Hugging Face the first time `LAYA=1` runs. It reads the `.env` in the folder it's started from, like `uv run jfi`. Build logic lives in `src/build_binary/__init__.py`.
 
 ---
 
@@ -349,7 +349,7 @@ Just-Finish-It/
 │   ├── web/                      # jfi-web: the Streamlit dashboard and its launcher
 │   └── utils/                    # small shared helpers (text_sanitize.py)
 │
-├── src/build_binary/             # `uv run build`: the PyInstaller binary, dist/jfi on macOS / dist/jfi/ folder elsewhere (bundles Streamlit, Laya, websockets)
+├── src/build_binary/             # `uv run build`: the PyInstaller binary, one file, dist/jfi (bundles Streamlit, Laya, websockets)
 ├── src/export_db/                # `uv run export-db`: a project's JFI.db as readable text
 │
 ├── test/                         # pytest suite (see "Tests" below)

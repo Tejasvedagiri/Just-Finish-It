@@ -34,8 +34,9 @@ def test_the_binary_bundles_streamlit_laya_and_websockets(monkeypatch):
     collected = {args[i + 1] for i, a in enumerate(args) if a in ("--collect-all", "--collect-submodules")}
     assert {"streamlit", "laya", "websockets", "transformers.models.modernbert"} <= collected
     assert "--exclude-module" not in args
-    # A folder build: onefile unpacked 2.2 GB on every launch (18-35 s to start).
-    assert "--onedir" in args and "--onefile" not in args
+    # One file on every platform: a onedir executable is useless without its
+    # _internal/ folder, which got left behind when the binary was copied out.
+    assert "--onefile" in args and "--onedir" not in args
     # `jfi --version` printed "unknown" without the package's metadata.
     assert args[args.index("--copy-metadata") + 1] == "just-finish-it"
 
@@ -53,17 +54,16 @@ def test_a_missing_extra_stops_the_build_with_the_command_to_fix_it(monkeypatch,
     assert "uv sync --extra web --extra laya --group dev" in capsys.readouterr().err
 
 
-def test_an_old_onefile_binary_is_removed_but_the_folder_build_is_kept(tmp_path):
-    """Observed 2026-09-30: after the switch to a folder build, the Windows
-    onefile dist/jfi.exe (2.2 GB) stayed beside dist/jfi/."""
-    (tmp_path / "jfi.exe").write_bytes(b"old")
+def test_an_old_build_of_either_kind_is_removed_before_building(tmp_path):
+    """Observed 2026-09-30: switching between folder and onefile builds left
+    the other kind behind (the Windows onefile dist/jfi.exe, 2.2 GB, beside
+    dist/jfi/), and PyInstaller won't write a file over a directory."""
     (tmp_path / "jfi").mkdir()
-    (tmp_path / "jfi" / "jfi.exe").write_bytes(b"new")
-    build_binary.remove_old_onefile(tmp_path)
-    assert not (tmp_path / "jfi.exe").exists() and (tmp_path / "jfi" / "jfi.exe").exists()
+    (tmp_path / "jfi" / "jfi.exe").write_bytes(b"old onedir")
+    (tmp_path / "jfi.exe").write_bytes(b"old onefile")
+    build_binary.remove_stale_build(tmp_path)
+    assert not (tmp_path / "jfi").exists() and not (tmp_path / "jfi.exe").exists()
 
-    (tmp_path / "jfi" / "jfi.exe").unlink()
-    (tmp_path / "jfi").rmdir()
     (tmp_path / "jfi").write_bytes(b"old posix onefile")
-    build_binary.remove_old_onefile(tmp_path)
+    build_binary.remove_stale_build(tmp_path)
     assert not (tmp_path / "jfi").exists()
