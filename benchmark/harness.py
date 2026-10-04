@@ -50,8 +50,8 @@ from pathlib import Path
 
 BENCHMARK_DIR = Path(__file__).resolve().parent
 TASKS_DIR = BENCHMARK_DIR / "tasks"
-# `uv run build` is a onedir build: the executable is dist/jfi/jfi(.exe).
-DEFAULT_JFI_BIN = BENCHMARK_DIR.parent / "dist" / "jfi" / ("jfi.exe" if os.name == "nt" else "jfi")
+# `uv run build` is a onefile build: dist/jfi (dist/jfi.exe on Windows).
+DEFAULT_JFI_BIN = BENCHMARK_DIR.parent / "dist" / ("jfi.exe" if os.name == "nt" else "jfi")
 
 POLL_INTERVAL = 5
 PROMPT_TIMEOUT = 60          # waiting for the two startup prompts
