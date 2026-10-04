@@ -224,8 +224,9 @@ venv, not system Python. If you're unsure a command is right, try
 command — it's not additive across separate invocations. Always list every
 extra you need together: `uv sync --extra web --extra laya --extra
 anthropic --group dev`. (`websockets` used to be a `master` extra and is a
-base dependency now for exactly this reason. `uv run build` needs `web` and
-`laya` and refuses to run without them.)
+base dependency now for exactly this reason. `uv run build` always bundles
+`web` and refuses to run without it; `--laya`, `--anthropic`, `--mysql`,
+`--postgres` or `--all` add the others, each of which must be synced too.)
 
 ## Testing philosophy observed in this repo
 

@@ -202,7 +202,11 @@ def _stream_events(client, **kwargs):
 class AnthropicStream(BaseLLMStream):
     def __init__(self, prefix: str = ""):
         super().__init__(prefix)
-        import anthropic  # deferred: only imported when this backend is actually selected
+        try:
+            import anthropic  # deferred: only imported when this backend is actually selected
+        except ImportError as e:
+            raise ImportError("LLM_BACKEND=anthropic needs the `anthropic` package: `uv sync --extra anthropic`, "
+                              "or for the standalone binary `uv run build --anthropic`") from e
 
         api_key = phase_env(prefix, "ANTHROPIC_API_KEY")
         if not api_key:
