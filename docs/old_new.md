@@ -4,7 +4,8 @@
 
 ## The objective
 
-When a goal comes with a reference (something the new code has to match),
+When a goal comes with a reference (a ground truth the new code has to
+match),
 the **Architect plans how every task will be checked against it once it's
 implemented**, the same way it plans today how every task is unit-tested.
 That plan is recorded in the runbook. Then:
@@ -24,6 +25,67 @@ it, while it's being built, not in one big comparison at the end.
 The examples below (`bc` for a calculator, an HTML page for a Vite app, an
 input CSV and its expected output, API docs for a service) are kinds of
 reference; the mechanism is the same for all of them.
+
+## What happens when a task is done
+
+Every time Dev finishes a task in the imp phase, the new code is run on the
+same input as the **ground truth** (the reference the goal came with), and the
+two answers are compared. Only when they agree is the task done.
+
+**The calculator's `add` task, against `bc`.** Dev writes `add`, its unit
+test passes, and `mark_leaf_done` runs the task's case (`compare_one add`):
+
+```
+case add
+  1 + 1         new: 2         bc: 2         match
+  2.5 + 0.25    new: 2.75      bc: 2.75      match
+  -3 + 10       new: 7         bc: 7         match
+add: 3 of 3 match -- leaf done
+```
+
+If `add` were wrong, the same call refuses the task, and Dev sees why while
+it's still working on it:
+
+```
+case add
+  1 + 1         new: 2         bc: 2         match
+  2.5 + 0.25    new: 2.7       bc: 2.75      MISMATCH
+add: 1 of 3 differ -- leaf not done; fix it and call mark_leaf_done again
+```
+
+**A page, against a screenshot of the original.** Dev builds the header, and
+`compare_one header` screenshots the new page and the original the same way
+(same width, same state) and shows Dev both:
+
+```
+case header (1280x800)
+  old: .jfi/screens/compare/header/old.png    (the original page)
+  new: .jfi/screens/compare/header/new.png    (what Dev just built)
+  diff: 3% of pixels; text: same ("Portfolio", "Watchlist", "Holdings")
+  [both screenshots attached]
+```
+
+The model looks at the two screenshots: the same layout, text and colours
+means the task is done. A missing menu item or the wrong colour means it fixes
+the task first.
+
+**A data task, against an expected CSV.** Dev writes the revenue sum;
+`compare_one revenue` runs the script on `orders.csv` and compares its
+`revenue` column with the expected file's:
+
+```
+case revenue
+  2026-01   new: 1204.50   expected: 1204.50   match
+  2026-02   new:  988.10   expected:  988.10   match
+revenue: 2 of 2 match -- leaf done
+```
+
+The same goes for every kind of ground truth (section "Kinds of reference"):
+the old program's output, the documented API response, the old test suite.
+Each task is checked against its own slice of the ground truth as soon as
+it's built. The reviewer runs every case again at the end, so a later task
+that broke an earlier one is caught too. The rest of this doc is how the
+Architect plans those checks so each task has its own.
 
 ## The problem
 
