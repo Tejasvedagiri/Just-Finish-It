@@ -64,6 +64,86 @@ revenue: 2 of 2 match -- leaf done
 At the end, the reviewer runs every case again over the finished build, so a
 later task that broke an earlier one is caught too.
 
+## The flow
+
+The whole run, from the goal to the review. The new steps are the ones that
+mention the ground truth, cases or `compare_*`; everything else is what JFI
+does today.
+
+```mermaid
+flowchart TD
+    G["User's goal<br/>+ a ground truth: bc, a page, a mockup,<br/>input/expected CSVs, API docs, old code"]
+
+    subgraph PLAN["Planner"]
+        A1["Architect: find the ground truth<br/>(goal, project files, commands on PATH)"]
+        A2["Architect: probe it<br/>run bc on 1 + 1, screenshot the page, read the CSVs"]
+        A3["Architect: set the guideline<br/>reference entry: what must match, what may differ<br/>runbook: compare_one {input}, compare_all<br/>each component's part"]
+        AQ{"Can it work it out?"}
+        ASK["Ask the user once<br/>(or record a best guess)"]
+        L["Lead, per component:<br/>name the cases for each file<br/>evaluator.py: add, divide, power, ..."]
+        T["Task, per file:<br/>put each case on the leaf that builds it,<br/>with its inputs; done_when's expected<br/>output from the ground truth"]
+        J["Judge between layers, and each layer's finish:<br/>no case dropped"]
+    end
+
+    subgraph IMP["Imp: one Dev episode per leaf"]
+        D1["Dev implements the leaf"]
+        D2["mark_leaf_done: unit test (test_one)"]
+        D3["mark_leaf_done: compare_one for each input<br/>of each of the leaf's cases"]
+        DQ{"New answer = ground truth?"}
+        DOK["Leaf done"]
+        DFIX["Refused: both answers or both<br/>screenshots shown; Dev fixes it"]
+        DWAIT["Case needs a leaf not built yet:<br/>re-queued"]
+    end
+
+    subgraph REV["Reviewer"]
+        R1["e2e"]
+        R2["compare_all: every case again"]
+        RQ{"All match?"}
+        RPASS["PASS"]
+        RFIX["Reopen the leaf that owns the case"]
+    end
+
+    G --> A1 --> A2 --> AQ
+    AQ -- yes --> A3
+    AQ -- no --> ASK --> A3
+    A3 --> L --> T --> J --> D1
+    D1 --> D2 --> D3 --> DQ
+    DQ -- yes --> DOK
+    DQ -- no --> DFIX --> D1
+    DQ -- not built yet --> DWAIT
+    DOK --> NEXT{"Every leaf done?"}
+    NEXT -- no --> D1
+    NEXT -- yes --> R1 --> R2 --> RQ
+    RQ -- yes --> RPASS
+    RQ -- no --> RFIX --> D1
+```
+
+One task's check, for the calculator's `add` leaf:
+
+```mermaid
+sequenceDiagram
+    participant Dev
+    participant Gate as mark_leaf_done
+    participant New as new code (main.py)
+    participant GT as ground truth (bc -l)
+
+    Dev->>Gate: mark_leaf_done(leaf, test_id)
+    Gate->>Gate: test_one test_evaluate passes
+    loop each input of case "add": 1 + 1, 2.5 + 0.25, -3 + 10
+        Gate->>New: 1 + 1
+        New-->>Gate: 2
+        Gate->>GT: 1 + 1
+        GT-->>Gate: 2
+        Gate->>Gate: compare (with "may differ": 4 vs 4.0, trailing zeros)
+    end
+    alt every input matches
+        Gate-->>Dev: leaf done
+    else an input differs
+        Gate-->>Dev: refused: "2.5 + 0.25  new: 2.7  bc: 2.75"
+        Dev->>Dev: fix, then mark_leaf_done again
+    end
+```
+
 ## Why
 
 JFI doesn't record a goal's ground truth today, or how to compare the new
@@ -173,7 +253,7 @@ Nodes cite it in `references`, the way they already cite contracts
 `portfolio-dashboard.html L120-188`). That's how Dev knows what it's
 rebuilding without reading the whole original.
 
-### 2. The runbook: `compare_one {case}` and `compare_all`
+### 2. The runbook: `compare_one {input}` and `compare_all`
 
 There are two new runbook entries, alongside `test_one` and `e2e`:
 
