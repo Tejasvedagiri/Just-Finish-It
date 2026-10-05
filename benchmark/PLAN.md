@@ -43,7 +43,7 @@ is actually loaded with. What matters is that the two agree.
 
 ```bash
 cd /home/tejas/Desktop/git/Just-Finish-It
-uv run build   # make sure dist/jfi reflects current source before trusting a run
+uv run build --all   # make sure dist/jfi reflects current source before trusting a run
 nohup sh benchmark/run_all.sh > /dev/null 2>&1 &
 disown
 tail -f benchmark/runs/bench_run.log

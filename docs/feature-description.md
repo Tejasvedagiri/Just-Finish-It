@@ -185,7 +185,8 @@ P(yes) ranks the two groups (0.5 = no signal).
 
 - `uv run build` is a onedir build, `dist/jfi/jfi(.exe)`, with the package
   metadata (`jfi --version`) (#7, #8); it removes an old onefile `dist/jfi`
-  or `dist/jfi.exe` (#34).
+  or `dist/jfi.exe` (#34). Since replaced: `bugfix/build` makes it a onefile
+  build, `dist/jfi(.exe)`, on every platform.
 - create-env: end-of-input stops the wizard with "nothing was written" (#9).
 - Ctrl+C at idle exits on Windows; the dashboard's whole process tree is
   stopped (#13).

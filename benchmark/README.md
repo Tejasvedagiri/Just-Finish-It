@@ -118,7 +118,7 @@ top-level -- not nested under `verify`; seconds allowed for `verify.command` its
 ## Running it
 
 ```bash
-uv run build   # make sure dist/jfi/ reflects the current source
+uv run build --all   # make sure dist/jfi reflects the current source (--all: Laya for LAYA=1 runs)
 python3 benchmark/harness.py --tier polyglot --projects-root /tmp/jfi-bench-runs
 python3 benchmark/score.py /tmp/jfi-bench-runs
 ```

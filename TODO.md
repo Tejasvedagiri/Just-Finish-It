@@ -70,6 +70,36 @@ sizing POC is in [`docs/laya_poc.md`](docs/laya_poc.md).
    `>` inside quoted text, written as redirections. Unconfirmed -- needs that
    run's `.jfi/JFI.db`. The 2026-10-01 entry-point test project is still at
    `D:\git\jfi-bench\entry-check`.
+10. **A long, structured story plans badly** (reported 2026-10-04, not yet
+    reproduced: no model server was reachable from the session that took
+    it). The goal, as given:
+
+    > Create an action-packed story for 1 week. It should be split into
+    > early-morning, morning, afternoon, evening, night and mid-night time
+    > slots. Each session must follow the format:
+    > `NARATOR: ""` / `CHAR_1: ""` / `CHAR_2: ""` / `*AMBIANCE*`
+
+    That's 7 days x 6 slots = 42 sessions, each in a fixed four-part
+    script format -- much bigger and more rigid than the two `story`
+    benchmark tasks (one 1,500-2,500 word prose piece each). To do:
+    - Run it and keep the `.jfi/JFI.db` (`uv run export-db`): what plan
+      did the Architect / Lead / Task layers make? Expected, but unchecked:
+      an outline (the document path, phase 9 in `docs/laya_impl_phases.md`)
+      with one section per day and one `passage` leaf per slot, the
+      cast and the format recorded once in the design so every passage
+      uses the same characters and the same four parts.
+    - Find where it goes wrong: the planner not taking the document path at
+      all (treating it as code), slots merged or missing, the format not
+      reaching each passage's Dev episode, or the days not following one
+      plot.
+    - The passage gate (`JFI.imp.dev._passage_problem`) checks only that the
+      `JFI:` placeholder is gone and the word count; nothing checks a
+      required *format*. A per-passage
+      check for the `NARATOR:` / `CHAR_1:` / `CHAR_2:` / `*AMBIANCE*` parts
+      may be needed, and the reviewer should check all 42 slots exist in
+      order.
+    - Add it as a `benchmark/tasks/story/` task (`verify_story.py` checking
+      the 42 slots and the format) so the fix is measured, not eyeballed.
 
 ## Fixed 2026-10-02
 

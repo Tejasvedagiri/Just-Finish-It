@@ -215,7 +215,7 @@ venv, not system Python. If you're unsure a command is right, try
 3. If you touched anything under `src/JFI/` that ships in the binary,
    `uv run build` to confirm PyInstaller still packages cleanly — cheap
    insurance, catches missing-import surprises before they reach a user
-   running `dist/jfi/jfi` instead of from source.
+   running `dist/jfi` instead of from source.
 
 ## `uv sync --extra` — list every extra you want, every time
 
@@ -224,8 +224,9 @@ venv, not system Python. If you're unsure a command is right, try
 command — it's not additive across separate invocations. Always list every
 extra you need together: `uv sync --extra web --extra laya --extra
 anthropic --group dev`. (`websockets` used to be a `master` extra and is a
-base dependency now for exactly this reason. `uv run build` needs `web` and
-`laya` and refuses to run without them.)
+base dependency now for exactly this reason. `uv run build` always bundles
+`web` and refuses to run without it; `--laya`, `--anthropic`, `--mysql`,
+`--postgres` or `--all` add the others, each of which must be synced too.)
 
 ## Testing philosophy observed in this repo
 
