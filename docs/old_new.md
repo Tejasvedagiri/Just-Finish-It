@@ -9,8 +9,10 @@ It might be a command (`bc`), the original HTML page, a screenshot or mockup,
 an input file with its expected output, API docs, or the old program being
 replaced.
 
-When a goal has one, the Architect plans how **every task** will be checked
-against it. Then, in the imp phase, each time Dev finishes a task, that task's
+When a goal has one, the planner plans how **every task** will be checked
+against it, layer by layer, the way it already plans the work: the Architect
+sets the guideline, each Lead refines it for its component, and Task puts each
+check on the task that builds it. Then, in the imp phase, each time Dev finishes a task, that task's
 code is run on the same input as the ground truth and the two answers are
 compared. The task is done only when they agree, the same way it's done today
 only when its unit test passes.
@@ -120,11 +122,15 @@ The Architect's steps, before it records anything:
    Unless the goal says otherwise, all of that goes under "may differ", or
    every case would fail on differences nobody cares about. (Checked with
    GNU `bc`.)
-5. **Make the cases**, small enough that each lands on one task: one
-   expression group per operator, one screen state per view, one column per
-   output field, one example per endpoint. Then the error cases the goal
-   names.
-6. **Record it** (below), with every case assigned to a component.
+5. **Set the guideline, not the cases.** For each component that rebuilds
+   part of the ground truth, say which part it covers: the evaluator covers
+   every operator and its errors; the watchlist view covers the Watchlist
+   tab. Breaking that into cases is the Lead's and Task's job (section 3),
+   the same way the Architect names components and leaves the files and
+   functions to them.
+6. **Record it** (below): the reference entry, `compare_one` and
+   `compare_all`, and each component's part in its node's `cases` field
+   (section 3).
 7. **Ask only when it can't work it out:** no ground truth where the goal
    clearly expects one, two candidates, a Figma link with no export, a page
    behind a login. Without an answer, it records its best guess as an
@@ -139,26 +145,27 @@ There's a new design kind, `reference`, next to `stack`, `component` and
 `contract` (`design_tools.KINDS`). Each entry records:
 
 - **where** the ground truth is (a path, a URL, a command);
-- **its cases**, each against the component that builds it;
+- **which part each component covers** (the guideline; the cases come
+  later, from Lead and Task);
 - **what must match** and **what may differ**.
 
 ```
 design_set("reference", "bc",
-  "The bc command (bc -l). Cases: add, subtract, multiply, divide, power (the evaluator); "
-  "divide_by_zero, bad_input (the evaluator's errors); repl_loop, exit (the REPL in main.py). "
-  "Must match: each result to 10 decimal places; an error is one line, no traceback. May differ: "
-  "4 vs 4.0, trailing zeros, error wording, a fractional ^ (bc truncates it).")
+  "The bc command (bc -l). The evaluator covers + - * / ^ and its errors (divide by zero, bad "
+  "input); the REPL in main.py covers the loop and exit. Must match: each result to 10 decimal "
+  "places; an error is one line, no traceback. May differ: 4 vs 4.0, trailing zeros, error "
+  "wording, a fractional ^ (bc truncates it).")
 
 design_set("reference", "dashboard_page",
-  "portfolio-dashboard.html (project root). Viewport 1280x800. Cases: header (the shell); "
-  "summary_cards (the summary view); watchlist_tab, steps 'click Watchlist' (the watchlist view); "
-  "holdings_tab, steps 'click Holdings' (the holdings view). Must match: the layout, the text, the "
-  "colours. May differ: the numbers (sample data).")
+  "portfolio-dashboard.html (project root). Viewport 1280x800. The shell covers the header; the "
+  "summary view the summary cards; the watchlist view the Watchlist tab (after 'click Watchlist'); "
+  "the holdings view the Holdings tab (after 'click Holdings'). Must match: the layout, the text, "
+  "the colours. May differ: the numbers (sample data).")
 
 design_set("reference", "expected_summary",
-  "data/orders.csv -> data/expected_summary.csv. Cases: month (the date grouping), orders (the "
-  "count), revenue (the sum), full (the whole file; the writer and main.py). Must match: the rows, "
-  "sorted by month; each value; revenue to 0.01. May differ: column order, line endings.")
+  "data/orders.csv -> data/expected_summary.csv. The aggregation component covers the month, orders "
+  "and revenue columns; the writer and main.py cover the whole file. Must match: the rows, sorted by "
+  "month; each value; revenue to 0.01. May differ: column order, line endings.")
 ```
 
 Nodes cite it in `references`, the way they already cite contracts
@@ -170,19 +177,28 @@ rebuilding without reading the whole original.
 
 There are two new runbook entries, alongside `test_one` and `e2e`:
 
-- `compare_one`: how to check **one case**, with a `{case}` placeholder,
-  exactly like `test_one`'s `{test_id}`;
+- `compare_one`: how to check **one input** of a case against the ground
+  truth, with an `{input}` placeholder (and `{case}`, the case's name), the
+  way `test_one` has `{test_id}`. The gate runs it once for each of a case's
+  inputs;
 - `compare_all`: every case at once, for the reviewer.
 
+A **case** is a name plus its inputs: `add` with `1 + 1`, `2.5 + 0.25` and
+`-3 + 10`; or, for a page, `watchlist_tab` with the steps `click Watchlist`.
+The cases are stored on the leaves (section 3), so the check script needs no
+case list of its own.
+
 ```
-runbook_set("compare_one", "python3 scripts/compare_bc.py {case}",
-  notes="One case from reference:bc, e.g. case=add. Each of the case's expressions (samples/cases/"
-        "<case>.txt) goes to `python3 main.py` and to `bc -l` (scale=10); prints both answers.")
-runbook_set("compare_all", "python3 scripts/compare_bc.py --all")
+runbook_set("compare_one", "python3 scripts/compare_bc.py {input}",
+  notes="One input from a case of reference:bc, e.g. input='1 + 1'. Sends it to `python3 main.py` "
+        "and to `bc -l` (scale=10), prints both answers, and exits 1 if they differ.")
+runbook_set("compare_all", "python3 scripts/compare_bc.py --all .jfi/compare/cases.json",
+  notes="Every leaf's cases and inputs; JFI writes cases.json from the plan before the review.")
 
 runbook_set("compare_one",
-  "compare_screens old=file://{project}/portfolio-dashboard.html new={view}/ viewport=1280x800 case={case}",
-  notes="One state of reference:dashboard_page, e.g. case=header.")
+  "compare_screens old=file://{project}/portfolio-dashboard.html new={view}/ viewport=1280x800 "
+  "case={case} steps={input}",
+  notes="One state of reference:dashboard_page, e.g. case=watchlist_tab, input='click Watchlist'.")
 ```
 
 A project has one `compare_one` and one `compare_all`. A goal with two
@@ -190,37 +206,61 @@ ground truths (a page and its API docs) uses a script that sends each case
 to the right one, or a `case` prefix (`page:header`, `api:get_user`). That's
 decision 1.
 
-### 3. Cases go down the plan to the task that builds them
+### 3. The cases come from the three planning layers
 
-A new `cases` field on `Leaf` (a column, so `_ensure_columns` in
-`models/db.py` too) lists the cases that task must match.
+The checks are planned the way the work is. Each layer refines the one
+above it and only sees its own node, and the judge between layers
+(`docs/phase-planner.md`) looks at its output as it does today.
 
-- **Architect:** assigns every case to a component. `finish` refuses while a
-  case has none.
-- **Lead / Task:** hand each case down with the work that builds it. When a
-  node is split, each of its cases goes to exactly one child. The node tools
-  check this mechanically, as they already do for files and `depends_on`, so
-  a case can't be dropped.
-- A task with no case (shared plumbing, a config file) is gated by its unit
-  test alone.
-
-The calculator's plan, down to the leaves:
-
-| Leaf (built by Dev) | Unit test (`test_one`) | Its cases (`compare_one`) |
+| Layer | What it plans today | What it adds for the ground truth |
 |---|---|---|
-| `evaluate()`: + - * / | `test_evaluate` | `add`, `subtract`, `multiply`, `divide` |
-| `evaluate()`: ^ | `test_power` | `power` |
-| `evaluate()` errors | `test_errors` | `divide_by_zero`, `bad_input` |
-| `main.py` REPL loop | `test_repl` | `repl_loop`, `exit` |
+| **Architect** | The components, the design, the runbook | **The guideline:** the reference entry (where, what must match, what may differ), `compare_one` / `compare_all`, and in each component's `cases` field the part of the ground truth it covers (`part: + - * / ^ and their errors`). |
+| **Lead** (one component) | The component's files, their stubs and test files | **Its own guideline:** the cases for each of its files, named within the part the Architect gave the component, e.g. `evaluator.py`: `add`, `subtract`, `multiply`, `divide`, `power`, `divide_by_zero`, `bad_input`. They go in each file node's new `cases` field. A part it can't cover with its files is an `escalate`, as today. |
+| **Task** (one file) | One leaf per stub, each with one test case as `done_when` | **The OK:** each of the file's cases goes to the leaf that builds it, with its inputs (`add`: `1 + 1`, `2.5 + 0.25`, `-3 + 10`). Its `done_when` test case uses one of those inputs, with the ground truth's answer as the expected output (`evaluate("1 + 1") == 2`, as `bc` gives), not a value the model works out itself. A case no stub can build is an `escalate`. |
+
+Each layer's output is checked mechanically, the way the node tools already
+check files, `depends_on` and duplicates, so no case is dropped between
+layers:
+
+- **Architect's `finish`:** the reference entry, `compare_one` (with
+  `{input}`) and `compare_all` exist (when the goal names a ground truth,
+  decision 2).
+- **Lead's `finish`:** a component with a part (its `cases` field) has at
+  least one case on its file nodes, and no case name is used twice.
+- **Task's `finish`:** every case on the file node is on exactly one leaf,
+  with at least one input. When a leaf is split later (`TASK_SPLIT`), each of
+  its cases goes to exactly one new leaf.
+
+A `cases` field is added to `Leaf` (a column, so `_ensure_columns` in
+`models/db.py` too). On a component it holds the part (the Architect's
+guideline); on a file node, the case names (the Lead's); on a leaf, each case
+with its inputs (Task's). A task with no case (shared plumbing, a config file) is
+gated by its unit test alone.
+
+The calculator, through the three layers:
+
+| Layer | Output |
+|---|---|
+| Architect | Components: evaluator ("covers + - * / ^ and its errors, against bc"), REPL ("covers the loop and exit"), project (the check script `scripts/compare_bc.py`). The reference entry and `compare_one` / `compare_all`. |
+| Lead (evaluator) | `evaluator.py` with stubs `evaluate`, `parse`; cases `add`, `subtract`, `multiply`, `divide`, `power`, `divide_by_zero`, `bad_input`. |
+| Lead (REPL) | `main.py` with stub `main`; cases `repl_loop`, `exit`. |
+| Task (`evaluator.py`) | The leaves below, each case on one of them. |
+
+| Leaf (built by Dev) | Unit test (`done_when`, from the ground truth) | Its cases and inputs |
+|---|---|---|
+| `evaluate()`: + - * / | `evaluate("7 / 2") == 3.5` | `add`: `1 + 1`, `2.5 + 0.25`, `-3 + 10`; `subtract`, `multiply`, `divide`: three each |
+| `evaluate()`: ^ | `evaluate("2 ^ 10") == 1024` | `power`: `2 ^ 10`, `3 ^ 0`, `-2 ^ 3` |
+| `evaluate()` errors | `evaluate("1 / 0")` prints one error line | `divide_by_zero`: `1 / 0`; `bad_input`: `two + 2`, `1 +` |
+| `main()` REPL loop | the loop reads until `exit` | `repl_loop`: three lines then `exit`; `exit`: `quit` |
 
 ### 4. The gate: `mark_leaf_done` checks the task against the ground truth
 
 When Dev calls `mark_leaf_done`:
 
 1. Its unit test runs through `test_one`, as today.
-2. Then `compare_one` runs for each of the leaf's cases: a behavioural case
-   as a command (its exit code), a visual case by calling `compare_screens`
-   inside JFI (it's a tool, not a program).
+2. Then `compare_one` runs for each input of each of the leaf's cases: a
+   behavioural case as a command (its exit code), a visual case by calling
+   `compare_screens` inside JFI (it's a tool, not a program).
 3. Every case matches: the leaf is done. A case differs: the leaf is refused
    with both answers (or both screenshots attached), as in the examples
    above, and Dev fixes it in the same episode. This counts against the
@@ -332,16 +372,23 @@ Variants that name it are how the feature gets measured (Build notes).
    *Proposal:* not at first. The goal supplies PNG exports (or the Architect
    asks for them), and the reference entry names the frames. A `FIGMA_TOKEN`
    export can come later.
-6. **Checked at every task, not only in review.** *Proposal:* yes, for every
+6. **Where a case's inputs come from.** *Proposal:* Task writes them, since
+   it's the layer that sees the stub, and the ground truth gives every
+   answer. Nobody writes an expected value by hand, which is the point: a
+   hand-written expected value carries the same misunderstanding as the
+   code. The exception is a ground truth that is already a list of answers
+   (an expected-output CSV, documented examples), where the inputs come with
+   it.
+7. **Checked at every task, not only in review.** *Proposal:* yes, for every
    leaf with cases; that's the point. The cost is one comparison per leaf:
    a command, or a screenshot pair (a few seconds).
-7. **The Architect's probes.** Step 3 needs `execute_command` and a way to
+8. **The Architect's probes.** Step 3 needs `execute_command` and a way to
    look at a page, and the Architect has neither today (`episode/roles.py`;
    it "writes nothing to disk"). *Proposal:* give it `execute_command` for
    read-only probes and `compare_screens`, and keep what the probes produce
    (screenshots, the old program's outputs) under `.jfi/`, never in the
    project.
-8. **Asking the user.** No model-facing tool asks the user anything today:
+9. **Asking the user.** No model-facing tool asks the user anything today:
    the console asks for the goal at the start, and `!` interjections reach
    whichever episode reads them first. *Proposal:* a narrow `ask_user` for
    the Architect only, one question per run, offering the candidates it
@@ -358,17 +405,20 @@ Variants that name it are how the feature gets measured (Build notes).
 - `tool/compare_tools.py`: `compare_screens`, from `check_page`'s Playwright
   code and `view_image`'s attachment, saving under `.jfi/screens/compare/`.
   It goes in the reviewer's and the Architect's core sets.
-- `planner/prompts.py`: the Architect's steps above; Lead and Task hand cases
-  down and cite `reference:<key>`. `planner/loop.py`: the `finish` checks
-  (both entries, `{case}` in `compare_one`, every case on a component).
-  `planner/nodes.py`: a split keeps every case.
+- `planner/prompts.py`: the Architect sets the guideline (the reference,
+  `compare_one` / `compare_all`, each component's part); the Lead names each
+  file's cases; Task puts each case on a leaf with its inputs and takes
+  `done_when`'s expected output from the ground truth. `planner/loop.py` and
+  `planner/nodes.py`: each layer's `finish` check from section 3, and a split
+  keeps every case.
 - `models/leaf.py`: a `cases` column, plus `_ensure_columns`.
 - `imp/dev.py`: `mark_leaf_done` runs `compare_one` for each case after the
   unit test, and refuses or re-queues as in section 4.
 - `review/prompts.py`: `compare_all` after `e2e`.
 - Tests:
-  - a goal naming an HTML file refuses `finish` without `compare_one`, or
-    with a case on no component;
+  - a goal naming an HTML file refuses the Architect's `finish` without
+    `compare_one`; a Lead whose component has a part but no cases is refused;
+    a Task whose file has a case on no leaf is refused;
   - a leaf whose case mismatches is refused by `mark_leaf_done`, and one
     whose case matches is accepted (with a real `bc` call);
   - `compare_screens` on two local `file://` pages returns both images and a
