@@ -6,12 +6,48 @@
 
 Many goals arrive with a **reference**: the thing the new code has to match.
 
+Ones you check by **looking** (old and new screenshotted side by side):
+
 - An existing HTML page or prototype to turn into an app (the stui runs: a
   static `portfolio-dashboard.html` rebuilt as a Vite app).
-- A mockup: an image, a screenshot, a Figma design.
+- A mockup: an image, a screenshot, a Figma design, a hand-drawn wireframe
+  photo (where only the layout counts).
+- A live website to rebuild or migrate: an old jQuery site rebuilt in
+  Next.js, compared page by page against its URL.
+- Mobile mockups at phone width, or the same page at several breakpoints.
+- A chart to reproduce: an Excel or matplotlib chart image that a new
+  dashboard's chart has to match.
+- A print layout: a PDF invoice, report or certificate that generated output
+  has to look like (each PDF page rendered to an image first).
+- HTML email templates rebuilt in a new system (e.g. MJML), compared at
+  email-client width.
+- Component screenshots from a design system or Storybook that new
+  components have to match.
+- A screen recording or GIF of an interaction to reproduce (a menu opening,
+  a form's error states), compared frame by frame with
+  `extract_video_frames`.
+
+Ones you check by **behaviour** (same input, compare the output):
+
 - API docs (Markdown, OpenAPI) that a Python service has to implement.
+- An API schema to implement: a GraphQL schema, gRPC `.proto` files, a JSON
+  Schema that responses or files must validate against.
+- Recorded traffic from the old service (a HAR file, request logs) replayed
+  against the new one.
 - Sample code: an old implementation, in this language or another, that the
-  new one replaces.
+  new one replaces (a Bash script rewritten in Python, a Python library
+  ported to Rust).
+- The old implementation's own test suite, kept and run against the new one.
+- A CLI's `--help` text, man page or recorded terminal sessions (commands
+  and their output) that a new CLI has to reproduce.
+- Golden files for a data pipeline: a sample input CSV and the expected
+  output CSV or report.
+- A spreadsheet's formulas to port to code: the same inputs have to give the
+  same numbers.
+- A database schema or dump: new ORM models or migrations must produce the
+  same tables, columns and constraints (both schemas dumped and diffed).
+- A build config to migrate (webpack to Vite, setup.py to pyproject): the new
+  build must produce the same pages, entry points or package contents.
 
 JFI's planner never records that reference, or how to compare the new work
 against it:
@@ -149,7 +185,23 @@ judges the attached pair against the reference's "must match / may differ"
 | Image / mockup | Web app | New screenshot vs the image | `compare_screens` |
 | Figma design | Web app | A PNG export of each frame, then as an image (decision 5) | `compare_screens` |
 | API docs (Markdown, OpenAPI) | Python (or any) service | The docs' examples sent to the running service; status and fields compared | command |
+| Wireframe photo | Web app | New screenshot vs the photo, layout only (the "may differ" says so) | `compare_screens` |
+| Live website (URL) | Rebuilt site | Each page's URL vs the same route on the new site | `compare_screens` |
+| Mobile mockups / breakpoints | Responsive web app | One `compare_` entry per viewport | `compare_screens` |
+| Chart image (Excel, matplotlib) | Dashboard chart | Screenshot of the chart's element vs the image | `compare_screens` |
+| PDF layout | Generated PDF or page | Both PDFs rendered to PNG per page, then compared | `compare_screens` |
+| HTML email template | New email template | Both rendered at email-client width | `compare_screens` |
+| Storybook / design-system screenshots | New components | Each component's page vs its screenshot | `compare_screens` |
+| Screen recording / GIF | Interaction in the app | `extract_video_frames` on the recording; the same steps replayed and screenshotted | `compare_screens` with `steps` |
+| GraphQL schema, `.proto`, JSON Schema | Service or file output | Responses or files validated against the schema | command |
+| HAR file / request logs | New service | Recorded requests replayed; status and body shape compared | command |
 | Old implementation / sample code | New implementation | Both run on the same inputs; outputs diffed | command |
+| Old test suite | New implementation | The old tests run against the new code | command |
+| CLI `--help`, man page, terminal transcripts | New CLI | Each recorded command re-run; output compared | command |
+| Golden input/output files | Data pipeline | The sample input run through; output diffed with the expected file | command |
+| Spreadsheet formulas | Code | The same inputs through both; numbers compared | command |
+| Database schema / dump | ORM models, migrations | Both schemas dumped and diffed | command |
+| Build config (webpack, setup.py) | Migrated build | Both builds' output listed and diffed | command |
 | Screenshot of an old UI | Terminal UI (prompt_toolkit) | Out of scope for now: no headless TUI capture | — |
 
 ## Decisions to review
