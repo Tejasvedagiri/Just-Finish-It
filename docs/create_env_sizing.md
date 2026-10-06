@@ -93,8 +93,8 @@ CONTEXT_SIZE [38144]   <- LM Studio has qwen3.8-27b loaded with a 38,144-token c
 | **`CONTEXT_SIZE`** | the server's **loaded** context | exactly what's loaded. If the model isn't loaded: see decision 2. | 38,144 |
 | **`CONTEXT_COMPRESSION_RATIO`** | context and the reply reserve | budget = context − reply reserve; ratio = budget / context, clamped 0.5–0.9 | 0.73 (27.8k budget, 10.3k for the reply) |
 | **Reply reserve** (not a setting, drives the two above and below) | whether the model reasons (`arch`/name: qwen3, deepseek-r1, gpt-oss, "thinking"…) | reasoning models: 10k (the calc runs saw single replies up to 8,023 tokens); others: 4k | 10k |
-| **`REASONING_OUTPUT_CAP`** | reply reserve | reserve − 2k (room for the tool call after the reasoning) | 8,000 |
-| **`STREAM_OUTPUT_CAP`** | reply reserve | = reserve | 10,000 |
+| **`STREAM_OUTPUT_CAP`** | **measured** (2026-10-06): three short JFI-like requests (plan with a tool, implement a function, fix a bug; `REPLY_PROBES`), each reply's thinking and answer counted | twice the longest reply; at least 8,500 for a model that thinks (real calc runs saw 8,023-token replies, far above any test reply); at most 45% of the context; the test limit if a reply never finished | 8,500 (test replies up to ~3,560) |
+| **`REASONING_OUTPUT_CAP`** | the stream cap | the stream cap minus room for the answer and tool call after the thinking; 2,000 for a model that didn't think | 7,500 |
 | **`LLM_REQUEST_TIMEOUT`** | measured tokens/s | 2 × (STREAM_OUTPUT_CAP / tok/s) + 60 s for prompt processing, minimum 120 | ~260 s at ~100 tok/s |
 | **`TOOL_RESULT_MAX_TOKENS`** | episode budget | ~10% of the budget, rounded, 2k–8k | 3,000 |
 | **`MAX_EPISODE_TURNS`** | not machine-dependent | 25 (see decision 5) | 25 |

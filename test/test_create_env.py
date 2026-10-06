@@ -20,6 +20,7 @@ def nothing_detected(monkeypatch):
     monkeypatch.setattr(create_env, "_detect_system", lambda: detect.System(os_name="Linux"))
     monkeypatch.setattr(create_env, "_detect_models", lambda backend, url, key: None)
     monkeypatch.setattr(create_env, "_measure_speed", lambda url, key, model: detect.Speed(None, None))
+    monkeypatch.setattr(create_env, "_measure_replies", lambda url, key, model, limit: [])
     monkeypatch.setattr(create_env, "_laya_installed", lambda: False)
 
 

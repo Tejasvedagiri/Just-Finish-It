@@ -13,6 +13,7 @@ real output on any machine. Design and decisions: docs/create_env_sizing.md.
 
 import ctypes
 import json
+import math
 import os
 import platform
 import re
@@ -343,6 +344,87 @@ def measure_speed(url: str, key: str, model: str, post_json: Callable = _get_jso
                  "" if called or not finished_early else "it hit the token limit before calling the tool")
 
 
+# ------------------------------------------------------------------ reply lengths
+
+CHARS_PER_TOKEN = 4  # the estimate when the server reports no token count (as JFI.episode.budget)
+
+@dataclass
+class Reply:
+    name: str
+    reasoning_tokens: int
+    answer_tokens: int  # the visible answer plus tool-call arguments
+    finished: bool  # False: it hit the probe's max_tokens
+
+
+def _tool(name: str, **params) -> dict:
+    return {"type": "function", "function": {"name": name, "description": f"{name.replace('_', ' ')}.",
+                                             "parameters": {"type": "object", "properties": {
+                                                 k: {"type": "string"} for k in params}, "required": list(params)}}}
+
+
+# Three short pieces of the work JFI's episodes do -- plan with a tool, write a
+# function, fix a bug from a failing test -- so the reply lengths measured are
+# the model's real ones, reasoning included, not a fixed guess per model family.
+REPLY_PROBES = [
+    ("plan", [_tool("add_node", description="", done_when="")],
+     "Break this goal into its components and call add_node once for each: a command-line calculator in Python "
+     "that reads '<number> <op> <number>' lines with + - * / ^, prints the result, prints a one-line error for "
+     "bad input or division by zero, exits on 'exit', and has pytest tests."),
+    ("implement", [_tool("write_code", path="", code="")],
+     "Implement this function and call write_code with path calc/parse.py and the whole file:\n"
+     "def parse(line: str) -> tuple[float, str, float]:\n"
+     "    # Splits '<number> <op> <number>' (op one of + - * / ^) into its parts. Raises ValueError with a\n"
+     "    # clear message for anything else: missing parts, a bad number, an unknown operator.\n"),
+    ("fix", [_tool("write_code", path="", code="")],
+     "This test fails. Find the bug and call write_code with path calc/ops.py and the fixed file.\n"
+     "calc/ops.py:\n"
+     "def apply(a, op, b):\n    if op == '+': return a + b\n    if op == '-': return b - a\n"
+     "    if op == '*': return a * b\n    if op == '/': return a / b\n    if op == '^': return a ** b\n"
+     "    raise ValueError(op)\n"
+     "pytest: test_subtract: assert apply(5, '-', 2) == 3 -> AssertionError: assert -3 == 3"),
+]
+
+
+def _reasoning_text(message: dict) -> str:
+    return str(message.get("reasoning_content") or message.get("reasoning") or "")
+
+
+def measure_replies(url: str, key: str, model: str, max_tokens: int, post_json: Callable = _get_json,
+                    progress: Callable[[str], None] = lambda text: None) -> List[Reply]:
+    """How long this model's replies really are on JFI-like work: the
+    reasoning, and the answer and tool-call arguments after it. The caps the
+    console enforces (STREAM_OUTPUT_CAP, REASONING_OUTPUT_CAP) are set from
+    these; they used to be fixed per model family (10,000 / 8,000 for any
+    reasoning model). The server's token count is split between reasoning
+    and answer by their text lengths when it doesn't report the split."""
+    replies = []
+    for name, tools, prompt in REPLY_PROBES:
+        progress(name)
+        body = {"model": model, "max_tokens": max_tokens, "stream": False, "tools": tools,
+                "messages": [{"role": "user", "content": prompt}]}
+        reply = post_json(url.rstrip("/") + "/chat/completions",
+                          headers={"Authorization": f"Bearer {key}"} if key else None, body=body, timeout=600)
+        if not isinstance(reply, dict) or not reply.get("choices"):
+            continue
+        choice = reply["choices"][0]
+        message = choice.get("message") or {}
+        reasoning_chars = len(_reasoning_text(message))
+        answer_chars = len(str(message.get("content") or "")) + sum(
+            len(json.dumps(c.get("function") or {})) for c in message.get("tool_calls") or [])
+        usage = reply.get("usage") or {}
+        total = usage.get("completion_tokens")
+        reported = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+        if total and reported is not None:
+            reasoning, answer = reported, max(0, total - reported)
+        elif total and reasoning_chars + answer_chars:
+            reasoning = round(total * reasoning_chars / (reasoning_chars + answer_chars))
+            answer = total - reasoning
+        else:
+            reasoning, answer = reasoning_chars // CHARS_PER_TOKEN, answer_chars // CHARS_PER_TOKEN
+        replies.append(Reply(name, reasoning, answer, choice.get("finish_reason") != "length"))
+    return replies
+
+
 # ------------------------------------------------------------------ computing
 
 @dataclass
@@ -357,6 +439,8 @@ class Detected:
     system: Optional[System] = None
     model: Optional[ServerModel] = None
     speed: Optional[Speed] = None
+    replies: List[Reply] = field(default_factory=list)
+    probe_limit: int = 0  # the max_tokens the replies were measured with
     hosted: bool = False
     laya_installed: bool = False
     warnings: List[str] = field(default_factory=list)
@@ -402,23 +486,28 @@ def compute(model_id: str, detected: Detected, guess_context: Callable[[str], in
     out.append(Suggestion("CONTEXT_SIZE", str(context), why))
 
     reasoning = is_reasoning_model(model_id, m.arch if m else "")
-    reserve = REASONING_RESERVE if reasoning else PLAIN_RESERVE
-    reserve = min(reserve, int(context * 0.4))
+    measured = _caps_from_replies(detected, context)
+    if measured:
+        stream_cap, reasoning_cap, stream_why, reasoning_why = measured
+        reserve = stream_cap
+    else:
+        reserve = min(REASONING_RESERVE if reasoning else PLAIN_RESERVE, int(context * 0.4))
+        stream_cap = reserve
+        reasoning_cap = max(1_000, reserve - 2_000) if reasoning else 2_000
+        stream_why = "not measured; the reply reserve for this kind of model"
+        reasoning_why = ("not measured; the reply reserve minus room for the tool call after the thinking"
+                         if reasoning else "not measured; a non-reasoning model shouldn't think at length")
     if detected.hosted:
         ratio, ratio_why = 0.8, "hosted model: a large window, 20% kept for the reply"
     else:
         ratio = max(0.5, min(0.9, int((context - reserve) / context * 100) / 100))
-        ratio_why = (f"keeps ~{context - int(context * ratio):,} tokens for the reply "
-                     f"({'a reasoning model: long thinking before each answer' if reasoning else 'a non-reasoning model'})")
+        ratio_why = (f"keeps ~{context - int(context * ratio):,} tokens for the reply (STREAM_OUTPUT_CAP: "
+                     f"{'measured' if measured else 'a guess for this kind of model'})")
     out.append(Suggestion("CONTEXT_COMPRESSION_RATIO", f"{ratio:.2f}", ratio_why))
     budget = int(context * ratio)
 
-    stream_cap = reserve
-    out.append(Suggestion("STREAM_OUTPUT_CAP", str(stream_cap), "the reply reserve: the longest one reply may run"))
-    reasoning_cap = max(1_000, reserve - 2_000) if reasoning else 2_000
-    out.append(Suggestion("REASONING_OUTPUT_CAP", str(reasoning_cap),
-                          "the reply reserve minus room for the tool call after the thinking" if reasoning
-                          else "a non-reasoning model shouldn't think at length"))
+    out.append(Suggestion("STREAM_OUTPUT_CAP", str(stream_cap), stream_why))
+    out.append(Suggestion("REASONING_OUTPUT_CAP", str(reasoning_cap), reasoning_why))
 
     speed = detected.speed.tokens_per_second if detected.speed else None
     if speed:
@@ -507,6 +596,55 @@ def parallel_shortfall(env_parallel: Optional[str], env_context: Optional[str], 
     if int(cap.value) >= min(wanted, MAX_PARALLEL_LLM):
         return None
     return f"PARALLEL_LLM is {wanted} but the planner will run {cap.value} at a time: {cap.reason}."
+
+
+def _round_up(value: float, step: int = 500) -> int:
+    return int(math.ceil(value / step) * step)
+
+
+# Short test prompts make short replies; a real turn carries a long context
+# and Dev writes whole files. On the calc runs single qwen3.8 replies reached
+# 8,023 tokens while its test replies here are ~3,500. So: twice the longest
+# measured, and a reasoning model never below what real runs have seen.
+REPLY_HEADROOM = 2.0
+REASONING_MODEL_FLOOR = 8_500
+
+
+def _caps_from_replies(detected: "Detected", context: int):
+    """(STREAM_OUTPUT_CAP, REASONING_OUTPUT_CAP, why, why) from the measured
+    replies, or None when nothing was measured."""
+    replies = detected.replies
+    if not replies:
+        return None
+    longest_total = max(r.reasoning_tokens + r.answer_tokens for r in replies)
+    longest_reasoning = max(r.reasoning_tokens for r in replies)
+    longest_answer = max(r.answer_tokens for r in replies)
+    seen = ", ".join(f"{r.name} {r.reasoning_tokens:,}+{r.answer_tokens:,}" for r in replies)
+    unfinished = [r.name for r in replies if not r.finished]
+    if unfinished:
+        detected.warnings.append(
+            f"{', '.join(unfinished)}: the model was still going at the {detected.probe_limit:,}-token test limit "
+            f"(long thinking, or a loop). The caps are set to that limit; watch for 'response too long' retries.")
+    ceiling = max(2_000, int(context * 0.45))
+    measured = _round_up(longest_total * REPLY_HEADROOM)
+    floor = REASONING_MODEL_FLOOR if longest_reasoning else 2_000
+    stream_cap = min(ceiling, max(measured, floor, detected.probe_limit if unfinished else 0))
+    decided = ("the test limit it didn't finish within" if unfinished and stream_cap == detected.probe_limit
+               else f"the floor for a model that thinks ({REASONING_MODEL_FLOOR:,}: real calc runs saw 8,023-token "
+                    f"replies)" if stream_cap == floor and floor > measured
+               else "45% of the context" if stream_cap == ceiling and measured > ceiling
+               else "twice the longest measured reply")
+    stream_why = (f"longest test reply {longest_total:,} tokens (thinking + answer + tool call; {seen}); set by "
+                  f"{decided}")
+    if longest_reasoning:
+        room_for_answer = min(1_000, longest_answer + 500)  # the answer and tool call come after the thinking
+        reasoning_cap = (stream_cap - room_for_answer) // 500 * 500
+        reasoning_why = (f"the reply cap minus room for the answer and tool call after the thinking (longest "
+                         f"test thinking: {longest_reasoning:,})")
+    else:
+        reasoning_cap = 2_000
+        reasoning_why = "the model didn't think before answering in any test reply"
+    return stream_cap, max(1_000, reasoning_cap), stream_why, reasoning_why
 
 
 def context_mismatch(env_context: Optional[str], model: Optional[ServerModel]) -> Optional[str]:
