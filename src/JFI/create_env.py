@@ -694,23 +694,30 @@ def run_setup_wizard(values: dict, write_target: Path | None = None) -> dict:
     if theme:
         updates["THEME"] = theme
 
+    # Both dashboards default to yes (the user's call): a "no" is written
+    # down (JFI_WEB_BRIDGE=0, an empty MASTER_WS_URL) so the next run's
+    # default remembers it instead of asking yes again.
     print("\n--- Web dashboard bridge ---")
     if _prompt_yes_no(
         "Enable JFI_WEB_BRIDGE (mirror live status to a browser dashboard via jfi-web)?",
-        default=values.get("JFI_WEB_BRIDGE", "").strip().lower() in ("1", "true", "yes", "on"),
+        default=values.get("JFI_WEB_BRIDGE", "1").strip().lower() in ("1", "true", "yes", "on"),
     ):
         updates["JFI_WEB_BRIDGE"] = "1"
         updates["JFI_WEB_PORT"] = _prompt_text("JFI_WEB_PORT", values.get("JFI_WEB_PORT", "7777"))
+    else:
+        updates["JFI_WEB_BRIDGE"] = "0"
 
     print("\n--- Fleet dashboard (jfi-master) ---")
     if _prompt_yes_no(
         "Report this session to a fleet dashboard (MASTER_WS_URL, e.g. jfi-master running elsewhere)?",
-        default=bool(values.get("MASTER_WS_URL", "").strip()),
+        default="MASTER_WS_URL" not in values or bool(values["MASTER_WS_URL"].strip()),
     ):
         updates["MASTER_WS_URL"] = _master_ws_url(_prompt_text(
             "MASTER_WS_URL (a URL, host:port or just the port)",
             values.get("MASTER_WS_URL", "") or "ws://127.0.0.1:8765/report",
         ))
+    else:
+        updates["MASTER_WS_URL"] = ""
 
     _configure_pipeline(values, updates, sizing)
 

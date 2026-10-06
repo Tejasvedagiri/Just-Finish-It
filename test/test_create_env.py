@@ -455,8 +455,9 @@ class TestIsConfigured:
 # After the shared backend/key/model/CONTEXT_SIZE sub-flow, run_setup_wizard
 # asks, in order: the 6 _TUNING_KNOBS, THEME, whether to enable
 # JFI_WEB_BRIDGE, whether to set MASTER_WS_URL (fleet dashboard), and
-# whether to configure any per-phase override -- an empty answer to each of
-# these 10 prompts accepts its default/says "no". Verified against the real
+# whether to configure any per-phase override -- an empty answer to each
+# accepts its default. The two dashboards default to yes, so _TAIL answers
+# them "n" (each yes asks one more prompt: the port, the URL). Verified against the real
 # prompt sequence (see _TAIL's index comments) rather than hand-counted,
 # since this flow is long enough to miscount by hand.
 # [TEMP, FREQ, COMPRESSION, STREAM, REASONING, TIMEOUT, THEME, BRIDGE, FLEET,
@@ -465,6 +466,8 @@ class TestIsConfigured:
 #  PARALLEL_LLM, LAYA, AUTO_APPROVE, REVIEW_LOOP_APPROVAL, LOG_LLM_CALL_DEBUG, SHOW_STREAM_PROMPTS, EVIDENCE_REVIEW,
 #  FLARESOLVERR_URL, PER_PHASE]
 _TAIL = [""] * 25
+BRIDGE, FLEET = 7, 8
+_TAIL[BRIDGE] = _TAIL[FLEET] = "n"
 EPISODE_TURNS, PARALLEL, LAYA_ANSWER, AUTO_APPROVE = 9, 16, 17, 18
 
 
@@ -496,7 +499,7 @@ class TestRunSetupWizard:
         assert values["ANTHROPIC_API_KEY"] == "sk-ant-fake"
         assert values["MODEL"] == "claude-sonnet-5"
         assert values["CONTEXT_SIZE"] == "200000"
-        assert "JFI_WEB_BRIDGE" not in values  # declined, so left unwritten
+        assert values["JFI_WEB_BRIDGE"] == "0"  # declined, and remembered
         assert "Saved to" in capsys.readouterr().out
 
     def test_ollama_flow_defaults_url_and_key_and_lets_model_list_drive_context_size(self, tmp_path, monkeypatch):
@@ -746,7 +749,7 @@ class TestRunSetupWizard:
         assert create_env._effective_episode_budget(values, {}) == 22_937
         assert create_env._effective_episode_budget(values, {"CONTEXT_SIZE": "16384"}) == 11_468
 
-    def test_web_bridge_declined_writes_nothing(self, tmp_path, monkeypatch):
+    def test_web_bridge_declined_is_written_as_off(self, tmp_path, monkeypatch):
         env_path = tmp_path / ".env"
         env_path.write_text("MODEL=old\n", encoding="utf-8")
         monkeypatch.setattr(create_env, "ENV_PATH", env_path)
@@ -758,7 +761,7 @@ class TestRunSetupWizard:
 
         values = create_env.run_setup_wizard({})
 
-        assert "JFI_WEB_BRIDGE" not in values
+        assert values["JFI_WEB_BRIDGE"] == "0"
         assert "JFI_WEB_PORT" not in values
 
     def test_web_bridge_accepted_also_asks_for_the_port(self, tmp_path, monkeypatch):
@@ -780,7 +783,7 @@ class TestRunSetupWizard:
         assert values["JFI_WEB_BRIDGE"] == "1"
         assert values["JFI_WEB_PORT"] == "9000"
 
-    def test_fleet_dashboard_declined_writes_nothing(self, tmp_path, monkeypatch):
+    def test_fleet_dashboard_declined_is_written_as_blank(self, tmp_path, monkeypatch):
         env_path = tmp_path / ".env"
         env_path.write_text("MODEL=old\n", encoding="utf-8")
         monkeypatch.setattr(create_env, "ENV_PATH", env_path)
@@ -792,7 +795,37 @@ class TestRunSetupWizard:
 
         values = create_env.run_setup_wizard({})
 
-        assert "MASTER_WS_URL" not in values
+        assert values["MASTER_WS_URL"] == ""  # blank: reports nowhere, and the next default is no
+
+    def test_both_dashboards_default_to_yes_until_declined(self, tmp_path, monkeypatch):
+        """The user: the web bridge and fleet dashboard questions default to y.
+        Enter on both turns them on (and accepts the port and URL); a .env
+        that already said no keeps no as the default."""
+        env_path = tmp_path / ".env"
+        env_path.write_text("MODEL=old\n", encoding="utf-8")
+        monkeypatch.setattr(create_env, "ENV_PATH", env_path)
+        monkeypatch.setattr(create_env, "fetch_anthropic_models", lambda key: None)
+        monkeypatch.setattr(create_env.getpass, "getpass", lambda *a, **k: "sk-ant-fake")
+
+        tail = list(_TAIL)
+        tail[BRIDGE] = tail[FLEET] = ""
+        answers = iter(["5", "claude-sonnet-5", "", *tail[:BRIDGE + 1], "", tail[FLEET], "", *tail[FLEET + 1:]])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+        values = create_env.run_setup_wizard({})
+        assert (values["JFI_WEB_BRIDGE"], values["JFI_WEB_PORT"]) == ("1", "7777")
+        assert values["MASTER_WS_URL"] == "ws://127.0.0.1:8765/report"
+
+        asked = []
+
+        def no_to_everything(prompt, default):
+            asked.append((prompt.split(" (")[0], default))
+            return False
+        monkeypatch.setattr(create_env, "_prompt_yes_no", no_to_everything)
+        answers = iter(["5", "claude-sonnet-5", "", *[""] * 30])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+        create_env.run_setup_wizard({"JFI_WEB_BRIDGE": "0", "MASTER_WS_URL": ""})
+        assert ("Enable JFI_WEB_BRIDGE", False) in asked
+        assert ("Report this session to a fleet dashboard", False) in asked
 
     def test_fleet_dashboard_accepted_defaults_to_the_masters_port_8765(self, tmp_path, monkeypatch):
         env_path = tmp_path / ".env"
