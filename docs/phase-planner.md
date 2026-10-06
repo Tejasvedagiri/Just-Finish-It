@@ -178,7 +178,11 @@ Every verdict is stored as a `PlannerVerdict` row.
 - Descriptions are capped at `PLANNER_ITEM_MAX_CHARS` (200): the judge reads them.
 - `depends_on` must name existing nodes and stay acyclic.
 - Depth is capped at `MAX_LEAF_DEPTH` (5); a function that already exists in the
-  plan, or a file another component owns, is refused as a duplicate.
+  plan, or a file another component owns, is refused as a duplicate. So is a
+  top-level component sharing 60% or more of its words with another
+  (`_same_component`): on the portfolio-dashboard run the Architect re-added
+  "Scaffold Next.js app ..." word for word, and "Extract all ... data into CSV
+  files under data/" in other words (0.67); distinct pages shared at most 0.35.
 
 - Ground truth ([`old_new.md`](old_new.md)): a case sits on one node only,
   at any level. `compare` is no longer a kind the planner can give (each node

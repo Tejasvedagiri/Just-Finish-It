@@ -297,6 +297,27 @@ def test_every_node_under_a_ground_truth_gets_its_own_evidence(project):
     assert next(n for n in load_nodes(engine, "s") if n.description.startswith("compare add")).kind is None, added
 
 
+def test_the_architect_cant_add_the_same_component_twice(project):
+    """Observed on the portfolio-dashboard run: component 15 repeated 1 word
+    for word, and 16 repeated 2 in other words."""
+    engine, _ = project
+    add_node(engine, "s", "architect", None, "Scaffold Next.js app with TypeScript, install Recharts and "
+             "dependencies: working dev server at localhost:3000", done_when="dev server runs")
+    add_node(engine, "s", "architect", None, "Extract all embedded JS data into CSV files under data/: holdings, "
+             "dividends, allocation, transactions, news, watchlist, outlook projections", done_when="csvs exist")
+    again = add_node(engine, "s", "architect", None, "Scaffold Next.js app with TypeScript, install Recharts and "
+                     "dependencies: working dev server at localhost:3000", done_when="dev server runs")
+    assert again.startswith("Error: component 1 already covers this")
+    reworded = add_node(engine, "s", "architect", None, "Extract all dashboard data into CSV files under data/ "
+                        "directory: holdings, dividends, transactions, news, watchlist, outlook projections, "
+                        "ticker profiles", done_when="csvs exist")
+    assert reworded.startswith("Error: component 2 already covers this")
+    for page in ("Build Holdings page with sortable table of all positions and performance data",
+                 "Build Watchlist page showing tracked stocks with price changes and alerts",
+                 "Build Transactions page with searchable table of all buy/sell activity"):
+        assert add_node(engine, "s", "architect", None, page, done_when="renders").startswith("Added")
+
+
 # ------------------------------------------------------------------ Dev compares each node
 
 def _case_leaf(engine, root):
@@ -465,6 +486,51 @@ def test_a_page_state_is_compared_as_screenshots_and_text(project):
     assert result.image_url.startswith("data:image/png;base64,")
     (root / "new.html").write_text(page)
     assert compare_case(engine, "s", root, "watch_tab").ok
+
+
+# A side bar like portfolio-dashboard.html's: plain divs with onclick (no
+# button or link role), a KPI card that says "Holdings" before them in the
+# page, and one view shown at a time.
+SIDEBAR_PAGE = ("<html><body style='margin:0;font-family:sans-serif;display:flex'>"
+                "<main style='flex:1'><div class='kpi'>Holdings</div>"
+                "<section id='home'>Home: total value $120,000</section>"
+                "<section id='holdings' style='display:none'><table><tr><td>AAPL 10</td></tr></table></section></main>"
+                "<aside style='width:200px;order:-1'>"
+                "<div class='nav-item' data-view='home' style='cursor:pointer' onclick='show(\"home\")'>"
+                "<span>&#8962;</span><span>Home</span></div>"
+                "<div class='nav-item' data-view='holdings' style='cursor:pointer' onclick='show(\"holdings\")'>"
+                "<span>&#9783;</span><span>My Holdings</span></div></aside>"
+                "<script>function show(v){for(const s of document.querySelectorAll('section'))"
+                "s.style.display=s.id===v?'block':'none'}</script></body></html>")
+
+
+@pytest.mark.skipif(not _chromium(), reason="Chromium for Playwright isn't installed")
+def test_a_side_bar_tab_is_never_saved_as_the_home_page(project):
+    """Observed on the first real run (portfolio-dashboard.html): every
+    side-bar tab's evidence -- holdings table, dividend chart, watchlist,
+    news, settings -- was the home page. A click that changes nothing is
+    refused with what can be clicked, and an image identical to another
+    case's is refused, instead of being saved as evidence."""
+    engine, root = project
+    (root / "old.html").write_text(SIDEBAR_PAGE)
+    home = capture_evidence(engine, "s", root, "lead", "home_view", url="old.html", new_url="/")
+    assert home.startswith("Saved")
+
+    # "Holdings" matches the KPI label first, which does nothing when clicked.
+    missed = capture_evidence(engine, "s", root, "lead", "holdings_tab", url="old.html", new_url="/holdings",
+                              steps=["click Holdings"])
+    assert missed.startswith("Error: the steps ['click Holdings'] changed nothing")
+    assert 'div[data-view="holdings"]' in missed and "My Holdings" in missed  # what to click instead
+    no_steps = capture_evidence(engine, "s", root, "lead", "holdings_tab", url="old.html", new_url="/holdings")
+    assert no_steps.startswith("Error: this is the same screen as case home_view's evidence")
+    hidden = capture_evidence(engine, "s", root, "lead", "holdings_tab", url="old.html", new_url="/holdings",
+                              selector="#holdings table")
+    assert "hidden on this screen" in hidden
+    assert read_evidence(root, "s", "holdings_tab") is None  # nothing wrong was kept
+
+    saved = capture_evidence(engine, "s", root, "lead", "holdings_tab", url="old.html", new_url="/holdings",
+                             steps=['click [data-view="holdings"]'])
+    assert saved.startswith("Saved") and "AAPL 10" in read_evidence(root, "s", "holdings_tab").spec["text"]
 
 
 def test_each_role_gets_its_evidence_tools(project):

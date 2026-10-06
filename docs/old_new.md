@@ -505,6 +505,19 @@ in red), beside `.new.png` (the new app's shot). Steps click a button,
 link or tab with the name before plain text: "click Watchlist" first hit the
 nav label of that name.
 
+A capture never saves the wrong screen silently. On the first real run
+(portfolio-dashboard.html) a dozen side-bar tabs' evidence was the home page:
+the captures had no steps (or a `#holdings` the page ignores), and the clicks
+themselves were fine. Now:
+
+- a capture that is the same screen as another case's (the same image, or a
+  whole page with the same visible text) is refused, with how to reach a tab;
+- steps that leave the page exactly as it loaded are refused, with the list of
+  what can be clicked there (`div[data-view="holdings"] "Holdings"`, ...);
+- a `selector` on a part that's hidden on that screen says to open it first;
+- clicks go to visible elements only, and a `#fragment` on a file URL stays a
+  fragment (it used to become part of the file name: "file not found").
+
 ## Kinds of ground truth
 
 | Ground truth | New code | One case's evidence | Kind |

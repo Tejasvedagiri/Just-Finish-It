@@ -152,6 +152,27 @@ def _duplicate_of(nodes: Sequence[Leaf], description: str, files: Sequence[str])
                  and target_symbol(n.description) == symbol and set(n.files or []) & set(files)), None)
 
 
+def _words(text: str) -> set:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _same_component(nodes: Sequence[Leaf], description: str) -> Optional[Leaf]:
+    """A top-level component that already says (almost) the same: most of
+    their words shared. Observed on the portfolio-dashboard run: the
+    Architect's later episodes added "Scaffold Next.js app ..." again word for
+    word as component 15, and "Extract all dashboard data into CSV files under
+    data/ ..." as 16 beside 2's "Extract all embedded JS data into CSV files
+    under data/ ..." (0.67 of their words shared). The genuinely different
+    pages of that plan shared at most 0.35."""
+    wanted = _words(description)
+    for node in nodes:
+        if node.parent_id is None and node.level == "architect":
+            theirs = _words(node.description)
+            if wanted and len(wanted & theirs) / len(wanted | theirs) >= 0.6:
+                return node
+    return None
+
+
 def _sources(files: Sequence[str]) -> set:
     return {f for f in files if "test" not in f.lower()}
 
@@ -360,6 +381,11 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
     test_problem = _test_path_problem(engine, session_id, files)
     if test_problem:
         return test_problem
+    if role == "architect" and parent_id is None:
+        twin = _same_component(nodes, description)
+        if twin is not None:
+            return (f"Error: component {twin.id} already covers this ({twin.description!r}). Don't add it "
+                    f"again: update_node({twin.id}, ...) if it needs more, or add only what's missing.")
     duplicate = _duplicate_of([n for n in nodes if n.id != parent_id], description, files)
     if duplicate is not None:
         return (f"Error: node {duplicate.id} already covers {target_symbol(description)}() in "

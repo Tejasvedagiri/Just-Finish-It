@@ -384,9 +384,13 @@ def _resolve_url(url: str, root: Path, view: str = "") -> str:
     url = (url or "").strip()
     if re.match(r"^(https?|file)://", url):
         return url
-    if view and (url.startswith("/") or not (Path(root) / url).exists()):
+    # A #fragment or ?query stays one: as_uri() would make it part of the
+    # file name (page.html%23holdings, "file not found").
+    split = re.search(r"[#?]", url)
+    path, tail = (url[:split.start()], url[split.start():]) if split else (url, "")
+    if view and (url.startswith("/") or not (Path(root) / path).exists()):
         return view.rstrip("/") + "/" + url.lstrip("/")
-    return (Path(root) / url).resolve().as_uri()
+    return (Path(root) / path).resolve().as_uri() + tail
 
 
 def _do_step(page, step: str) -> None:
@@ -394,13 +398,15 @@ def _do_step(page, step: str) -> None:
     verb, arg = verb.lower(), arg.strip()
     if verb == "click":
         if re.match(r"^[#.\[]", arg):
-            page.click(arg, timeout=5000)
+            page.locator(arg).filter(visible=True).first.click(timeout=5000)
             return
         # A control before plain text: found while building this, "click
         # Watchlist" hit the nav label "Watchlist" (the first text match) and
         # never the Watchlist button, so the tab it opens was never shot.
+        # Visible ones only: a hidden copy (a collapsed mobile menu) can come first.
         for locator in (page.get_by_role("button", name=arg), page.get_by_role("link", name=arg),
                         page.get_by_role("tab", name=arg), page.get_by_text(arg, exact=True), page.get_by_text(arg)):
+            locator = locator.filter(visible=True)
             if locator.count():
                 locator.first.click(timeout=5000)
                 return
@@ -419,11 +425,33 @@ def _do_step(page, step: str) -> None:
                          "scroll <pixels> or wait <ms>")
 
 
+# What a person could click on the page, for a step that did nothing.
+_CLICKABLE_JS = """() => {
+  const seen = new Set(), out = [];
+  for (const el of document.querySelectorAll('body *')) {
+    if (out.length >= 25) break;
+    const style = getComputedStyle(el), box = el.getBoundingClientRect();
+    if (style.cursor !== 'pointer' || !box.width || !box.height) continue;
+    const inside = el.parentElement && seen.has(el.parentElement);
+    seen.add(el);
+    if (inside) continue;  // the icon or label inside a nav item, not another control
+    const text = (el.innerText || el.getAttribute('aria-label') || '').trim().replace(/\\s+/g, ' ').slice(0, 40);
+    const id = el.id ? '#' + el.id : '';
+    const data = [...el.attributes].filter(a => a.name.startsWith('data-')).map(a => `[${a.name}="${a.value}"]`)[0] || '';
+    if (text || id || data) out.push(`${el.tagName.toLowerCase()}${id}${data}${text ? ' "' + text + '"' : ''}`);
+  }
+  return out;
+}"""
+
+
 def screenshot(url: str, out: Path, viewport: str = DEFAULT_VIEWPORT, steps: Sequence[str] = (),
-               selector: str = "") -> Tuple[str, str]:
+               selector: str = "", must_change: bool = False) -> Tuple[str, str]:
     """(error or "", visible text). The viewport, not the full page: both sides
     are shot the same way, and the pair stays a manageable image. With a
-    selector, only that element (one chart, one card)."""
+    selector, only that element (one chart, one card). `must_change`: steps
+    that leave the page exactly as it loaded are an error, not a capture --
+    observed on the first real run, where every side-bar tab's evidence was
+    the home page."""
     problem = _browser_problem()
     if problem:
         return problem, ""
@@ -444,13 +472,23 @@ def screenshot(url: str, out: Path, viewport: str = DEFAULT_VIEWPORT, steps: Seq
             try:
                 page = browser.new_page(viewport={"width": width, "height": height})
                 page.goto(url, timeout=NAV_TIMEOUT_MS, wait_until="networkidle")
+                before = page.screenshot() if must_change and steps else None
                 for step in steps or ():
                     _do_step(page, step)
                 page.wait_for_timeout(200)
+                if before is not None and page.screenshot() == before:
+                    clickable = page.evaluate(_CLICKABLE_JS)
+                    return (f"Error: the steps {list(steps)} changed nothing on {url}: the page is exactly as it "
+                            f"loaded, so this would save the first screen again. Click the control itself with a "
+                            f"CSS step (e.g. 'click [data-view=\"holdings\"]' or 'click #nav-holdings'). Clickable "
+                            f"here: " + "; ".join(clickable or ["nothing found"])), ""
                 if selector:
                     element = page.locator(selector).first
                     if not page.locator(selector).count():
                         return f"Error: nothing on {url} matches the selector {selector!r}.", ""
+                    if not element.is_visible():
+                        return (f"Error: {selector!r} is on {url} but hidden on this screen (another tab or view). "
+                                f"Add steps to open it first, e.g. steps=['click Holdings']."), ""
                     element.scroll_into_view_if_needed(timeout=5000)
                     text = element.inner_text().strip()
                     element.screenshot(path=str(out))
@@ -672,9 +710,16 @@ def _capture_visual(engine, session_id: str, root: Path, role: str, case: str, u
         spec.update(source=f"file {image}", image=image, text="")
     else:
         target = _resolve_url(url, root)
-        problem, text = screenshot(target, png, spec["viewport"], spec["steps"], selector)
+        problem, text = screenshot(target, png, spec["viewport"], spec["steps"], selector, must_change=True)
         if problem:
             return problem
+        twin = _same_capture(root, session_id, case, png, text if not selector else "")
+        if twin:
+            png.unlink()
+            return (f"Error: this is the same screen as case {twin}'s evidence, so it can't show anything {twin} "
+                    f"doesn't. A different tab or view needs steps to reach it (e.g. steps=['click Holdings'] for "
+                    f"a side-bar tab): a #fragment or ?query in the url doesn't switch a page that changes views "
+                    f"on click. A part of the screen needs selector='<css>'.")
         where = f" {selector}" if selector else ""
         spec.update(source=f"screenshot {target}{where} {spec['viewport']}", url=target, text=text[:4000])
     spec["captured"] = f"{utcnow().strftime('%Y-%m-%d %H:%M UTC')} by {role or 'jfi'}"
@@ -683,6 +728,28 @@ def _capture_visual(engine, session_id: str, root: Path, role: str, case: str, u
     sync_evidence_names(engine, session_id, root)
     png, spec_file = evidence_path(root, session_id, case, ".png"), evidence_path(root, session_id, case, ".json")
     return f"Saved {shown(root, png)} and {spec_file.name} (source: {spec['source']})."
+
+
+def _same_capture(root: Path, session_id: str, case: str, png: Path, text: str = "") -> Optional[str]:
+    """Another case whose evidence is this very screen: the same image, or
+    (a whole page, where an animated chart can change a few pixels) the same
+    visible text. Observed on the first real run: a dozen cases (holdings
+    table, dividend chart, watchlist, news, ...) all saved the home page, so
+    none of them could ever check its tab."""
+    shot = png.read_bytes()
+    for path, _, other, suffix in _files(root, session_id):
+        if other == case:
+            continue
+        if suffix == ".png" and path.read_bytes() == shot:
+            return other
+        if suffix == ".json" and text:
+            try:
+                spec = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not spec.get("selector") and spec.get("text") == text[:4000]:
+                return other
+    return None
 
 
 def recapture(engine, session_id: str, root: Path, case: str) -> str:

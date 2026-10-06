@@ -139,7 +139,9 @@ this component; the design (design_get) and runbook tell you how it connects to 
    on the file node whose code produces it (cases=["add", "divide_by_zero"]); a case belongs to one node. Dev
    compares the finished file with them. For each, capture_evidence: choose the inputs (1 + 1,
    2.5 + 0.25, -3 + 10), or url + new_url (+ steps) for a page state -- add selector="<css>" for ONE part of
-   it (a chart, a card) -- image + new_url for a mockup image file, sql for a query; it runs the ground truth
+   it (a chart, a card) -- image + new_url for a mockup image file, sql for a query. A tab or view the page
+   opens on click needs steps=["click <its label>"] (without steps it's the first screen, and a screen another
+   case already has is refused); it runs the ground truth
    and saves it in the session's evidence folder. A screenshot is only for something you can see; a config, data or build
    output is behavioural (inputs + evidence_one). Files are named by task number for you (1.2_add.txt). Never
    type the answers yourself: answers= is the last resort, saved as not verified. finish checks every file node
