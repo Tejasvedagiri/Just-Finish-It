@@ -180,12 +180,14 @@ Every verdict is stored as a `PlannerVerdict` row.
 - Depth is capped at `MAX_LEAF_DEPTH` (5); a function that already exists in the
   plan, or a file another component owns, is refused as a duplicate.
 
-- Ground truth ([`old_new.md`](old_new.md)): a Lead's case sits on one file
-  node only; a `compare` leaf needs `cases` whose evidence exists in
-  the session's evidence folder (`.jfi/evidence/<session>/`), cases its file node owns, and a `depends_on`; only the Lead
-  puts cases on file nodes.
+- Ground truth ([`old_new.md`](old_new.md)): a case sits on one node only,
+  at any level. `compare` is no longer a kind the planner can give (each node
+  compares itself when Dev finishes it).
+- A node added under a finished parent, or a finished parent rewritten, sends
+  that parent and the parents above it back to Dev's queue
+  (`reopen_with_ancestors`): a parent is checked after everything under it.
 
-## Ground truth (`reference`, evidence and compare leaves)
+## Ground truth (`reference` and every node's evidence)
 
 When the goal comes with something the build must match (a command like `bc`,
 a page, a mockup, an input with its expected output, API docs, an old program
@@ -202,11 +204,23 @@ or database), each layer adds its part, checked by its `finish`
   sees one in the goal ("compare it with", "turn X.html into", "migrate the
   database", a mockup file the goal names, ...), unless the Architect records
   `assumption:no_ground_truth`. None of the benchmark goals trips it.
-- **Lead** names the cases for its files (`cases` on each file node) and
-  `capture_evidence`s each into `.jfi/evidence/<session>/`; `finish` refuses a component
-  citing a reference with no cases or missing evidence.
-- **Task** adds, after the leaf that builds a case, a `compare` leaf for it;
-  `finish` refuses a case with no compare leaf, or with two.
+  Every component that cites a reference gets its own case(s) with evidence
+  (the original screen of its view, or a probe's answers); `finish` refuses
+  without them.
+- **Lead** gives every file node its own cases and `capture_evidence`s each
+  into `.jfi/evidence/<session>/`.
+- **Task** gives every leaf its own case and captures it (`capture_evidence`
+  is in its core set): the original's answer for that one piece, with
+  `new_command` when the runbook's `compare_one` runs the whole program. No
+  separate compare leaves: the user asked for every node to be compared with
+  its own evidence when it's done, "There need not be a sub point to validate
+  against evidence."
+
+Under a component that cites a reference, the Lead's and Task's `finish` (and
+Task's split) refuse while a new node has no case (a `delete` needs none), a
+case has no evidence, or evidence sits on no node -- on the first real run a
+`load_holdings.txt` was captured, never put on a node, and so never compared.
+The Architect's `finish` checks the same for its components.
 
 ## Guards
 

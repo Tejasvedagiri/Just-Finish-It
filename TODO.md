@@ -70,6 +70,19 @@ sizing POC is in [`docs/laya_poc.md`](docs/laya_poc.md).
    `>` inside quoted text, written as redirections. Unconfirmed -- needs that
    run's `.jfi/JFI.db`. The 2026-10-01 entry-point test project is still at
    `D:\git\jfi-bench\entry-check`.
+10. **Check the bottom-up imp and per-node evidence on a real run**
+    (`feature/screenshots`, 2026-10-06). Every node now has a checkbox and a
+    Dev turn: leaves first, then each parent (`VERIFY`), and under a ground
+    truth every component, file and leaf captures its own case, with no
+    compare leaves. Unit-tested only. On the portfolio-dashboard conversion,
+    check: (a) Task really captures a case for every leaf without stalling on
+    `finish` (a type-only or imports leaf may only have LLM or file evidence);
+    (b) how many tokens the parents' check episodes cost next to the leaves;
+    (c) how often a leaf's visual case fails only because the rest of the
+    page isn't built yet, and whether `accept_difference` then hides real
+    misses that the parent's or the reviewer's comparison has to catch.
+    The fleet's checklist now gets `- [ ] 1 ...` for parents too (it was
+    `- 1. ...`); check `parsePlanLines` in `Just-Finish-It-Fleet` still nests them.
 
 ## Fixed 2026-10-02
 

@@ -25,10 +25,10 @@ from JFI.episode.engine import run_episode
 from JFI.episode.roles import ROLE_ENV_PREFIXES
 from JFI.episode.tools import EpisodeTools
 from JFI.imp.dev import run_command
-from JFI.imp.queue import dev_leaves
+from JFI.imp.queue import dev_nodes
 from JFI.models import DesignEntry, Leaf, PlanEvent, RunbookEntry, get_session
 from JFI.models.enums import LeafStatus
-from JFI.planner.nodes import load_nodes
+from JFI.planner.nodes import load_nodes, reopen_with_ancestors
 from JFI.review.prompts import CLEANUP, REVIEW_CONTINUE, REVIEWER
 from JFI.tool.checkpoint_tools import make_checkpoint_tools, revert_leaf
 from JFI.tool.code_tools import list_dir, read_file_range, scan_markers, search_code
@@ -127,9 +127,9 @@ class Reviewer:
             fix_note = (fix_note or "").strip()
             if not fix_note:
                 return "Error: reopen_leaf needs a fix_note: the failing step, expected vs actual, and where."
-            leaf = next((n for n in dev_leaves(load_nodes(self.engine, self.session_id)) if n.id == int(leaf_id)), None)
+            leaf = next((n for n in dev_nodes(load_nodes(self.engine, self.session_id)) if n.id == int(leaf_id)), None)
             if leaf is None:
-                return f"Error: {leaf_id} isn't a leaf Dev builds. get_plan() lists the leaves and their files."
+                return f"Error: {leaf_id} isn't a node Dev builds. get_plan() lists the nodes and their files."
             reverted = ""
             if revert:
                 if not leaf.checkpoint:
@@ -147,14 +147,17 @@ class Reviewer:
                 db.add(row)
                 db.add(PlanEvent(session_id=self.session_id, node_id=leaf.id, type="reopen", detail=fix_note[:500]))
                 db.commit()
+            parents = reopen_with_ancestors(self.engine, self.session_id, leaf.id)
             reopened.append(leaf.id)
-            return f"Reopened leaf {leaf.id} ({leaf.description}) for Dev with your fix note.{reverted}"
+            above = f" The part(s) above it ({', '.join(map(str, parents))}) are checked again after it." \
+                if parents else ""
+            return f"Reopened node {leaf.id} ({leaf.description}) for Dev with your fix note.{reverted}{above}"
         return reopen_leaf
 
     def _evidence_check(self) -> tuple[Optional[str], str]:
         """(a refusal, or None; a note for the pass). Every ground-truth case
-        is compared again over the finished build: a later leaf can break
-        what an earlier compare leaf checked."""
+        is compared again over the finished build: a later node can break
+        what an earlier one matched, and Dev may have accepted a difference."""
         sync_evidence_names(self.engine, self.session_id, self.root)
         cases = list_cases(self.root, self.session_id)
         if not cases:
@@ -166,11 +169,13 @@ class Reviewer:
                 if unverified else "")
         if not bad:
             return None, f" All {len(results)} ground-truth case(s) match their evidence.{note}"
-        owners = {c: n.id for n in dev_leaves(load_nodes(self.engine, self.session_id))
-                  if n.kind == "compare" for c in (n.cases or [])}
-        lines = [f"- {r.case} (compare leaf {owners.get(r.case, '?')}):\n{r.report}" for r in bad]
-        return (cap_result("Error: not a pass -- the build doesn't match its ground truth. reopen_leaf the compare "
-                           "leaf of each failing case (or the leaf whose code is wrong) with what differs:\n"
+        owners: dict = {}
+        for n in dev_nodes(load_nodes(self.engine, self.session_id)):
+            for c in n.cases or []:
+                owners.setdefault(c, n.id)
+        lines = [f"- {r.case} (node {owners.get(r.case, '?')}):\n{r.report}" for r in bad]
+        return (cap_result("Error: not a pass -- the build doesn't match its ground truth. reopen_leaf the node "
+                           "of each failing case (or the node whose code is wrong) with what differs:\n"
                            + "\n".join(lines), "Only the end of the output is shown."), note)
 
     def _finish(self, reopened: List[int], report_before: Optional[str]):
@@ -204,7 +209,7 @@ class Reviewer:
 
     def _mark_passed(self) -> None:
         with get_session(self.engine) as db:
-            for leaf in dev_leaves(load_nodes(self.engine, self.session_id)):
+            for leaf in dev_nodes(load_nodes(self.engine, self.session_id)):
                 if leaf.status == LeafStatus.DONE:
                     row = db.get(Leaf, leaf.id)
                     row.review_status = PASSED

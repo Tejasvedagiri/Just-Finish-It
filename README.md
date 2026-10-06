@@ -414,8 +414,8 @@ Each episode gets only its role's tools (`ROLE_CORE_TOOLS` in `src/JFI/episode/r
 | `scaffold_file` / `unscaffold_file` | Create a file of stubs (a declaration and what it does; the body is generated), or remove one. |
 | `mark_change` | Mark an existing function for Dev to change or delete. |
 | `capture_evidence` / `list_evidence` | Lead: save a case's ground-truth evidence into `.jfi/evidence/<session>/` by running the runbook's `evidence_one` (or screenshotting a page, copying a mockup, running a saved SQL query). Answers the model types itself are the last resort, saved as not verified. |
-| `compare_evidence` | Dev (compare leaves) and the reviewer: the new code on a case's inputs via `compare_one`, or the new app screenshotted in the case's state, against its evidence (numbers by value; screenshots as original \| new \| differences, plus missing text). |
-| `finish` | End the episode. The Architect's also requires the runbook, design and test setup (or the outline, for a document), and the ground truth when the goal names one; the Lead's and Task's require a component's cases, their evidence and a compare leaf per case. |
+| `compare_evidence` | Dev (every node with cases) and the reviewer: the new code on a case's inputs via `compare_one`, or the new app screenshotted in the case's state, against its evidence (numbers by value; screenshots as original \| new \| differences, plus missing text). |
+| `finish` | End the episode. The Architect's also requires the runbook, design and test setup (or the outline, for a document), and the ground truth when the goal names one; under a ground truth, the Lead's and Task's require every new node to have its own case with evidence. |
 
 **Reading and editing code** (all roles, by need)
 

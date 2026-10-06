@@ -22,7 +22,8 @@ or file it copies, and only then answers the model supplies -- flagged
 `source: llm -- not verified`. The header records how, so `recapture` can
 redo it and a person reading the file knows how far to trust it.
 
-`compare_case` runs the runbook's `compare_one` (the NEW code on one input)
+`compare_case` runs the case's own `compare` command (header, for a leaf's
+one function) or the runbook's `compare_one` (the NEW code on one input)
 for every input and compares the outputs here, in code: numbers by value,
 words exactly, separators ignored ("tokens", the default), or `exact` /
 `contains`. A visual case screenshots the new app in the same state and
@@ -106,7 +107,9 @@ class Evidence:
 
     @property
     def reference_only(self) -> bool:
-        """An Architect's overview of the ground truth: kept to show, not compared."""
+        """Evidence marked `check: reference` is kept to show, not compared.
+        Only sessions planned before every node compared itself have it (an
+        Architect's overview of the ground truth)."""
         return ((self.spec if self.visual else self.header).get("check") or "") == "reference"
 
 
@@ -158,11 +161,11 @@ def list_cases(root: Path, session_id: str) -> List[str]:
 
 
 def sync_evidence_names(engine, session_id: str, root: Path) -> List[str]:
-    """Names every evidence file after the task that owns it, as the plan
-    numbers it now: the ground truth after the node whose `cases` hold the
-    case (a Lead's file node, e.g. 1.2_add.txt, or an Architect's component
-    for its overview, 2_dividends_view.png), and Dev's results after the
-    compare leaf that checks it (1.2.3_add.result.txt). Plan numbers shift
+    """Names every evidence file after the node whose `cases` hold the case,
+    as the plan numbers it now: an Architect's component (2_dividends_view.png),
+    a Lead's file (1.2_add.txt) or a Task's leaf (1.2.3_add_decimals.txt), and
+    Dev's results for it beside them (1.2.3_add_decimals.result.txt). A legacy
+    compare leaf names the results of the case it checks. Plan numbers shift
     when nodes are added, so this runs after planning steps and before
     comparisons. Returns the renames done."""
     from JFI.models import build_indexes, display_number
@@ -179,7 +182,7 @@ def sync_evidence_names(engine, session_id: str, root: Path) -> List[str]:
             target.setdefault(case, display_number(node, by_id, siblings))
     renames = []
     for path, number, case, suffix in _files(root, session_id):
-        wanted = (checker if suffix in RESULT_SUFFIXES else owner).get(case)
+        wanted = (checker.get(case) if suffix in RESULT_SUFFIXES else None) or owner.get(case)
         name = f"{wanted}_{case}{suffix}" if wanted else f"{case}{suffix}"
         if wanted and number != wanted and not (path.parent / name).exists():
             path.rename(path.parent / name)
@@ -564,7 +567,7 @@ def _preview(items: Sequence[Item], limit: int = 8) -> str:
 def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, inputs: Sequence[str] = (),
                      sql: str = "", url: str = "", image: str = "", new_url: str = "", steps: Sequence[str] = (),
                      viewport: str = "", match: str = "", answers: Sequence[str] = (), from_file: str = "",
-                     selector: str = "", new_selector: str = "") -> str:
+                     selector: str = "", new_selector: str = "", new_command: str = "") -> str:
     """Saves one case's evidence, from the best source there is (see the
     module docstring). Returns what was saved, or an Error saying what's
     missing."""
@@ -626,9 +629,9 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
                 "can give them: pass answers=[...] (with from_file='<path> L<a>-<b>' if you copied them from a "
                 "file); answers you made up are saved as 'not verified' for a person to check.")
     header["match"] = match
+    if new_command.strip():
+        header["compare"] = new_command.strip()
     header["captured"] = f"{utcnow().strftime('%Y-%m-%d %H:%M UTC')} by {role or 'jfi'}"
-    if role == "architect":
-        header["check"] = "reference"
     path = evidence_path(root, session_id, case, ".txt")
     path.write_text(render_text(header, items), encoding="utf-8")
     _event(engine, session_id, f"{case}: {header['source']}")
@@ -675,8 +678,6 @@ def _capture_visual(engine, session_id: str, root: Path, role: str, case: str, u
         where = f" {selector}" if selector else ""
         spec.update(source=f"screenshot {target}{where} {spec['viewport']}", url=target, text=text[:4000])
     spec["captured"] = f"{utcnow().strftime('%Y-%m-%d %H:%M UTC')} by {role or 'jfi'}"
-    if role == "architect":
-        spec["check"] = "reference"
     evidence_path(root, session_id, case, ".json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
     _event(engine, session_id, f"{case}: {spec['source']}")
     sync_evidence_names(engine, session_id, root)
@@ -693,8 +694,7 @@ def recapture(engine, session_id: str, root: Path, case: str) -> str:
     if evidence.visual:
         if not evidence.spec.get("url") and not evidence.spec.get("image"):
             return f"Error: {case} doesn't say how it was captured."
-        role = "architect" if evidence.reference_only else "recapture"
-        return _capture_visual(engine, session_id, Path(root), role, case, evidence.spec.get("url", ""),
+        return _capture_visual(engine, session_id, Path(root), "recapture", case, evidence.spec.get("url", ""),
                                evidence.spec.get("image", ""), evidence.spec.get("new_url", ""),
                                evidence.spec.get("steps") or (), evidence.spec.get("viewport", ""),
                                evidence.spec.get("selector", ""), evidence.spec.get("new_selector", ""))
@@ -758,12 +758,13 @@ def compare_case(engine, session_id: str, root: Path, case: str) -> CaseResult:
         return CaseResult(case, False, f"Error: no evidence for case {case!r} in {shown(root, evidence_dir(root, session_id))}/ "
                                        f"(capture it with capture_evidence).")
     if evidence.reference_only:
-        return CaseResult(case, True, f"{case}: the Architect's overview of the ground truth -- kept to look at, "
-                                      f"not compared ({shown(root, evidence.path)}).")
+        return CaseResult(case, True, f"{case}: kept to look at, not compared ({shown(root, evidence.path)}).")
     if evidence.visual:
         return _compare_visual(engine, session_id, root, evidence)
-    compare_one = _runbook(engine, session_id, "compare_one")
-    if compare_one is None:
+    # A case can say how to run the new code itself (a leaf's one function);
+    # otherwise the runbook's compare_one runs the whole program.
+    command = evidence.header.get("compare") or getattr(_runbook(engine, session_id, "compare_one"), "command", "")
+    if not command:
         return CaseResult(case, False, "Error: the runbook has no compare_one: how to run the NEW code on one input "
                                        "({input} or {input_file}), printing its answer. runbook_set it, e.g. "
                                        "\"printf '%s\\nexit\\n' {input} | python3 main.py\".")
@@ -771,8 +772,8 @@ def compare_case(engine, session_id: str, root: Path, case: str) -> CaseResult:
     view = _view_url(engine, session_id)
     lines, outputs, bad = [f"compare {case}  ({shown(root, evidence.path)}, source: {evidence.source})"], [], 0
     for n, item in enumerate(evidence.items):
-        command = fill(compare_one.command, root, session_id, item.input, n, case, view)
-        code, stdout, stderr = run(command, root)
+        filled = fill(command, root, session_id, item.input, n, case, view)
+        code, stdout, stderr = run(filled, root)
         output, failed = _outcome(code, stdout, stderr)
         outputs.append(stdout + stderr)
         if item.error:
@@ -788,7 +789,7 @@ def compare_case(engine, session_id: str, root: Path, case: str) -> CaseResult:
     if evidence.unverified:
         lines.append(f"(the evidence for {case} came from the LLM, not a command or file: it isn't verified)")
     # Dev's evidence: what the new code gave, kept next to the ground truth
-    # and named after the compare task (sync_evidence_names).
+    # and named after the same task (sync_evidence_names).
     evidence_path(root, session_id, case, ".result.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     sync_evidence_names(engine, session_id, root)
     lines.append(f"  saved: {shown(root, evidence_path(root, session_id, case, '.result.txt'))}")
@@ -862,9 +863,9 @@ def make_evidence_tools(engine, session_id: str, root: Path, role: str = "") -> 
 
     return {
         "capture_evidence": lambda case, inputs=(), sql="", url="", image="", new_url="", steps=(), viewport="",
-        match="", answers=(), from_file="", selector="", new_selector="": capture_evidence(
+        match="", answers=(), from_file="", selector="", new_selector="", new_command="": capture_evidence(
             engine, session_id, root, role, case, inputs, sql, url, image, new_url, steps, viewport, match, answers,
-            from_file, selector, new_selector),
+            from_file, selector, new_selector, new_command),
         "compare_evidence": compare_evidence,
         "list_evidence": list_evidence,
     }
@@ -892,6 +893,7 @@ EVIDENCE_TOOL_SCHEMAS = [
                       "description": "tokens (default: numbers by value, words exactly), exact, contains"},
             "answers": {"type": "array", "items": {"type": "string"}, "description": "LAST RESORT, one per input"},
             "from_file": {"type": "string", "description": "where answers= came from, e.g. docs/api.md L40-58"},
+            "new_command": {"type": "string", "description": "runs the NEW code for THIS case, if not compare_one"},
         }, "required": ["case"]},
     }},
     {"type": "function", "function": {

@@ -1,9 +1,9 @@
-# Old vs new: evidence from a ground truth, checked by its own task
+# Old vs new: evidence from a ground truth, checked on every task
 
 **Status:** built (branch `feature/screenshots`). Code: `src/JFI/tool/evidence_tools.py`
-(capture, compare, screenshots), `planner/nodes.py` and `planner/loop.py` (the
-`compare` kind, `cases`, each layer's `finish`), `imp/dev.py` (the compare
-leaf's gate), `review/__init__.py`, `runner._evidence_review`, and the
+(capture, compare, screenshots), `planner/nodes.py` and `planner/loop.py`
+(`cases`, each layer's `finish`), `imp/queue.py` (bottom-up) and `imp/dev.py`
+(every node's gate), `review/__init__.py`, `runner._evidence_review`, and the
 Evidence list in `web/dashboard.py`. Tests: `test/test_evidence.py`. What
 differs from the proposal, and what isn't built, is under "Decisions" at the
 end.
@@ -28,22 +28,30 @@ plans the work:
    last resort, and is labelled as such.
    **You can look at `.jfi/evidence/<session>/`** and confirm it, edit it, or have it
    captured again, before or while the code is built.
-3. **Task** creates the tasks from that evidence: one task builds the code
-   (`implement add`), and the **next task compares** what it gives with the
-   evidence (`compare add with .jfi/evidence/<session>/1.2_add.txt`).
-4. **Dev** does both tasks in order. The compare task is done only when the
-   new code's output matches the evidence file.
+3. **Task** creates the tasks, and captures the evidence for each one
+   (`implement add` gets `1.2.1_add.txt`).
+4. **Dev** works bottom-up: the leaves (1.2.1, 1.2.2), then their file (1.2),
+   then the component (1). **Every task is compared with its own evidence
+   when it's done**, and is done only when the new code's output matches.
+   There's no separate compare task.
 5. **The reviewer** runs every comparison again at the end.
 
-For the calculator, Lead (evaluator) runs `bc` and saves:
+Every role leaves evidence: the Architect's component, the Lead's file and
+Task's leaf each have their own case(s). (Until 2026-10-06 Task added a
+separate `compare` leaf per case and only the Lead's files had cases; the
+user's call after the first real run: "you need to create evidence for all.
+There need not be a sub point to validate against evidence.")
+
+For the calculator, Task (evaluator.py) adds `implement +` and runs `bc` for
+it:
 
 ```
-.jfi/evidence/<session>/1.2_add.txt
+.jfi/evidence/<session>/1.2.1_add.txt
 # case: add
 # source: command { echo scale=10; cat {input_file}; } | bc -l
 # how: { echo scale=10; cat {input_file}; } | bc -l
 # match: tokens
-# captured: 2026-10-06 00:05 UTC by lead
+# captured: 2026-10-06 00:05 UTC by task
 >>> 1 + 1
 2
 >>> 2.5 + 0.25
@@ -52,17 +60,14 @@ For the calculator, Lead (evaluator) runs `bc` and saves:
 7
 ```
 
-Task (evaluator.py) creates the two tasks:
-
 | # | Task | Done when |
 |---|---|---|
-| 1 | implement `evaluate()` for + in `evaluator.py` | its unit test passes (as today) |
-| 2 | compare `+` with `.jfi/evidence/<session>/add` (depends on 1) | every input of `add.txt` gives the same answer from the new code |
+| 1.2.1 | implement `evaluate()` for + in `evaluator.py`, case `add` | its unit test passes, then every input of `1.2.1_add.txt` gives the same answer from the new code |
 
-Dev finishes task 1, then on task 2 `mark_leaf_done` runs the comparison:
+Dev builds it, and `mark_leaf_done` runs the test and then the comparison:
 
 ```
-compare add  (.jfi/evidence/<session>/1.2_add.txt, source: command { echo scale=10; cat {input_file}; } | bc -l)
+compare add  (.jfi/evidence/<session>/1.2.1_add.txt, source: command { echo scale=10; cat {input_file}; } | bc -l)
   1 + 1            new: 2.0                  evidence: 2            match
   2.5 + 0.25       new: 2.75                 evidence: 2.75         match
   -3 + 10          new: 7.0                  evidence: 7            match
@@ -80,11 +85,11 @@ sub: 1 of 1 differ
 ```
 
 A page works the same way. The Lead saves
-`.jfi/evidence/<session>/watchlist_tab.png` (the original after clicking Watchlist), and the
-compare task screenshots the new page in the same state and puts the two side
-by side.
+`.jfi/evidence/<session>/2.1_watchlist_tab.png` (the original after clicking Watchlist), and
+when Dev finishes that file the gate screenshots the new page in the same
+state and puts the two side by side.
 
-## Why evidence files, and why a separate task
+## Why evidence files, and why on every task
 
 - **The evidence is fixed and reviewable.** It's captured once, by a tool,
   and saved in `.jfi/evidence/<session>/`. You can open it and see what
@@ -95,14 +100,13 @@ by side.
   running `bc`, not from the model. A hand-written expected value carries the
   same misunderstanding as the code, which is why today's unit tests (written
   by the same model) pass when a requirement was misread.
-- **The comparison is visible in the plan.** "compare add with
-  `.jfi/evidence/<session>/1.2_add.txt`" is a task with its own status, time and result in
-  `get_plan`, the dashboards and the review, instead of a hidden step inside
-  another task.
-- **Each task is checked right after it's built.** The compare task depends
-  on the build task and runs next, so a wrong answer is caught on the task
-  that caused it, not by the reviewer after many tasks were built on top of
-  it.
+- **Each task is checked right after it's built.** The comparison is part
+  of the task's own gate, so a wrong answer is caught on the task that caused
+  it, not by the reviewer after many tasks were built on top of it. Its
+  result is saved under the task's number, beside its evidence.
+- **Every level is checked.** A parent's turn comes after its children
+  (1.2.1, 1.2.2, then 1.2, then 1), so the file's cases are compared once the
+  whole file is built and the component's once the whole component is.
 
 ## Where evidence comes from
 
@@ -132,14 +136,14 @@ built, so it's the easiest place to catch a wrong assumption:
   `.jfi/evidence/<session>/watchlist_tab.png`, `.jfi/evidence/<session>/active_customers.sql`.
 - **Confirm or change it in the dashboard.** `jfi-web` has an Evidence list
   (under the plan's Runbook and Design): every case, its file, its source, and
-  whether its compare task has passed. For each one you can **accept** it,
+  the status of the task that owns it. For each one you can **accept** it,
   **edit** it (the header becomes `source: user`), or have it **captured
   again**.
 - **A change goes back through the queue.** Editing or re-capturing a case's
-  evidence re-queues its compare task, even one that already passed, so the
-  code is checked against the corrected evidence. Editing the file by hand in
-  the project has the same effect: the compare task reads the file when it
-  runs, and the reviewer's `finish` reads it again at the end.
+  evidence re-queues the task that owns it (and the parents above it), even
+  one that already passed, so the code is checked against the corrected
+  evidence. Editing the file by hand has the same effect: the gate reads the
+  file when it runs, and the reviewer's `finish` reads it again at the end.
 
 Whether a run waits for you to accept the evidence before building is
 decision 11.
@@ -177,18 +181,18 @@ flowchart TD
         L3["File nodes, each with its cases"]
     end
 
-    U["You (optional): look at .jfi/evidence/SESSION/<br/>accept, edit or re-capture;<br/>a change re-queues its compare task"]
+    U["You (optional): look at .jfi/evidence/SESSION/<br/>accept, edit or re-capture;<br/>a change re-queues the task that owns it"]
 
     subgraph TASK["Task, per file"]
-        T1["implement leaf: build the code<br/>(implement + in evaluator.py)"]
-        T2["compare leaf: depends on it<br/>(compare + with .jfi/evidence/SESSION/1.2_add.txt)"]
+        T1["one leaf per piece, each with its own case<br/>(implement + in evaluator.py, case add)"]
+        T2["capture_evidence for each leaf<br/>saves .jfi/evidence/SESSION/1.2.1_add.txt"]
     end
 
-    subgraph DEV["Dev, one leaf at a time"]
-        D1["Implement leaf: code + unit test<br/>mark_leaf_done runs test_one"]
-        D2["Compare leaf: mark_leaf_done compares<br/>case add with .jfi/evidence/SESSION/1.2_add.txt"]
+    subgraph DEV["Dev, bottom-up: 1.2.1, 1.2.2, then 1.2, then 1"]
+        D1["A leaf: code + unit test, or a parent:<br/>check the part as a whole<br/>mark_leaf_done runs its test"]
+        D2["...then compares the node's cases<br/>with its evidence"]
         DQ{"Output = evidence?"}
-        DOK["Done; next leaf"]
+        DOK["Done; next node"]
         DFIX["Refused with the differing lines<br/>(or both screenshots); Dev fixes the code"]
     end
 
@@ -196,33 +200,35 @@ flowchart TD
         R1["e2e, then finish compares<br/>every case in .jfi/evidence/SESSION/ again"]
         RQ{"All match?"}
         RPASS["PASS"]
-        RFIX["Reopen the compare leaf (and its<br/>implement leaf) for that case"]
+        RFIX["Reopen the node that owns the case<br/>(its parents are checked again after it)"]
     end
 
     G --> A1 --> A2 --> L1 --> L2 --> L3 --> T1 --> T2 --> D1 --> D2 --> DQ
     L2 -.-> U
+    T2 -.-> U
     U -.-> D2
     DQ -- yes --> DOK
-    DQ -- no --> DFIX --> D2
-    DOK -- "every leaf done" --> R1 --> RQ
+    DQ -- no --> DFIX --> D1
+    DOK -- "every node done" --> R1 --> RQ
     RQ -- yes --> RPASS
     RQ -- no --> RFIX --> D1
 ```
 
-One compare task, for the calculator's `add` case:
+One task's gate, for the calculator's `add` case:
 
 ```mermaid
 sequenceDiagram
-    participant Lead
-    participant Ev as .jfi/evidence/SESSION/1.2_add.txt
+    participant Task
+    participant Ev as .jfi/evidence/SESSION/1.2.1_add.txt
     participant Dev
     participant Gate as mark_leaf_done
     participant New as new code (main.py)
 
-    Note over Lead,Ev: planning
-    Lead->>Ev: capture_evidence("add", inputs): runs evidence_one (bc -l) on 1 + 1, 2.5 + 0.25, -3 + 10
-    Note over Dev,New: imp, after "implement +" is done
-    Dev->>Gate: mark_leaf_done(compare add)
+    Note over Task,Ev: planning
+    Task->>Ev: capture_evidence("add", inputs): runs evidence_one (bc -l) on 1 + 1, 2.5 + 0.25, -3 + 10
+    Note over Dev,New: imp, on "implement +"
+    Dev->>Gate: mark_leaf_done(1.2.1, test_id=test_add)
+    Gate->>Gate: runs the unit test first
     loop each input in add.txt
         Gate->>Ev: >>> 1 + 1 / 2
         Gate->>New: 1 + 1 (through compare_one)
@@ -315,10 +321,10 @@ month    revenue
   cases (NULLs, unicode names, the oldest and newest rows). It saves each
   query and lets `capture_evidence` run it on the old database for the
   result.
-- **Task** adds, for each migration step, the step itself (`migrate the
-  orders table`) and a compare task after it (`compare order_totals`).
-- **Dev** runs the migration step; the compare task runs the saved query on
-  the new database and must get the saved result.
+- **Task** adds each migration step (`migrate the orders table`) with its own
+  case (`order_totals`).
+- **Dev** runs the migration step; its gate runs the saved query on the new
+  database and must get the saved result.
 - You can open `.jfi/evidence/<session>/order_totals.sql`, see exactly what was checked,
   and run it yourself.
 
@@ -406,9 +412,10 @@ to, so `.jfi/evidence/<session>/` reads like the plan:
 
 | Who | Task | Example | What it is |
 |---|---|---|---|
-| Architect | a component, `2` | `2_dividends_overview.png` | one overview of the part of the ground truth that component rebuilds (the whole original screen, or a probe's answers). Kept to look at, not compared (`check: reference`). |
-| Lead | a file, `2.1` | `2.1_outlook_table.png`, `2.1_outlook_table.json`, `1.2_add.txt` | the cases that file must match |
-| Dev | a compare task, `2.1.4` | `2.1.4_outlook_table.new.png`, `.compare.png`, `1.2.3_add.result.txt` | what the new code gave, next to what it was compared against |
+| Architect | a component, `2` | `2_dividends_view.png` | the part of the ground truth that component rebuilds (the whole original screen, or a probe's answers); compared when the whole component is built |
+| Lead | a file, `2.1` | `2.1_outlook_table.png`, `2.1_outlook_table.json` | the cases that file must match; compared when the whole file is built |
+| Task | a leaf, `2.1.3` | `2.1.3_add.txt`, `2.1.3_sort_by_date.png` | the one piece that leaf builds |
+| Dev | the same task | `2.1.3_add.result.txt`, `2.1_outlook_table.new.png`, `.compare.png` | what the new code gave when Dev finished that task, next to what it was compared against |
 
 Plan numbers are computed from the tree's order, never stored, and shift when
 a node is added before others (a review iteration adding a component). So
@@ -417,54 +424,60 @@ task's number after each planning episode, before each Dev step and before
 the review. Inside, everything goes by the case name, so a rename never loses
 a file. A file without a number isn't on a node yet.
 
-### Task: an implement leaf, then a compare leaf
+### Task: every leaf with its own case
 
-For each file, Task adds its leaves as today (one per stub) and, for every
-case on the file, a **compare leaf** after the leaf that builds it:
+For each file, Task adds its leaves as today (one per stub), each with its own
+case, and captures the evidence for it:
 
 ```
 add_node("implement evaluate() for + in evaluator.py: ...", kind="implement",
-         files=["evaluator.py", "tests/test_evaluator.py"], done_when="evaluate('1 + 1') == 2")
-add_node("compare + with .jfi/evidence/<session>/add", kind="compare", cases=["add"],
-         files=["evaluator.py"], depends_on=[<the implement leaf>],
-         done_when="compare_evidence add matches")
+         files=["evaluator.py", "tests/test_evaluator.py"], done_when="evaluate('1 + 1') == 2",
+         cases=["add"])
+capture_evidence("add", inputs=["1 + 1", "2.5 + 0.25", "-3 + 10"])
 ```
 
-- The implement leaf's `done_when` test case comes from the evidence
-  (`1 + 1` -> `2`, from `add.txt`), not from the model's own arithmetic.
-- A compare leaf is refused without `cases`, without `depends_on`, with a case
-  the file doesn't own, or with a case whose evidence doesn't exist.
-- Every case on the file gets exactly one compare leaf; Task's `finish` checks.
+- The leaf's `done_when` test case comes from the evidence (`1 + 1` -> `2`),
+  not from the model's own arithmetic.
+- When the runbook's `compare_one` runs the whole program but the leaf builds
+  one function, `capture_evidence(..., new_command="<runs that function on
+  {input}>")` says how to run the new code for this case (the header's
+  `compare` line).
+- A case belongs to one node, at any level. Under a component citing a
+  reference, Task's `finish` (and its split) refuses a leaf without a case (a
+  `delete` needs none), a case without evidence, and evidence on no node.
+- There are no compare leaves any more: `compare` isn't a kind the planner
+  can give. Sessions planned before still have them; Dev runs them with
+  their own prompt (`COMPARE`).
 
-### Dev: the compare leaf's gate
+### Dev: bottom-up, every node's gate
 
-A compare leaf has its own Dev prompt (`COMPARE` in `imp/prompts.py`) and
-gate:
+The queue goes children first: 1.2.1, 1.2.2, then 1.2, then 1. A parent's turn
+(`VERIFY` prompt) checks the part as a whole once everything under it is done.
+Every node goes through the same `mark_leaf_done`:
 
-1. Dev runs `compare_evidence(case)`: new vs evidence per input, or the
-   original, the new page and their differences as one attached image.
-2. `mark_leaf_done(leaf_id, summary)` compares again itself. Every case
-   matches: done, and the leaf remembers the evidence it passed against
-   (`evidence_hash`). Otherwise it's refused with the differing lines, and
-   Dev fixes the code (the compare leaf lists the source file).
-3. A remaining **visual** difference that's intended can be accepted with
-   `accept_difference="<why>"`; it goes to the reviewer notes. Never for a
-   behavioural mismatch.
+1. Its proof first: the unit test (`test_id`), a `check` command, or a
+   passage's mechanical check. With cases and nothing else to run, the
+   comparison alone is the proof.
+2. Then every case on the node is compared: new vs evidence per input, or the
+   original, the new page and their differences. Every case matches: done,
+   and the node remembers the evidence it matched (`evidence_hash`).
+   Otherwise it's refused with the differing lines, and Dev fixes the code.
+3. A difference that's intended, or that a later task builds (a part of the
+   page not written yet), can be accepted with `accept_difference="<why>"`;
+   it goes to the reviewer notes, and the reviewer compares every case again.
 4. The new code hitting another leaf's stub (`NotImplementedError`) re-queues
-   the compare leaf after that leaf, as for unit tests.
-5. Evidence that changes during the episode refuses the leaf: Dev fixes the
+   the node after that leaf, as for unit tests.
+5. Evidence that changes during the episode refuses the node: Dev fixes the
    code, not the evidence.
-6. A compare leaf that runs out of attempts is skipped with a reviewer note;
-   a comparison can't be split.
-7. A passed compare leaf whose evidence is edited or re-captured later is
-   re-queued.
+6. A node whose evidence is edited or re-captured later is re-queued, and so
+   is every parent above it.
 
 ### Reviewer: everything again
 
 The reviewer has `compare_evidence` and `list_evidence`, and its `finish`
 compares every case again over the finished build before it confirms a
-pass. A case that differs refuses the pass and names its compare leaf to
-reopen. The pass message lists any case checked only against LLM-generated
+pass. A case that differs refuses the pass and names the node that owns it to
+reopen; reopening a node sends the parents above it back too. The pass message lists any case checked only against LLM-generated
 evidence. A case that can't run here (no browser) goes in the review report as
 *not checked*, never as passed.
 
@@ -474,7 +487,7 @@ evidence. A case that can't run here (no browser) goes in the review report as
 |---|---|---|
 | Ground truth | A command (`bc`, `curl`, `wget`, `nvidia-smi`, `psql`), docs, an old program, a golden file | A page, a mockup, a design export |
 | Evidence file | `.jfi/evidence/<session>/<task>_<case>.txt` (and `.sql` for a query) | `.jfi/evidence/<session>/<task>_<case>.png`, plus `.json` (source, viewport, steps, selector, where the new app shows it, the original's visible text) |
-| Dev's result | `<compare task>_<case>.result.txt`: each input, the new answer and the evidence's | `<compare task>_<case>.new.png` and `.compare.png` |
+| Dev's result | `<task>_<case>.result.txt`: each input, the new answer and the evidence's | `<task>_<case>.new.png` and `.compare.png` |
 | Captured by | `capture_evidence` running `evidence_one` per input | `capture_evidence` screenshotting the original after its steps (or converting a mockup to PNG) |
 | Compared by | `compare_one` per input; JFI compares the outputs: `tokens` (default: numbers by value, words exactly, separators ignored), `exact` or `contains`; an `!error` input passes when the new code also fails | The new app screenshotted the same way; fails when more than `COMPARE_MAX_DIFF` (10%) of the pixels differ **or** text on the original is missing from the new page |
 
@@ -487,7 +500,7 @@ Both visual passes are needed: building this, a nav link missing from the new
 page changed 0.03% of the pixels. The screenshots are compared in the same
 headless browser `check_page` uses (a canvas diff), so there's no image
 library to install; the result is saved as Dev's evidence,
-`.jfi/evidence/<session>/<compare task>_<case>.compare.png` (original | new | differences
+`.jfi/evidence/<session>/<task>_<case>.compare.png` (original | new | differences
 in red), beside `.new.png` (the new app's shot). Steps click a button,
 link or tab with the name before plain text: "click Watchlist" first hit the
 nav label of that name.
@@ -553,10 +566,10 @@ Variants that name it are how the feature gets measured (Build notes).
    no longer committed to git: read it on disk or in `jfi-web`. Dev's
    comparison output sits beside it; the scratch input files are in
    `.jfi/compare/`.
-2. **A compare task after each implement task:** yes. `RULES` in
-   `planner/prompts.py` makes the one exception to "checking that it all
-   works is never a node": a `compare` leaf, which has evidence to check and
-   a gate that can fail.
+2. **A compare task after each implement task:** built first, then replaced
+   (2026-10-06, the user's call after the first real run): every node --
+   component, file and leaf -- has its own evidence and is compared with it
+   when Dev finishes it, bottom-up, so no separate compare leaves.
 3. **When it's required:** the Architect's `finish` wants a reference when
    `ground_truth_hint` sees one in the goal: words like "compare it with",
    "turn/rewrite/migrate X into" a file or database, "look like <URL or
@@ -612,12 +625,13 @@ the next step to measure the feature.
   `evidence_hash`. `tool/design_tools.py`: the `reference` kind.
   `tool/runbook_tools.py`: `evidence_one` and `compare_one` are command
   entries, and a command may start with a shell group (`{ ...; } | bc -l`).
-- `planner/nodes.py`: the `compare` kind and the `cases` rules.
+- `planner/nodes.py`: the `cases` rule (one node per case) and
+  `reopen_with_ancestors`. `imp/queue.py`: the bottom-up queue.
   `planner/loop.py`: `ground_truth_hint` and each layer's `finish`.
   `planner/prompts.py`: the Architect's, Lead's and Task's steps.
   `episode/roles.py`, `episode/tools.py`, `episode/brief.py` (a node's cases
   in its brief).
-- `imp/dev.py`, `imp/prompts.py`: the compare leaf's prompt and gate, and the
+- `imp/dev.py`, `imp/prompts.py`: every node's gate, the parent's `VERIFY` prompt, and the
   re-queue on changed evidence. `review/`: the reviewer's check and prompt;
   cleanup keeps `.jfi/evidence/<session>/`.
 - `runner.py`: `_evidence_review`; `execute_command` reachable by the

@@ -34,7 +34,7 @@ ROLE_CORE_TOOLS = {
              "mark_change", "capture_evidence", "list_evidence", "escalate", "finish"],
     "task": ["get_node", "list_nodes", "add_node", "update_node", "delete_node", "outline_file", "list_symbols",
              "read_file", "read_symbol", "find_references",
-             "scaffold_file", "design_get", "list_evidence", "escalate", "finish"],
+             "scaffold_file", "design_get", "capture_evidence", "list_evidence", "escalate", "finish"],
     "dev": ["outline_file", "read_symbol", "replace_symbol", "list_symbols", "read_file", "copy_lines", "write_file",
             "replace_in_file", "apply_patch", "find_references",
             "search_code", "design_get", "runbook_get", "runbook_set", "execute_command", "add_reviewer_note",

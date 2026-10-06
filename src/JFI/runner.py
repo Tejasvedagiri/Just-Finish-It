@@ -472,8 +472,8 @@ def _imp(console: AbstractManager, ssm: SessionManager, llm_for_role):
 
 def _evidence_review(console: AbstractManager, ssm: SessionManager) -> bool:
     """EVIDENCE_REVIEW=1 (off by default): before building, wait for a person
-    to accept the ground-truth evidence the Lead captured (docs/old_new.md),
-    since a wrong ground truth costs every compare leaf built on it. Asked
+    to accept the ground-truth evidence the planner captured (docs/old_new.md),
+    since a wrong ground truth costs every task compared with it. Asked
     again only when the evidence changed since it was last accepted. False:
     the person stopped the run."""
     from sqlmodel import select

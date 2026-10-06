@@ -306,22 +306,25 @@ def _render_evidence(engine, session_id: str) -> None:
     cases = list_cases(root, session_id)
     if not cases:
         return
-    compare_status = {c: n.status.value for n in load_nodes(engine, session_id)
-                      if n.kind == "compare" for c in (n.cases or [])}
+    node_status: dict = {}
+    for n in load_nodes(engine, session_id):
+        for c in n.cases or []:
+            node_status.setdefault(c, n.status.value)
     rows = []
     for case in cases:
         evidence = read_evidence(root, session_id, case)
         reviewed = (evidence.spec if evidence.visual else evidence.header).get("reviewed", "")
         rows.append({"file": evidence.path.name, "case": case,
-                     "kind": ("overview" if evidence.reference_only else "visual" if evidence.visual
+                     "kind": ("reference" if evidence.reference_only else "visual" if evidence.visual
                               else f"{len(evidence.items)} input(s)"),
                      "source": ("⚠ " if evidence.unverified else "") + evidence.source,
-                     "reviewed": reviewed, "compare task": compare_status.get(case, "")})
+                     "reviewed": reviewed, "task status": node_status.get(case, "")})
     unverified = sum(r["source"].startswith("⚠") for r in rows)
     title = f"Evidence ({len(cases)})" + (f" — {unverified} not verified" if unverified else "")
     with st.expander(title, expanded=bool(unverified)):
-        st.caption(f"The ground truth in `{folder}/`, each file named after its task (1 = an Architect "
-                   "component's overview, 1.2 = a Lead's file, 1.2.3 = Dev's comparison). ⚠ = written by the model, "
+        st.caption(f"The ground truth in `{folder}/`, each file named after the task it checks (1 = an "
+                   "Architect's component, 1.2 = a Lead's file, 1.2.3 = a Task's leaf; .result.txt / .new.png / "
+                   ".compare.png = Dev's comparison when that task finished). ⚠ = written by the model, "
                    "not captured from a command, page or file: check those first. Turn Auto-refresh off while "
                    "editing.")
         st.dataframe(rows, width="stretch", hide_index=True)

@@ -158,8 +158,9 @@ venv, not system Python. If you're unsure a command is right, try
   planner's node tools (`JFI.planner.nodes`) and Dev's gated
   `mark_leaf_done` (`JFI.imp.dev`) — never by text edits. The reviewer
   reads it with `get_plan`/`get_leaf` (`tool/plan_db_tools.py`).
-- Parent vs leaf is structural (has children or not), not a flag. Only
-  real leaves carry status/timing.
+- Parent vs leaf is structural (has children or not), not a flag. Every
+  node carries status/timing: imp finishes leaves first, then each parent
+  above them (`JFI.imp.queue.post_order`).
 - Siblings are ordered by a gap-numbered `sort_key` (10, 20, 30…). Dot
   numbers like `1.1.2` are **computed for display only**
   (`display_number`). Never store or hand-maintain them.

@@ -26,7 +26,6 @@ import os
 import re
 import threading
 import time
-from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,13 +43,13 @@ from JFI.llm.parallel import effective_parallel
 from JFI.models import DesignEntry, Leaf, PlanEvent, PlannerVerdict, RunbookEntry, get_session
 from JFI.planner.judge import CHECKPOINT, JudgeNode
 from JFI.planner.nodes import (
-    BREAKDOWN, GOOD, MAX_LEAF_DEPTH, REDO, repo_path, children_of, depth_of, load_nodes, make_node_tools,
-    path_of,
+    BREAKDOWN, GOOD, MAX_LEAF_DEPTH, NO_CASE_KINDS, REDO, repo_path, children_of, depth_of, load_nodes,
+    make_node_tools, path_of,
 )
 from JFI.planner.prompts import ROLE_PROMPTS
 from JFI.tool.code_tools import make_code_tools
 from JFI.tool.design_tools import design_index, make_design_tools, references_text
-from JFI.tool.evidence_tools import make_evidence_tools, read_evidence, sync_evidence_names
+from JFI.tool.evidence_tools import list_cases, make_evidence_tools, read_evidence, sync_evidence_names
 from JFI.tool.note_tools import add_reviewer_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.runbook_tools import make_runbook_tools, runbook_index
@@ -448,47 +447,56 @@ class Planner:
     def _finish(self, anchor: ScopeAnchor, role: str, mode: str, node: Optional[Leaf]):
         if role == "architect" and node is None:
             return self._architect_finish(anchor)
-        if mode == "breakdown" and role == "lead" and any(str(r).startswith("reference:")
-                                                           for r in node.references or []):
-            return self._lead_finish(anchor, node)
-        if mode == "breakdown" and role == "task" and node.cases:
-            return self._task_finish(anchor, node)
+        if mode in ("breakdown", "split") and role in ("lead", "task") and self._rebuilds_ground_truth(node):
+            return self._cases_finish(anchor, node)
         return make_finish(anchor)
 
-    def _lead_finish(self, anchor: ScopeAnchor, component: Leaf):
-        """A component that rebuilds part of a ground truth leaves the Lead
-        with its cases on its files and their evidence captured."""
+    def _rebuilds_ground_truth(self, node: Leaf) -> bool:
+        """The node, or a component above it, cites a reference entry."""
+        by_id = {n.id: n for n in load_nodes(self.engine, self.session_id)}
+        current: Optional[Leaf] = node
+        while current is not None:
+            if any(str(r).startswith("reference:") for r in current.references or []):
+                return True
+            current = by_id.get(current.parent_id) if current.parent_id is not None else None
+        return False
+
+    def _case_problems(self, nodes: List[Leaf]) -> List[str]:
+        """Every node rebuilding part of a ground truth has its own case(s)
+        with evidence captured: Dev compares each node with them when it's
+        done (docs/old_new.md). A deletion has nothing to compare."""
+        problems = []
+        bare = [n for n in nodes if not n.cases and n.kind not in NO_CASE_KINDS]
+        if bare:
+            problems.append("a case on node(s) " + ", ".join(str(n.id) for n in bare) + " (cases=[...] with "
+                            "update_node, each captured with capture_evidence): every node is compared with its "
+                            "own evidence when it's done")
+        missing = [c for n in nodes for c in (n.cases or []) if read_evidence(self.root, self.session_id, c) is None]
+        if missing:
+            problems.append(f"evidence for {', '.join(missing)} (capture_evidence each one; it runs the ground "
+                            f"truth for you)")
+        return problems
+
+    def _unowned_cases(self) -> List[str]:
+        """Evidence captured but on no node: it would never be compared.
+        Observed on the first real run: load_holdings.txt sat in the evidence
+        folder with no task number."""
+        owned = {c for n in load_nodes(self.engine, self.session_id) for c in (n.cases or [])}
+        stray = [c for c in list_cases(self.root, self.session_id) if c not in owned]
+        if not stray:
+            return []
+        return [f"a node for the evidence of {', '.join(stray)} (update_node cases=[...] on the node it checks)"]
+
+    def _cases_finish(self, anchor: ScopeAnchor, parent: Leaf):
+        """A breakdown under a ground truth leaves every new node with its own
+        evidence."""
         plain = make_finish(anchor)
 
         def finish(node_id: int = 0, summary: str = "") -> str:
-            files = children_of(load_nodes(self.engine, self.session_id), component.id)
-            cases = [c for f in files for c in (f.cases or [])]
-            refs = ", ".join(r for r in component.references or [] if str(r).startswith("reference:"))
-            if not cases:
-                return (f"Error: not finished yet. This component rebuilds part of {refs}: name the cases its files "
-                        f"must match (cases=[...] on each file node, update_node for ones you added) and "
-                        f"capture_evidence each one.")
-            missing = [c for c in cases if read_evidence(self.root, self.session_id, c) is None]
+            parts = children_of(load_nodes(self.engine, self.session_id), parent.id)
+            missing = self._case_problems(parts) + self._unowned_cases()
             if missing:
-                return (f"Error: not finished yet. No evidence for {', '.join(missing)}: capture_evidence each "
-                        f"one (it runs the ground truth for you).")
-            return plain(node_id, summary)
-        return finish
-
-    def _task_finish(self, anchor: ScopeAnchor, file_node: Leaf):
-        """Every case of the file is checked by exactly one compare leaf."""
-        plain = make_finish(anchor)
-
-        def finish(node_id: int = 0, summary: str = "") -> str:
-            leaves = children_of(load_nodes(self.engine, self.session_id), file_node.id)
-            checked = Counter(c for leaf in leaves if leaf.kind == "compare" for c in (leaf.cases or []))
-            unchecked = [c for c in file_node.cases if not checked[c]]
-            doubled = [c for c, n in checked.items() if n > 1]
-            if unchecked:
-                return (f"Error: not finished yet. Case(s) {', '.join(unchecked)} have no compare leaf: add_node "
-                        f"kind=\"compare\", cases=[<case>], depends_on=[<the leaf that builds it>], after that leaf.")
-            if doubled:
-                return f"Error: case(s) {', '.join(doubled)} are checked by more than one compare leaf; keep one."
+                return "Error: not finished yet. Still missing: " + "; ".join(missing) + "."
             return plain(node_id, summary)
         return finish
 
@@ -506,6 +514,11 @@ class Planner:
                     f'"no_ground_truth", "<why>")']
         missing = []
         cited = {str(r) for n in nodes if n.level == "architect" for r in (n.references or [])}
+        rebuilders = [n for n in nodes if n.level == "architect"
+                      and any(str(r).startswith("reference:") for r in n.references or [])]
+        missing += self._case_problems(rebuilders)
+        if references:
+            missing += self._unowned_cases()
         for ref in references:
             if not re.match(r"\s*(visual|behaviou?ral)\b", ref.text, re.I):
                 missing.append(f'reference {ref.key}\'s text to start with "visual:" or "behavioural:"')

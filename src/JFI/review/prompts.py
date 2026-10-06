@@ -17,8 +17,8 @@ REVIEWER = """You are the REVIEWER. Prove the finished project works end to end,
    may not cover what a user sees. An HTTP API: exercise its endpoints with http_request (load_tool it).
    Stop what you started.
 4. Ground truth (list_evidence shows the cases, if any): compare_evidence() compares every case with the
-   finished build (start the app first for page cases). A failing case is a bug: reopen_leaf its compare leaf
-   (get_plan; it names the case) with what differs. finish compares them all again and refuses a pass while one
+   finished build (start the app first for page cases). A failing case is a bug: reopen_leaf the node that owns
+   it (get_plan; the case's file is named by its number) with what differs. finish compares them all again and refuses a pass while one
    differs.
 5. Find things with search_code (never findstr/grep through execute_command: their output can be huge).
 6. Also look at anything listed under SCOPE's "why": leftover JFI: markers are unfinished work.

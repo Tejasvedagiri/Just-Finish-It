@@ -21,7 +21,7 @@ from sqlmodel import select
 
 from JFI.models import Leaf, Phase, PlanEvent, RunbookEntry, get_session
 from JFI.models.enums import LeafStatus
-from JFI.tool.evidence_tools import case_problem, read_evidence
+from JFI.tool.evidence_tools import case_problem
 from JFI.tool.result_cap import cap_result
 
 GOOD, BREAKDOWN, REDO = "GOOD", "BREAKDOWN", "REDO"
@@ -165,14 +165,18 @@ def _file_owner(nodes: Sequence[Leaf], files: Sequence[str]) -> Optional[Leaf]:
     wanted = _sources(files)
     if not wanted:
         return None
-    return next((n for n in nodes if n.level == "lead" and n.status != LeafStatus.DONE
-                 and _sources(n.files or []) & wanted), None)
+    return next((n for n in nodes if n.level == "lead" and _sources(n.files or []) & wanted), None)
 
 
 # ------------------------------------------------------------------ writes
 
 KINDS = ("project", "component", "code", "artifact", "section", "implement", "integrate", "modify", "delete",
-         "fill", "passage", "compare")
+         "fill", "passage")
+# Kinds whose node needs no ground-truth case of its own: a deletion has no
+# output to compare. (`compare` leaves, one per case, were the old way of
+# checking evidence: sessions planned before every node compared itself still
+# have them, and Dev still runs them.)
+NO_CASE_KINDS = ("delete", "compare")
 
 
 def _normalise_kind(kind: Optional[str]) -> Optional[str]:
@@ -281,45 +285,37 @@ def _normalise_cases(cases: Sequence[str]) -> tuple[list, Optional[str]]:
     return list(dict.fromkeys(names)), None
 
 
-def _cases_problem(nodes: Sequence[Leaf], role: str, scope_id: Optional[int], node_id: Optional[int], kind: Optional[str],
-                   cases: Sequence[str], depends_on: Sequence[int], root: Optional[Path],
-                   session_id: str = "") -> Optional[str]:
-    """The ground-truth rules (docs/old_new.md), checked here rather than
-    trusted to the prompt: a Lead's case is on one file node only; a compare
-    leaf names cases whose evidence exists, that its file node owns, and
-    comes after the leaf that builds them."""
-    if kind == "compare":
-        if not cases:
-            return ("Error: a compare leaf needs cases=[...]: the case(s) it checks, each with its evidence in "
-                    "the session's evidence folder.")
-        if not depends_on:
-            return ("Error: a compare leaf needs depends_on=[<the leaf that builds what it checks>]: it runs "
-                    "after that leaf.")
-        if root is not None:
-            missing = [c for c in cases if read_evidence(root, session_id, c) is None]
-            if missing:
-                return (f"Error: no evidence for {', '.join(missing)} in the evidence folder. A compare leaf checks evidence "
-                        f"the Lead captured; list_evidence shows what exists.")
-        scope = next((n for n in nodes if n.id == scope_id), None)
-        if role == "task" and scope is not None and scope.cases:
-            foreign = [c for c in cases if c not in scope.cases]
-            if foreign:
-                return (f"Error: {', '.join(foreign)} isn't one of this file's cases ({', '.join(scope.cases)}). "
-                        f"Only check the cases in SCOPE.")
-    elif cases and role in ("lead", "architect"):
-        # The Architect's are overviews of the ground truth on its components;
-        # the Lead's are what each file must match. Either way a case (and so
-        # its evidence file's task number) belongs to one node.
-        taken = {c: n.id for n in nodes if n.level in ("lead", "architect") and n.kind != "compare"
-                 and n.id != node_id for c in (n.cases or [])}
-        clash = [c for c in cases if c in taken]
-        if clash:
-            return (f"Error: case {clash[0]} is already on node {taken[clash[0]]}. A case belongs to one node: the "
-                    f"file whose code produces it (or, for the Architect's overview, its component).")
-    elif cases:
-        return ("Error: only the Lead puts cases on a file node (and the Architect an overview on a component); "
-                "Task's compare leaves check them.")
+def _cases_problem(nodes: Sequence[Leaf], node_id: Optional[int], cases: Sequence[str]) -> Optional[str]:
+    """A case (and so its evidence file's task number) belongs to one node:
+    checked here rather than trusted to the prompt."""
+    taken = {c: n.id for n in nodes if n.kind != "compare" and n.id != node_id for c in (n.cases or [])}
+    clash = [c for c in cases if c in taken]
+    if clash:
+        return (f"Error: case {clash[0]} is already on node {taken[clash[0]]}. A case belongs to one node: give "
+                f"this one its own case (capture_evidence a new name).")
     return None
+
+
+def reopen_with_ancestors(engine, session_id: str, node_id: int) -> List[int]:
+    """Sets every finished ancestor of a node back to to-do: a parent is
+    checked after everything under it, so a reopened or new child means the
+    parent has to be checked again. Returns the ids reopened."""
+    reopened = []
+    with get_session(engine) as db:
+        row = db.get(Leaf, node_id)
+        parent_id = row.parent_id if row is not None else None
+        while parent_id is not None:
+            parent = db.get(Leaf, parent_id)
+            if parent is None:
+                break
+            if parent.status in (LeafStatus.DONE, LeafStatus.SKIPPED):
+                parent.status, parent.started_at, parent.ended_at, parent.attempt_count = \
+                    LeafStatus.TODO, None, None, 0
+                db.add(parent)
+                reopened.append(parent.id)
+            parent_id = parent.parent_id
+        db.commit()
+    return reopened
 
 
 def add_node(engine, session_id: str, role: str, scope_id: Optional[int], description: str,
@@ -349,7 +345,7 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
         parent = by_id.get(parent_id)
         if parent is None:
             return f"Error: no node {parent_id}."
-        if parent.status == LeafStatus.DONE:
+        if parent.status == LeafStatus.DONE and not children_of(nodes, parent_id):
             return f"Error: node {parent_id} is already done; add a new top-level node instead."
         if depth_of(by_id, parent) + 1 > MAX_LEAF_DEPTH:
             return (f"Error: that would be depth {depth_of(by_id, parent) + 1} (max {MAX_LEAF_DEPTH}). "
@@ -358,7 +354,7 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
     if missing:
         return _unknown_ids(nodes, parent_id, missing)
     cases, problem = _normalise_cases(cases)
-    problem = problem or _cases_problem(nodes, role, scope_id, None, kind, cases, depends_on, root, session_id)
+    problem = problem or _cases_problem(nodes, None, cases)
     if problem:
         return problem
     test_problem = _test_path_problem(engine, session_id, files)
@@ -384,7 +380,10 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
         db.add(node)
         db.commit()
         db.refresh(node)
-        return f"Added node id={node.id}" + (f" under {parent_id}" if parent_id else " (top level)") + "."
+        new_id = node.id
+    # A new part under a finished parent: the parent is checked again after it.
+    reopen_with_ancestors(engine, session_id, new_id)
+    return f"Added node id={new_id}" + (f" under {parent_id}" if parent_id else " (top level)") + "."
 
 
 def update_node(engine, session_id: str, role: str, node_id: int, description: Optional[str] = None,
@@ -399,7 +398,7 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
         return f"Error: no node {node_id}."
     if node.level != role:
         return f"Error: node {node_id} was written by the {node.level}; only the {node.level} can change it."
-    if node.status == LeafStatus.DONE:
+    if node.status == LeafStatus.DONE and not children_of(nodes, node_id):
         return f"Error: node {node_id} is done; it can't be rewritten."
     if notes is not None:
         notes = _plain(notes)
@@ -421,9 +420,7 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
             return test_problem
     if cases is not None:
         cases, problem = _normalise_cases(cases)
-        problem = problem or _cases_problem(
-            nodes, role, node.parent_id if role == "task" else None, node_id, _normalise_kind(kind) or node.kind,
-            cases, depends_on if depends_on is not None else (node.depends_on or []), root, session_id)
+        problem = problem or _cases_problem(nodes, node_id, cases)
         if problem:
             return problem
     with get_session(engine) as db:
@@ -445,8 +442,12 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
         if _normalise_kind(kind) is not None:
             row.kind = _normalise_kind(kind)
         row.plan_status = None  # rewritten -> re-judged
+        if row.status != LeafStatus.TODO:
+            # A finished parent that was rewritten is checked again.
+            row.status, row.started_at, row.ended_at, row.attempt_count = LeafStatus.TODO, None, None, 0
         db.add(row)
         db.commit()
+    reopen_with_ancestors(engine, session_id, node_id)
     return f"Updated node {node_id}; it will be judged again."
 
 
@@ -580,10 +581,10 @@ _FIELDS = {
     "files": {"type": "array", "items": {"type": "string"}, "description": "files it creates/changes + test file"},
     "depends_on": {"type": "array", "items": {"type": "integer"}, "description": "node ids that must be done first"},
     "kind": {"type": "string", "description": "ONE word. Architect: component or project. Lead: code or artifact. "
-                                              "Task: implement, integrate, modify, delete, fill or compare."},
+                                              "Task: implement, integrate, modify, delete or fill."},
     "cases": {"type": "array", "items": {"type": "string"},
-              "description": "ground-truth cases (each has its evidence, captured with capture_evidence). Lead: the cases this file's code "
-                             "must match. Task, on a compare leaf: the case(s) it checks"},
+              "description": "this node's own ground-truth cases (capture_evidence each); Dev compares the node "
+                             "with them when it's done"},
 }
 NODE_TOOL_SCHEMAS = [
     _fn("add_node", "Add a plan node. Architect adds top-level nodes; Lead and Task add nodes under the node "

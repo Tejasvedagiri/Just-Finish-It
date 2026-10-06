@@ -18,17 +18,18 @@ def _add(manager, description, files=None, parent_id=None):
 
 
 class TestPlanAndPhaseProgress:
-    def test_progress_counts_only_leaves_and_updates_as_they_finish(self, make_manager):
+    def test_progress_counts_every_node_and_updates_as_they_finish(self, make_manager):
+        """Parents count too: Dev finishes each one after its children."""
         manager = make_manager("demo")
         parent = _add(manager, "Calculator")
         first = _add(manager, "Core arithmetic", parent_id=parent)
         _add(manager, "Parse input", parent_id=parent)
         engine, sid = manager.db_engine, manager.session_id
 
-        assert plan_progress_db(engine, sid) == (0, 2)
+        assert plan_progress_db(engine, sid) == (0, 3)
         mark_leaf_done(engine, sid, first)
-        assert plan_progress_db(engine, sid) == (1, 2)
-        assert phase_progress_db(engine, sid, "imp") == (1, 2)
+        assert plan_progress_db(engine, sid) == (1, 3)
+        assert phase_progress_db(engine, sid, "imp") == (1, 3)
         assert phase_progress_db(engine, sid, "reviewer") == (0, 0)
 
 
