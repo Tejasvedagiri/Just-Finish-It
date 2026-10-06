@@ -447,3 +447,36 @@ def test_each_role_gets_its_evidence_tools(project):
     assert "compare_evidence" in active["dev"] and "compare_evidence" in active["reviewer"]
     [add] = [s for s in EpisodeTools("task", impl).schemas() if s["function"]["name"] == "add_node"]
     assert "cases" in add["function"]["parameters"]["properties"]
+
+
+@pytest.mark.skipif(not _chromium(), reason="Chromium for Playwright isn't installed")
+def test_one_part_of_a_page_is_shot_with_a_selector_not_as_an_image(project):
+    """Observed on the first real run (a dashboard rebuilt in Next.js): to
+    capture one chart, the Lead passed image="<the dashboard>.html", and the
+    page's first <svg> -- its logo -- became the evidence for a dozen cases
+    (allocation_donut, change_pill_colors, build_config, ...). A page given as
+    an image is refused; selector= shoots the part asked for, on both sides."""
+    engine, root = project
+    page = ('<html><body style="margin:0"><header><svg id="logo" width="40" height="40"><circle cx="20" cy="20" '
+            'r="18" fill="#36f"/></svg> Portfolio</header>'
+            '<div id="donut" style="width:300px;height:200px;background:conic-gradient(#e33 0 40%, #3a3 0)">'
+            'Allocation 40% stocks</div></body></html>')
+    (root / "dashboard.html").write_text(page)
+    (root / "new.html").write_text(page.replace("#e33 0 40%", "#e33 0 70%"))
+
+    refused = capture_evidence(engine, "s", root, "lead", "allocation_donut", image="dashboard.html",
+                               new_url="new.html")
+    assert refused.startswith("Error: image= takes an image file") and "selector=" in refused
+    assert read_evidence(root, "allocation_donut") is None
+
+    capture_evidence(engine, "s", root, "lead", "allocation_donut", url="dashboard.html", new_url="new.html",
+                     selector="#donut")
+    evidence = read_evidence(root, "allocation_donut")
+    assert evidence.spec["selector"] == "#donut" and evidence.spec["text"] == "Allocation 40% stocks"
+    assert evidence.path.read_bytes()[16:24] == (300).to_bytes(4, "big") + (200).to_bytes(4, "big")  # PNG size
+
+    result = compare_case(engine, "s", root, "allocation_donut")
+    assert not result.ok and "differing pixels" in result.report  # 40% vs 70% red: a real visual difference
+    missing = capture_evidence(engine, "s", root, "lead", "pills", url="dashboard.html", new_url="new.html",
+                               selector="#pills")
+    assert missing.startswith("Error: nothing on") and "#pills" in missing

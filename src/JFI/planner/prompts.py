@@ -133,8 +133,10 @@ this component; the design (design_get) and runbook tell you how it connects to 
    GROUND TRUTH (your node cites reference:<key>): name the cases its part needs -- one per operator, endpoint
    example, screen state or output column, plus the error cases -- and put each on the file node whose code
    produces it (cases=["add", "divide_by_zero"]). For each, capture_evidence: choose the inputs (1 + 1,
-   2.5 + 0.25, -3 + 10), or url + new_url (+ steps) for a page state, image + new_url for a mockup, sql for a
-   query; it runs the ground truth and saves evidences/<case>.*. Never type the answers yourself: answers= is
+   2.5 + 0.25, -3 + 10), or url + new_url (+ steps) for a page state -- add selector="<css>" for ONE part of
+   it (a chart, a card) -- image + new_url for a mockup image file, sql for a query; it runs the ground truth
+   and saves evidences/<case>.*. A screenshot is only for something you can see; a config, data or build
+   output is behavioural (inputs + evidence_one). Never type the answers yourself: answers= is
    the last resort, saved as not verified. finish checks every case has its evidence.
 5. If this component can't be done within the design (a missing contract, it belongs elsewhere), call escalate
    with the reason instead. Then call finish.

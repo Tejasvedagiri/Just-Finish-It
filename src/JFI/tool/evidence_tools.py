@@ -60,6 +60,7 @@ _CASE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,59}$")
 _URL = re.compile(r"(https?|file)://\S+")
 _TOKEN = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|[^\W\d_]+", re.UNICODE)
 _API_PROGRAMS = ("curl", "wget", "http", "https", "xh")
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp")
 
 
 def max_diff() -> float:
@@ -343,9 +344,11 @@ def _do_step(page, step: str) -> None:
                          "scroll <pixels> or wait <ms>")
 
 
-def screenshot(url: str, out: Path, viewport: str = DEFAULT_VIEWPORT, steps: Sequence[str] = ()) -> Tuple[str, str]:
+def screenshot(url: str, out: Path, viewport: str = DEFAULT_VIEWPORT, steps: Sequence[str] = (),
+               selector: str = "") -> Tuple[str, str]:
     """(error or "", visible text). The viewport, not the full page: both sides
-    are shot the same way, and the pair stays a manageable image."""
+    are shot the same way, and the pair stays a manageable image. With a
+    selector, only that element (one chart, one card)."""
     problem = _browser_problem()
     if problem:
         return problem, ""
@@ -369,8 +372,16 @@ def screenshot(url: str, out: Path, viewport: str = DEFAULT_VIEWPORT, steps: Seq
                 for step in steps or ():
                     _do_step(page, step)
                 page.wait_for_timeout(200)
-                text = page.inner_text("body").strip() if page.query_selector("body") else ""
-                page.screenshot(path=str(out))
+                if selector:
+                    element = page.locator(selector).first
+                    if not page.locator(selector).count():
+                        return f"Error: nothing on {url} matches the selector {selector!r}.", ""
+                    element.scroll_into_view_if_needed(timeout=5000)
+                    text = element.inner_text().strip()
+                    element.screenshot(path=str(out))
+                else:
+                    text = page.inner_text("body").strip() if page.query_selector("body") else ""
+                    page.screenshot(path=str(out))
             finally:
                 browser.close()
     except Exception as e:  # noqa: BLE001 -- a page that won't load, a step that can't be done
@@ -480,7 +491,8 @@ def _preview(items: Sequence[Item], limit: int = 8) -> str:
 
 def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, inputs: Sequence[str] = (),
                      sql: str = "", url: str = "", image: str = "", new_url: str = "", steps: Sequence[str] = (),
-                     viewport: str = "", match: str = "", answers: Sequence[str] = (), from_file: str = "") -> str:
+                     viewport: str = "", match: str = "", answers: Sequence[str] = (), from_file: str = "",
+                     selector: str = "", new_selector: str = "") -> str:
     """Saves one case's evidence, from the best source there is (see the
     module docstring). Returns what was saved, or an Error saying what's
     missing."""
@@ -492,7 +504,8 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
     folder = evidence_dir(root)
     folder.mkdir(parents=True, exist_ok=True)
     if url or image:
-        return _capture_visual(engine, session_id, root, role, case, url, image, new_url, steps, viewport)
+        return _capture_visual(engine, session_id, root, role, case, url, image, new_url, steps, viewport,
+                               selector, new_selector)
 
     match = (match or "tokens").strip().lower()
     if match not in MATCH_MODES:
@@ -552,13 +565,25 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
 
 
 def _capture_visual(engine, session_id: str, root: Path, role: str, case: str, url: str, image: str,
-                    new_url: str, steps: Sequence[str], viewport: str) -> str:
+                    new_url: str, steps: Sequence[str], viewport: str, selector: str = "",
+                    new_selector: str = "") -> str:
+    if image and Path(image).suffix.lower() not in IMAGE_SUFFIXES:
+        # Observed on the first real run: the Lead passed image="<the dashboard>.html"
+        # to capture one chart, and the screenshot of the page's first <img>/<svg>
+        # -- its logo -- became the evidence for a dozen cases.
+        return (f"Error: image= takes an image file ({', '.join(IMAGE_SUFFIXES)}), not {image!r}. For a page, "
+                f"use url={image!r} (plus steps=[...] to reach a state); for ONE part of it -- a chart, a card, "
+                f"a pill -- add selector='<css>' (e.g. '#allocation-donut').")
     if not new_url:
         return ("Error: a visual case needs new_url: where the NEW app shows this state (a route like / or "
                 "/login, a URL, or a file like index.html) -- compare_evidence screenshots it there.")
     folder = evidence_dir(root)
     png = folder / f"{case}.png"
     spec = {"case": case, "new_url": new_url, "steps": list(steps or []), "viewport": viewport or DEFAULT_VIEWPORT}
+    if selector:
+        spec["selector"] = selector
+    if new_selector:
+        spec["new_selector"] = new_selector
     if image:
         source = (root / image).resolve()
         if not source.is_file():
@@ -569,10 +594,11 @@ def _capture_visual(engine, session_id: str, root: Path, role: str, case: str, u
         spec.update(source=f"file {image}", image=image, text="")
     else:
         target = _resolve_url(url, root)
-        problem, text = screenshot(target, png, spec["viewport"], spec["steps"])
+        problem, text = screenshot(target, png, spec["viewport"], spec["steps"], selector)
         if problem:
             return problem
-        spec.update(source=f"screenshot {target} {spec['viewport']}", url=target, text=text[:4000])
+        where = f" {selector}" if selector else ""
+        spec.update(source=f"screenshot {target}{where} {spec['viewport']}", url=target, text=text[:4000])
     spec["captured"] = f"{utcnow().strftime('%Y-%m-%d %H:%M UTC')} by {role or 'jfi'}"
     (folder / f"{case}.json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
     _event(engine, session_id, f"{case}: {spec['source']}")
@@ -590,7 +616,8 @@ def recapture(engine, session_id: str, root: Path, case: str) -> str:
             return f"Error: {case} doesn't say how it was captured."
         return _capture_visual(engine, session_id, Path(root), "recapture", case, evidence.spec.get("url", ""),
                                evidence.spec.get("image", ""), evidence.spec.get("new_url", ""),
-                               evidence.spec.get("steps") or (), evidence.spec.get("viewport", ""))
+                               evidence.spec.get("steps") or (), evidence.spec.get("viewport", ""),
+                               evidence.spec.get("selector", ""), evidence.spec.get("new_selector", ""))
     how = evidence.header.get("how")
     if not how:
         return (f"Error: {case} came from {evidence.source or 'an unknown source'}, not a command, so it can't "
@@ -687,7 +714,8 @@ def _compare_visual(engine, session_id: str, root: Path, evidence: Evidence) -> 
     target = _resolve_url(spec.get("new_url", ""), root, view)
     folder = Path(root) / SCREENS_DIR / case
     new_png = folder / "new.png"
-    problem, new_text = screenshot(target, new_png, spec.get("viewport", DEFAULT_VIEWPORT), spec.get("steps") or ())
+    problem, new_text = screenshot(target, new_png, spec.get("viewport", DEFAULT_VIEWPORT), spec.get("steps") or (),
+                                   spec.get("new_selector") or spec.get("selector", ""))
     if problem:
         hint = " Is the app running? Start it with the runbook's run (start_background_process)." \
             if target.startswith("http") else ""
@@ -744,9 +772,9 @@ def make_evidence_tools(engine, session_id: str, root: Path, role: str = "") -> 
 
     return {
         "capture_evidence": lambda case, inputs=(), sql="", url="", image="", new_url="", steps=(), viewport="",
-        match="", answers=(), from_file="": capture_evidence(engine, session_id, root, role, case, inputs, sql, url,
-                                                             image, new_url, steps, viewport, match, answers,
-                                                             from_file),
+        match="", answers=(), from_file="", selector="", new_selector="": capture_evidence(
+            engine, session_id, root, role, case, inputs, sql, url, image, new_url, steps, viewport, match, answers,
+            from_file, selector, new_selector),
         "compare_evidence": compare_evidence,
         "list_evidence": list_evidence,
     }
@@ -766,7 +794,12 @@ EVIDENCE_TOOL_SCHEMAS = [
                        "description": "behavioural: the inputs to run, e.g. ['1 + 1', '2.5 + 0.25', '-3 + 10']"},
             "sql": {"type": "string", "description": "a query to save as evidences/<case>.sql and run as the input"},
             "url": {"type": "string", "description": "visual: the original page (URL or project file) to screenshot"},
-            "image": {"type": "string", "description": "visual: a mockup/screenshot file in the project to copy"},
+            "image": {"type": "string", "description": "visual: a mockup/screenshot IMAGE file in the project "
+                                                       "(png, jpg, svg, ...) -- never a page; a page is url="},
+            "selector": {"type": "string", "description": "visual: CSS of ONE part of the page to shoot (a chart, "
+                                                          "a card), e.g. #allocation-donut; also used on the new app"},
+            "new_selector": {"type": "string", "description": "visual: the same part's CSS in the new app, when it "
+                                                              "differs from selector"},
             "new_url": {"type": "string", "description": "visual: where the NEW app shows this state (/, /login, "
                                                          "index.html)"},
             "steps": {"type": "array", "items": {"type": "string"},
