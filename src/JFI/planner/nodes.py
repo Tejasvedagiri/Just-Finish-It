@@ -305,14 +305,19 @@ def _cases_problem(nodes: Sequence[Leaf], role: str, scope_id: Optional[int], no
             if foreign:
                 return (f"Error: {', '.join(foreign)} isn't one of this file's cases ({', '.join(scope.cases)}). "
                         f"Only check the cases in SCOPE.")
-    elif cases and role == "lead":
-        taken = {c: n.id for n in nodes if n.level == "lead" and n.id != node_id for c in (n.cases or [])}
+    elif cases and role in ("lead", "architect"):
+        # The Architect's are overviews of the ground truth on its components;
+        # the Lead's are what each file must match. Either way a case (and so
+        # its evidence file's task number) belongs to one node.
+        taken = {c: n.id for n in nodes if n.level in ("lead", "architect") and n.kind != "compare"
+                 and n.id != node_id for c in (n.cases or [])}
         clash = [c for c in cases if c in taken]
         if clash:
-            return (f"Error: case {clash[0]} is already on node {taken[clash[0]]}. A case belongs to one file: the "
-                    f"file whose code produces it.")
-    elif cases and role != "lead":
-        return "Error: only the Lead puts cases on a file node, and only Task's compare leaves check them."
+            return (f"Error: case {clash[0]} is already on node {taken[clash[0]]}. A case belongs to one node: the "
+                    f"file whose code produces it (or, for the Architect's overview, its component).")
+    elif cases:
+        return ("Error: only the Lead puts cases on a file node (and the Architect an overview on a component); "
+                "Task's compare leaves check them.")
     return None
 
 

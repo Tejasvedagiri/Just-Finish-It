@@ -28,7 +28,7 @@ ROLE_ENV_PREFIXES = {
 ROLE_CORE_TOOLS = {
     "architect": ["get_plan", "get_node", "add_node", "update_node", "delete_node", "design_set", "design_get",
                   "runbook_set", "runbook_get", "list_dir", "outline_file", "read_file", "search_code",
-                  "execute_command", "finish"],
+                  "execute_command", "capture_evidence", "finish"],
     "lead": ["get_node", "list_nodes", "add_node", "update_node", "delete_node", "design_get", "design_set",
              "runbook_get", "list_dir", "outline_file", "read_file", "read_symbol", "scaffold_file", "unscaffold_file",
              "mark_change", "capture_evidence", "list_evidence", "escalate", "finish"],

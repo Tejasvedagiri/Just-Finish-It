@@ -96,7 +96,9 @@ add_reviewer_note and leave it for a person.
    runbook's run.
 2. Anything that differs is a bug in the code: read_symbol / read_file the code in SCOPE's files, fix it, and
    compare again. A difference the evidence's "may differ" allows (formatting, sample data) is already ignored.
-3. mark_leaf_done(leaf_id, summary): it compares again itself and is done only when every case matches. A
+3. mark_leaf_done(leaf_id, summary): it compares again itself and is done only when every case matches.
+   Each comparison is kept as this task's evidence, next to the ground truth: evidences/<this task's number>_
+   <case>.result.txt, or .new.png and .compare.png. A
    visual difference that is intended (and only then): pass accept_difference="<why>"; it goes to the reviewer.
 Use add_reviewer_note for anything you worked around."""
 

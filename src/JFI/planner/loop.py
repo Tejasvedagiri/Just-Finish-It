@@ -50,7 +50,7 @@ from JFI.planner.nodes import (
 from JFI.planner.prompts import ROLE_PROMPTS
 from JFI.tool.code_tools import make_code_tools
 from JFI.tool.design_tools import design_index, make_design_tools, references_text
-from JFI.tool.evidence_tools import make_evidence_tools, read_evidence
+from JFI.tool.evidence_tools import make_evidence_tools, read_evidence, sync_evidence_names
 from JFI.tool.note_tools import add_reviewer_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.runbook_tools import make_runbook_tools, runbook_index
@@ -427,10 +427,15 @@ class Planner:
                                        design_index(self.engine, self.session_id)])
         console.set_status(stage=role.capitalize(), task=anchor.node[:140])
         console.display_rule(f"PLANNER · {role.upper()} {mode}" + (f" — node {node.id}" if node is not None else ""))
-        return run_episode(self.llm_for_role(role), console, self.engine, self.session_id,
-                           role=role, mode=mode, anchor=anchor, system_message=system,
-                           tools=EpisodeTools(role, impl),
-                           budget=episode_token_budget(ROLE_ENV_PREFIXES[role]))
+        result = run_episode(self.llm_for_role(role), console, self.engine, self.session_id,
+                             role=role, mode=mode, anchor=anchor, system_message=system,
+                             tools=EpisodeTools(role, impl),
+                             budget=episode_token_budget(ROLE_ENV_PREFIXES[role]))
+        # Evidence files are named by task number, which this episode's nodes
+        # may have just set or shifted.
+        with self._write_lock:
+            sync_evidence_names(self.engine, self.session_id, self.root)
+        return result
 
     def _locked(self, tools: dict) -> dict:
         def guard(fn):

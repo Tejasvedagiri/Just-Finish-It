@@ -23,8 +23,8 @@ ROLE_LABEL = {
 }
 
 ROLE_MAY = {
-    "architect": "read the repo; probe the ground truth with read-only commands; add or change top-level plan "
-                 "items; write the design and the runbook",
+    "architect": "read the repo; probe the ground truth with read-only commands and capture each component's "
+                 "overview of it; add or change top-level plan items; write the design and the runbook",
     "lead": "create this component's folders and files with stubs; add file nodes under this node; capture the "
             "ground truth's evidence for its cases",
     "task": "add implement/integrate/compare leaves under this node; add helper stubs to this node's file",

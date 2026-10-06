@@ -272,11 +272,12 @@ def test_cases_go_down_the_plan_and_none_is_dropped(project):
     foreign = add_node(engine, "s", "task", file_node, "compare power", done_when="matches", kind="compare",
                        cases=["power"], depends_on=[impl_id])
     assert foreign.startswith("Error: power isn't one of this file's cases (add, divide_by_zero)")
-    (root / "evidences" / "add.txt").rename(root / "add.txt.bak")
+    add_file = read_evidence(root, "add").path
+    add_file.rename(root / "add.txt.bak")
     unseen = add_node(engine, "s", "task", file_node, "compare +", done_when="matches", kind="compare",
                       cases=["add"], depends_on=[impl_id], root=root)
     assert unseen.startswith("Error: no evidence for add in evidences/")
-    (root / "add.txt.bak").rename(root / "evidences" / "add.txt")
+    (root / "add.txt.bak").rename(add_file)
     for case in ("add", "divide_by_zero"):
         assert add_node(engine, "s", "task", file_node, f"compare {case} with evidences/{case}", done_when="matches",
                         kind="compare", cases=[case], depends_on=[impl_id], files=["calc/ops.py"],
@@ -334,7 +335,7 @@ def test_changed_evidence_sends_a_passed_compare_leaf_back(project):
               dict(runner.TOOL_MAP), lambda: None)
     assert imp.run().complete
 
-    text = (root / "evidences" / "add.txt").read_text().replace(">>> -3 + 10\n7", ">>> -3 + 10\n8")
+    text = read_evidence(root, "add").path.read_text().replace(">>> -3 + 10\n7", ">>> -3 + 10\n8")
     save_edited_text(root, "add", text)
     imp._requeue_changed_evidence()
     with get_session(engine) as db:
@@ -345,8 +346,9 @@ def test_changed_evidence_sends_a_passed_compare_leaf_back(project):
 def test_dev_editing_the_evidence_is_refused(project):
     engine, root = project
     leaf = _compare_leaf(engine, root)
-    content = (root / "evidences" / "add.txt").read_text().replace(">>> 1 + 1\n2", ">>> 1 + 1\n2.5")
-    turns = [turn(call("write_file", file_path="evidences/add.txt", content=content),
+    add_file = read_evidence(root, "add").path
+    content = add_file.read_text().replace(">>> 1 + 1\n2", ">>> 1 + 1\n2.5")
+    turns = [turn(call("write_file", file_path=f"evidences/{add_file.name}", content=content),
                   call("mark_leaf_done", leaf_id=leaf, summary="made it match"))]
     imp = Imp(Console(turns), engine, "s", root, LLM(), dict(runner.TOOL_MAP), lambda: None)
     imp.run()
@@ -480,3 +482,44 @@ def test_one_part_of_a_page_is_shot_with_a_selector_not_as_an_image(project):
     missing = capture_evidence(engine, "s", root, "lead", "pills", url="dashboard.html", new_url="new.html",
                                selector="#pills")
     assert missing.startswith("Error: nothing on") and "#pills" in missing
+
+
+def test_evidence_files_are_named_by_the_task_that_owns_them(project):
+    """The user: "the png and json that are created must follow the task id
+    like 1.1.1 or 1.2.1 ... Arch, lead, dev all of them must give their
+    evidence." The Architect's overview is named by its component (1), a
+    Lead's case by its file node (1.1), Dev's comparison by its compare leaf
+    (1.1.2); and when the plan is renumbered the names follow."""
+    from JFI.tool.evidence_tools import sync_evidence_names
+
+    engine, root = project
+    comp = _good(engine, add_node(engine, "s", "architect", None, "calculator", done_when="works",
+                                  references=["reference:bc"], cases=["calc_overview"]))
+    capture_evidence(engine, "s", root, "architect", "calc_overview", ["2 + 2"])
+    file_node = _good(engine, add_node(engine, "s", "lead", comp, "main.py", done_when="tested", files=["main.py"],
+                                       cases=["add"]))
+    capture_evidence(engine, "s", root, "lead", "add", ["1 + 1"])
+    impl = _good(engine, add_node(engine, "s", "task", file_node, "implement + in main.py", done_when="1 + 1 -> 2",
+                                  files=["main.py"], kind="implement"))
+    _good(engine, add_node(engine, "s", "task", file_node, "compare + with evidences/add", kind="compare",
+                           done_when="matches", cases=["add"], depends_on=[impl], files=["main.py"]))
+    compare_case(engine, "s", root, "add")
+    names = sorted(p.name for p in (root / "evidences").iterdir())
+    assert names == ["1.1.2_add.result.txt", "1.1_add.txt", "1_calc_overview.txt"]
+    overview = compare_case(engine, "s", root, "calc_overview")
+    assert overview.ok and "not compared" in overview.report  # the Architect's overview is for looking at
+
+    # A later iteration puts a component before this one: everything is now 2.x.
+    with get_session(engine) as db:
+        db.get(Leaf, comp).sort_key = 20
+        db.commit()
+    _good(engine, add_node(engine, "s", "architect", None, "a new first component", done_when="works"))
+    with get_session(engine) as db:
+        first = db.exec(select(Leaf).where(Leaf.description == "a new first component")).one()
+        first.sort_key = 10
+        db.add(first)
+        db.commit()
+    sync_evidence_names(engine, "s", root)
+    assert sorted(p.name for p in (root / "evidences").iterdir()) == [
+        "2.1.2_add.result.txt", "2.1_add.txt", "2_calc_overview.txt"]
+    assert compare_case(engine, "s", root, "add").ok is False  # still found under its new name (main.py adds 0.5)

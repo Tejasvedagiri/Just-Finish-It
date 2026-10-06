@@ -77,7 +77,10 @@ that isn't a node never gets built. You have a limited number of turns, so make 
    (the ground truth's answer for one input) and "compare_one" (the NEW code on the same input), each with
    {{input}} or {{input_file}} (a file holding the input; the safe choice for anything with quotes). They run in a
    POSIX sh: no <<<. E.g. evidence_one = "{{ echo scale=10; cat {{input_file}}; }} | bc -l", compare_one =
-   "{{ cat {{input_file}}; echo exit; }} | python3 main.py". Don't list cases or capture anything: that's the Lead's.
+   "{{ cat {{input_file}}; echo exit; }} | python3 main.py". Give each component that rebuilds part of it ONE
+   overview of its part: put a case on the component (cases=["<component>_overview"]) and capture_evidence it --
+   the whole original screen of that view (url + new_url + steps), or one probe's inputs. It's kept to show,
+   not compared. The detailed cases are the Lead's. Evidence files are named by task number for you.
    No ground truth after all: design_set("assumption", "no_ground_truth", "<why>").
 7. List every deliverable the goal names -- files, docs (e.g. a README), tests, commands -- and check each is
    produced by some component (docs usually go under the "project" component). On the first real run a
@@ -136,7 +139,7 @@ this component; the design (design_get) and runbook tell you how it connects to 
    2.5 + 0.25, -3 + 10), or url + new_url (+ steps) for a page state -- add selector="<css>" for ONE part of
    it (a chart, a card) -- image + new_url for a mockup image file, sql for a query; it runs the ground truth
    and saves evidences/<case>.*. A screenshot is only for something you can see; a config, data or build
-   output is behavioural (inputs + evidence_one). Never type the answers yourself: answers= is
+   output is behavioural (inputs + evidence_one). Files are named by task number for you (1.2_add.txt). Never type the answers yourself: answers= is
    the last resort, saved as not verified. finish checks every case has its evidence.
 5. If this component can't be done within the design (a missing contract, it belongs elsewhere), call escalate
    with the reason instead. Then call finish.

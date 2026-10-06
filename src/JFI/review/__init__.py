@@ -32,7 +32,7 @@ from JFI.planner.nodes import load_nodes
 from JFI.review.prompts import CLEANUP, REVIEW_CONTINUE, REVIEWER
 from JFI.tool.checkpoint_tools import make_checkpoint_tools, revert_leaf
 from JFI.tool.code_tools import list_dir, read_file_range, scan_markers, search_code
-from JFI.tool.evidence_tools import compare_cases, list_cases, make_evidence_tools, read_evidence
+from JFI.tool.evidence_tools import compare_cases, list_cases, make_evidence_tools, read_evidence, sync_evidence_names
 from JFI.tool.note_tools import REVIEW_REPORT, get_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.result_cap import cap_result
@@ -155,6 +155,7 @@ class Reviewer:
         """(a refusal, or None; a note for the pass). Every ground-truth case
         is compared again over the finished build: a later leaf can break
         what an earlier compare leaf checked."""
+        sync_evidence_names(self.engine, self.session_id, self.root)
         cases = list_cases(self.root)
         if not cases:
             return None, ""

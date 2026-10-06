@@ -30,7 +30,7 @@ plans the work:
    captured again, before or while the code is built.
 3. **Task** creates the tasks from that evidence: one task builds the code
    (`implement add`), and the **next task compares** what it gives with the
-   evidence (`compare add with evidences/add.txt`).
+   evidence (`compare add with evidences/1.2_add.txt`).
 4. **Dev** does both tasks in order. The compare task is done only when the
    new code's output matches the evidence file.
 5. **The reviewer** runs every comparison again at the end.
@@ -38,7 +38,7 @@ plans the work:
 For the calculator, Lead (evaluator) runs `bc` and saves:
 
 ```
-evidences/add.txt
+evidences/1.2_add.txt
 # case: add
 # source: command { echo scale=10; cat {input_file}; } | bc -l
 # how: { echo scale=10; cat {input_file}; } | bc -l
@@ -62,7 +62,7 @@ Task (evaluator.py) creates the two tasks:
 Dev finishes task 1, then on task 2 `mark_leaf_done` runs the comparison:
 
 ```
-compare add  (evidences/add.txt, source: command { echo scale=10; cat {input_file}; } | bc -l)
+compare add  (evidences/1.2_add.txt, source: command { echo scale=10; cat {input_file}; } | bc -l)
   1 + 1            new: 2.0                  evidence: 2            match
   2.5 + 0.25       new: 2.75                 evidence: 2.75         match
   -3 + 10          new: 7.0                  evidence: 7            match
@@ -96,7 +96,7 @@ by side.
   same misunderstanding as the code, which is why today's unit tests (written
   by the same model) pass when a requirement was misread.
 - **The comparison is visible in the plan.** "compare add with
-  `evidences/add.txt`" is a task with its own status, time and result in
+  `evidences/1.2_add.txt`" is a task with its own status, time and result in
   `get_plan`, the dashboards and the review, instead of a hidden step inside
   another task.
 - **Each task is checked right after it's built.** The compare task depends
@@ -128,7 +128,7 @@ checked against generated evidence. It's the evidence you most need to look at.
 The evidence is plain files in the project, written before any code is
 built, so it's the easiest place to catch a wrong assumption:
 
-- **Read it** on GitHub or in the project: `evidences/add.txt`,
+- **Read it** on GitHub or in the project: `evidences/1.2_add.txt`,
   `evidences/watchlist_tab.png`, `evidences/active_customers.sql`.
 - **Confirm or change it in the dashboard.** `jfi-web` has an Evidence list
   (under the plan's Runbook and Design): every case, its file, its source, and
@@ -173,7 +173,7 @@ flowchart TD
 
     subgraph LEAD["Lead, per component"]
         L1["Name the cases for its files<br/>(evaluator.py: add, subtract, divide, ...)"]
-        L2["capture_evidence for each case:<br/>command, else API call, else screenshot,<br/>else file, else LLM text (flagged)<br/>saves evidences/add.txt, watchlist_tab.png,<br/>active_customers.sql + .txt"]
+        L2["capture_evidence for each case:<br/>command, else API call, else screenshot,<br/>else file, else LLM text (flagged)<br/>saves evidences/1.2_add.txt, watchlist_tab.png,<br/>active_customers.sql + .txt"]
         L3["File nodes, each with its cases"]
     end
 
@@ -181,12 +181,12 @@ flowchart TD
 
     subgraph TASK["Task, per file"]
         T1["implement leaf: build the code<br/>(implement + in evaluator.py)"]
-        T2["compare leaf: depends on it<br/>(compare + with evidences/add.txt)"]
+        T2["compare leaf: depends on it<br/>(compare + with evidences/1.2_add.txt)"]
     end
 
     subgraph DEV["Dev, one leaf at a time"]
         D1["Implement leaf: code + unit test<br/>mark_leaf_done runs test_one"]
-        D2["Compare leaf: mark_leaf_done compares<br/>case add with evidences/add.txt"]
+        D2["Compare leaf: mark_leaf_done compares<br/>case add with evidences/1.2_add.txt"]
         DQ{"Output = evidence?"}
         DOK["Done; next leaf"]
         DFIX["Refused with the differing lines<br/>(or both screenshots); Dev fixes the code"]
@@ -214,7 +214,7 @@ One compare task, for the calculator's `add` case:
 ```mermaid
 sequenceDiagram
     participant Lead
-    participant Ev as evidences/add.txt
+    participant Ev as evidences/1.2_add.txt
     participant Dev
     participant Gate as mark_leaf_done
     participant New as new code (main.py)
@@ -372,7 +372,8 @@ For its component, the Lead:
    `capture_evidence("add", inputs=["1 + 1", "2.5 + 0.25", "-3 + 10"])`, or
    `sql="SELECT ..."` for a query, `url=` + `new_url=` (+ `steps=`) for a page
    state, `image=` + `new_url=` for a mockup. The tool runs the ground truth
-   and writes `evidences/<case>.*`. The Lead never writes an answer itself.
+   and writes `evidences/<case>.*`, named after its file node's task number
+   (below). The Lead never writes an answer itself.
 3. `finish` refuses while a component citing a reference has no cases, or a
    case has no evidence.
 
@@ -397,6 +398,24 @@ The behavioural evidence file, as `capture_evidence` writes it:
 `>>> ` starts an input (`>>> @customers.sql` names a file in `evidences/`),
 the lines after it are the ground truth's output, and `!error` marks an input
 the ground truth refused. `how` is what `recapture` re-runs.
+
+### Every file is named by its task number, and every role leaves evidence
+
+Each file in `evidences/` starts with the plan number of the task it belongs
+to, so `evidences/` reads like the plan:
+
+| Who | Task | Example | What it is |
+|---|---|---|---|
+| Architect | a component, `2` | `2_dividends_overview.png` | one overview of the part of the ground truth that component rebuilds (the whole original screen, or a probe's answers). Kept to look at, not compared (`check: reference`). |
+| Lead | a file, `2.1` | `2.1_outlook_table.png`, `2.1_outlook_table.json`, `1.2_add.txt` | the cases that file must match |
+| Dev | a compare task, `2.1.4` | `2.1.4_outlook_table.new.png`, `.compare.png`, `1.2.3_add.result.txt` | what the new code gave, next to what it was compared against |
+
+Plan numbers are computed from the tree's order, never stored, and shift when
+a node is added before others (a review iteration adding a component). So
+JFI keeps the names current: `sync_evidence_names` renames every file to its
+task's number after each planning episode, before each Dev step and before
+the review. Inside, everything goes by the case name, so a rename never loses
+a file. A file without a number isn't on a node yet.
 
 ### Task: an implement leaf, then a compare leaf
 
@@ -454,7 +473,8 @@ evidence. A case that can't run here (no browser) goes in the review report as
 | | Behavioural | Visual |
 |---|---|---|
 | Ground truth | A command (`bc`, `curl`, `wget`, `nvidia-smi`, `psql`), docs, an old program, a golden file | A page, a mockup, a design export |
-| Evidence file | `evidences/<case>.txt` (and `<case>.sql` for a query) | `evidences/<case>.png`, plus `<case>.json` (source, viewport, steps, where the new app shows it, the original's visible text) |
+| Evidence file | `evidences/<task>_<case>.txt` (and `.sql` for a query) | `evidences/<task>_<case>.png`, plus `.json` (source, viewport, steps, selector, where the new app shows it, the original's visible text) |
+| Dev's result | `<compare task>_<case>.result.txt`: each input, the new answer and the evidence's | `<compare task>_<case>.new.png` and `.compare.png` |
 | Captured by | `capture_evidence` running `evidence_one` per input | `capture_evidence` screenshotting the original after its steps (or converting a mockup to PNG) |
 | Compared by | `compare_one` per input; JFI compares the outputs: `tokens` (default: numbers by value, words exactly, separators ignored), `exact` or `contains`; an `!error` input passes when the new code also fails | The new app screenshotted the same way; fails when more than `COMPARE_MAX_DIFF` (10%) of the pixels differ **or** text on the original is missing from the new page |
 
@@ -466,8 +486,9 @@ screenshot evidence needs nothing installed where JFI runs. From source, run
 Both visual passes are needed: building this, a nav link missing from the new
 page changed 0.03% of the pixels. The screenshots are compared in the same
 headless browser `check_page` uses (a canvas diff), so there's no image
-library to install; the result is saved as `.jfi/screens/compare/<case>/
-compare.png` (original | new | differences in red). Steps click a button,
+library to install; the result is saved as Dev's evidence,
+`evidences/<compare task>_<case>.compare.png` (original | new | differences
+in red), beside `.new.png` (the new app's shot). Steps click a button,
 link or tab with the name before plain text: "click Watchlist" first hit the
 nav label of that name.
 
@@ -506,7 +527,7 @@ Variants that name it are how the feature gets measured (Build notes).
 
 | Task | Ground truth | Evidence for one case |
 |---|---|---|
-| `terminal/calc` | `bc -l` | `evidences/add.txt`: inputs and `bc`'s answers |
+| `terminal/calc` | `bc -l` | `evidences/1.2_add.txt`: inputs and `bc`'s answers |
 | `data_engineering/log_pipeline` | `grep` / `awk` / `sort \| uniq -c` over the same log | One output key's value, as the shell pipeline gives it |
 | `data_engineering/sales_summary` | An expected-output file, or `sqlite3` with `SUM(quantity*unit_price) ... GROUP BY region` | One summary value |
 | `polyglot/*` | The other language's twin (`_js` vs Python) | The twin's output for each input |
@@ -524,7 +545,7 @@ Variants that name it are how the feature gets measured (Build notes).
 
 1. **Where the evidence lives:** `evidences/` in the project, kept and
    committed so it can be reviewed on GitHub. Cleanup never touches it. The
-   comparisons' own output (`new.png`, `compare.png`, input scratch files) is
+   comparisons' scratch input files are
    under `.jfi/`.
 2. **A compare task after each implement task:** yes. `RULES` in
    `planner/prompts.py` makes the one exception to "checking that it all

@@ -46,7 +46,7 @@ from JFI.planner.nodes import BREAKDOWN, children_of, load_nodes, path_of, targe
 from JFI.tool.checkpoint_tools import checkpoint, ensure_baseline
 from JFI.tool.code_tools import DOC_SUFFIXES, _symbols, make_code_tools, resolve_path, scan_markers
 from JFI.tool.design_tools import design_index, make_design_tools, references_text
-from JFI.tool.evidence_tools import compare_cases, evidence_hash, make_evidence_tools
+from JFI.tool.evidence_tools import compare_cases, evidence_hash, make_evidence_tools, sync_evidence_names
 from JFI.tool.note_tools import add_reviewer_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.result_cap import cap_result
@@ -203,6 +203,7 @@ class Imp:
         while True:
             if self.console.should_stop():
                 return ImpResult(False, self.episodes, "stopped")
+            sync_evidence_names(self.engine, self.session_id, self.root)
             self._requeue_changed_evidence()
             leaf = next_leaf(load_nodes(self.engine, self.session_id), self.deferred)
             if leaf is None:

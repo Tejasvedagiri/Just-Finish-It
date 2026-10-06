@@ -49,14 +49,19 @@ from JFI.models._util import utcnow
 
 EVIDENCE_DIR = "evidences"
 SCRATCH_DIR = Path(".jfi") / "compare"
-SCREENS_DIR = Path(".jfi") / "screens" / "compare"
 DEFAULT_VIEWPORT = "1280x800"
 DEFAULT_MAX_DIFF = 0.10
 COMMAND_TIMEOUT_SECONDS = 120
 NAV_TIMEOUT_MS = 15_000
 MATCH_MODES = ("tokens", "exact", "contains")
 LLM_SOURCE = "llm -- not verified; check this file"
-_CASE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,59}$")
+_CASE = re.compile(r"^[a-z][a-z0-9_-]{0,59}$")
+# evidences/<plan number>_<case><suffix>: the number is the task that owns it
+# (sync_evidence_names keeps it current); a file without one isn't on a node yet.
+_FILE = re.compile(r"^(?:(\d+(?:\.\d+)*)_)?([a-z][a-z0-9_-]{0,59}?)(\.result\.txt|\.new\.png|\.compare\.png|"
+                   r"\.txt|\.png|\.json|\.sql)$")
+GROUND_SUFFIXES = (".txt", ".png", ".json", ".sql")
+RESULT_SUFFIXES = (".result.txt", ".new.png", ".compare.png")
 _URL = re.compile(r"(https?|file)://\S+")
 _TOKEN = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|[^\W\d_]+", re.UNICODE)
 _API_PROGRAMS = ("curl", "wget", "http", "https", "xh")
@@ -97,6 +102,11 @@ class Evidence:
     def unverified(self) -> bool:
         return self.source.startswith("llm")
 
+    @property
+    def reference_only(self) -> bool:
+        """An Architect's overview of the ground truth: kept to show, not compared."""
+        return ((self.spec if self.visual else self.header).get("check") or "") == "reference"
+
 
 def evidence_dir(root: Path) -> Path:
     return Path(root) / EVIDENCE_DIR
@@ -104,16 +114,67 @@ def evidence_dir(root: Path) -> Path:
 
 def case_problem(case: str) -> Optional[str]:
     if not _CASE.match(case or ""):
-        return (f"Error: case name {case!r} must be lowercase letters, digits, _ or - (e.g. add, "
-                "divide_by_zero, watchlist_tab); it names the file evidences/<case>.txt or .png.")
+        return (f"Error: case name {case!r} must start with a letter and use lowercase letters, digits, _ or - "
+                "(e.g. add, divide_by_zero, watchlist_tab); its files are evidences/<task number>_<case>.*.")
     return None
 
 
-def list_cases(root: Path) -> List[str]:
+def _files(root: Path) -> List[Tuple[Path, Optional[str], str, str]]:
+    """(path, plan number or None, case, suffix) for every evidence file."""
     folder = evidence_dir(root)
     if not folder.is_dir():
         return []
-    return sorted({p.stem for p in folder.iterdir() if p.suffix in (".txt", ".png") and _CASE.match(p.stem)})
+    out = []
+    for path in sorted(folder.iterdir()):
+        match = _FILE.match(path.name)
+        if match and path.is_file():
+            out.append((path, match.group(1), match.group(2), match.group(3)))
+    return out
+
+
+def _find(root: Path, case: str, suffix: str) -> Optional[Path]:
+    return next((path for path, _, c, s in _files(root) if c == case and s == suffix), None)
+
+
+def evidence_path(root: Path, case: str, suffix: str) -> Path:
+    """The case's file with this suffix: the existing one (whatever its
+    number), or a new one without a number until sync_evidence_names gives it
+    its task's."""
+    return _find(root, case, suffix) or evidence_dir(root) / f"{case}{suffix}"
+
+
+def list_cases(root: Path) -> List[str]:
+    return sorted({c for _, _, c, s in _files(root) if s in (".txt", ".png")})
+
+
+def sync_evidence_names(engine, session_id: str, root: Path) -> List[str]:
+    """Names every evidence file after the task that owns it, as the plan
+    numbers it now: the ground truth after the node whose `cases` hold the
+    case (a Lead's file node, e.g. 1.2_add.txt, or an Architect's component
+    for its overview, 2_dividends_view.png), and Dev's results after the
+    compare leaf that checks it (1.2.3_add.result.txt). Plan numbers shift
+    when nodes are added, so this runs after planning steps and before
+    comparisons. Returns the renames done."""
+    from JFI.models import build_indexes, display_number
+    from JFI.planner.nodes import load_nodes
+
+    nodes = load_nodes(engine, session_id)
+    if not nodes or not evidence_dir(root).is_dir():
+        return []
+    by_id, siblings = build_indexes(nodes)
+    owner, checker = {}, {}
+    for node in nodes:
+        for case in node.cases or []:
+            target = checker if node.kind == "compare" else owner
+            target.setdefault(case, display_number(node, by_id, siblings))
+    renames = []
+    for path, number, case, suffix in _files(root):
+        wanted = (checker if suffix in RESULT_SUFFIXES else owner).get(case)
+        name = f"{wanted}_{case}{suffix}" if wanted else f"{case}{suffix}"
+        if wanted and number != wanted and not (path.parent / name).exists():
+            path.rename(path.parent / name)
+            renames.append(f"{path.name} -> {name}")
+    return renames
 
 
 def parse_text(text: str) -> Tuple[Dict[str, str], List[Item]]:
@@ -155,15 +216,14 @@ def render_text(header: Dict[str, str], items: Sequence[Item]) -> str:
 
 
 def read_evidence(root: Path, case: str) -> Optional[Evidence]:
-    folder = evidence_dir(root)
-    text_path, png_path = folder / f"{case}.txt", folder / f"{case}.png"
-    if text_path.is_file():
+    text_path, png_path = _find(root, case, ".txt"), _find(root, case, ".png")
+    if text_path is not None:
         header, items = parse_text(text_path.read_text(encoding="utf-8"))
         return Evidence(case, text_path, False, header, items)
-    if png_path.is_file():
-        spec_path = folder / f"{case}.json"
+    if png_path is not None:
+        spec_path = _find(root, case, ".json")
         try:
-            spec = json.loads(spec_path.read_text(encoding="utf-8")) if spec_path.is_file() else {}
+            spec = json.loads(spec_path.read_text(encoding="utf-8")) if spec_path else {}
         except json.JSONDecodeError:
             spec = {}
         return Evidence(case, png_path, True, spec=spec)
@@ -175,12 +235,11 @@ def evidence_hash(root: Path, cases: Sequence[str]) -> str:
     person sets after reading a file -- so accepting evidence doesn't send
     its compare leaf back, but editing or re-capturing it does."""
     digest = hashlib.sha256()
-    folder = evidence_dir(root)
     for case in sorted(cases):
         digest.update(case.encode())
-        for suffix in (".txt", ".png", ".json", ".sql"):
-            path = folder / f"{case}{suffix}"
-            if not path.is_file():
+        for suffix in GROUND_SUFFIXES:
+            path = _find(root, case, suffix)
+            if path is None:
                 continue
             data = path.read_bytes()
             if suffix == ".txt":
@@ -203,7 +262,7 @@ def mark_reviewed(root: Path, case: str) -> str:
         return f"Error: no evidence for case {case!r}."
     stamp = utcnow().strftime("%Y-%m-%d %H:%M UTC")
     if evidence.visual:
-        spec_path = evidence.path.with_suffix(".json")
+        spec_path = evidence_path(root, case, ".json")
         evidence.spec["reviewed"] = stamp
         spec_path.write_text(json.dumps(evidence.spec, indent=2) + "\n", encoding="utf-8")
     else:
@@ -215,8 +274,8 @@ def mark_reviewed(root: Path, case: str) -> str:
 def save_edited_text(root: Path, case: str, text: str) -> str:
     """A person corrected a behavioural case's evidence (the dashboard's Edit):
     the file says so, and what it was captured from before."""
-    path = evidence_dir(root) / f"{case}.txt"
-    if not path.is_file():
+    path = _find(root, case, ".txt")
+    if path is None:
         return f"Error: no text evidence for case {case!r}."
     header, items = parse_text(text)
     if not items:
@@ -239,7 +298,10 @@ def _runbook(engine, session_id: str, name: str) -> Optional[RunbookEntry]:
 
 def _input_file(root: Path, value: str, n: int) -> Path:
     if value.startswith("@"):
-        return (evidence_dir(root) / value[1:].strip()).resolve()
+        name = value[1:].strip()
+        match = _FILE.match(name)
+        found = _find(root, match.group(2), match.group(3)) if match else None
+        return (found or evidence_dir(root) / name).resolve()
     scratch = Path(root) / SCRATCH_DIR
     scratch.mkdir(parents=True, exist_ok=True)
     path = scratch / f"input-{n}.txt"
@@ -512,7 +574,7 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
         return f"Error: match must be one of {', '.join(MATCH_MODES)} (tokens: numbers by value, words exactly)."
     inputs = [str(i) for i in (inputs or [])]
     if sql:
-        (folder / f"{case}.sql").write_text(sql.strip() + "\n", encoding="utf-8")
+        evidence_path(root, case, ".sql").write_text(sql.strip() + "\n", encoding="utf-8")
         inputs = [f"@{case}.sql"]
     if not inputs:
         return ("Error: give the case's inputs (e.g. inputs=['1 + 1', '2.5 + 0.25']), sql='<query>' for a query, "
@@ -555,9 +617,13 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
                 "file); answers you made up are saved as 'not verified' for a person to check.")
     header["match"] = match
     header["captured"] = f"{utcnow().strftime('%Y-%m-%d %H:%M UTC')} by {role or 'jfi'}"
-    path = folder / f"{case}.txt"
+    if role == "architect":
+        header["check"] = "reference"
+    path = evidence_path(root, case, ".txt")
     path.write_text(render_text(header, items), encoding="utf-8")
     _event(engine, session_id, f"{case}: {header['source']}")
+    sync_evidence_names(engine, session_id, root)
+    path = evidence_path(root, case, ".txt")
     warn = "\nNOT VERIFIED: these answers came from you, not a command or file." if header["source"] == LLM_SOURCE \
         else ""
     return f"Saved {EVIDENCE_DIR}/{path.name} ({len(items)} input(s), source: {header['source']}):\n" \
@@ -577,8 +643,7 @@ def _capture_visual(engine, session_id: str, root: Path, role: str, case: str, u
     if not new_url:
         return ("Error: a visual case needs new_url: where the NEW app shows this state (a route like / or "
                 "/login, a URL, or a file like index.html) -- compare_evidence screenshots it there.")
-    folder = evidence_dir(root)
-    png = folder / f"{case}.png"
+    png = evidence_path(root, case, ".png")
     spec = {"case": case, "new_url": new_url, "steps": list(steps or []), "viewport": viewport or DEFAULT_VIEWPORT}
     if selector:
         spec["selector"] = selector
@@ -600,9 +665,13 @@ def _capture_visual(engine, session_id: str, root: Path, role: str, case: str, u
         where = f" {selector}" if selector else ""
         spec.update(source=f"screenshot {target}{where} {spec['viewport']}", url=target, text=text[:4000])
     spec["captured"] = f"{utcnow().strftime('%Y-%m-%d %H:%M UTC')} by {role or 'jfi'}"
-    (folder / f"{case}.json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
+    if role == "architect":
+        spec["check"] = "reference"
+    evidence_path(root, case, ".json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
     _event(engine, session_id, f"{case}: {spec['source']}")
-    return f"Saved {EVIDENCE_DIR}/{case}.png and {case}.json (source: {spec['source']})."
+    sync_evidence_names(engine, session_id, root)
+    png, spec_file = evidence_path(root, case, ".png"), evidence_path(root, case, ".json")
+    return f"Saved {EVIDENCE_DIR}/{png.name} and {spec_file.name} (source: {spec['source']})."
 
 
 def recapture(engine, session_id: str, root: Path, case: str) -> str:
@@ -614,7 +683,8 @@ def recapture(engine, session_id: str, root: Path, case: str) -> str:
     if evidence.visual:
         if not evidence.spec.get("url") and not evidence.spec.get("image"):
             return f"Error: {case} doesn't say how it was captured."
-        return _capture_visual(engine, session_id, Path(root), "recapture", case, evidence.spec.get("url", ""),
+        role = "architect" if evidence.reference_only else "recapture"
+        return _capture_visual(engine, session_id, Path(root), role, case, evidence.spec.get("url", ""),
                                evidence.spec.get("image", ""), evidence.spec.get("new_url", ""),
                                evidence.spec.get("steps") or (), evidence.spec.get("viewport", ""),
                                evidence.spec.get("selector", ""), evidence.spec.get("new_selector", ""))
@@ -677,6 +747,9 @@ def compare_case(engine, session_id: str, root: Path, case: str) -> CaseResult:
     if evidence is None:
         return CaseResult(case, False, f"Error: no evidence for case {case!r} in {EVIDENCE_DIR}/ "
                                        f"(capture it with capture_evidence).")
+    if evidence.reference_only:
+        return CaseResult(case, True, f"{case}: the Architect's overview of the ground truth -- kept to look at, "
+                                      f"not compared ({EVIDENCE_DIR}/{evidence.path.name}).")
     if evidence.visual:
         return _compare_visual(engine, session_id, root, evidence)
     compare_one = _runbook(engine, session_id, "compare_one")
@@ -704,6 +777,11 @@ def compare_case(engine, session_id: str, root: Path, case: str) -> CaseResult:
     lines.append(f"{case}: {total - bad} of {total} match" if not bad else f"{case}: {bad} of {total} differ")
     if evidence.unverified:
         lines.append(f"(the evidence for {case} came from the LLM, not a command or file: it isn't verified)")
+    # Dev's evidence: what the new code gave, kept next to the ground truth
+    # and named after the compare task (sync_evidence_names).
+    evidence_path(root, case, ".result.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    sync_evidence_names(engine, session_id, root)
+    lines.append(f"  saved: {EVIDENCE_DIR}/{evidence_path(root, case, '.result.txt').name}")
     return CaseResult(case, bad == 0 and total > 0, "\n".join(lines), "\n".join(outputs),
                       unverified=evidence.unverified)
 
@@ -712,15 +790,15 @@ def _compare_visual(engine, session_id: str, root: Path, evidence: Evidence) -> 
     spec, case = evidence.spec, evidence.case
     view = _view_url(engine, session_id)
     target = _resolve_url(spec.get("new_url", ""), root, view)
-    folder = Path(root) / SCREENS_DIR / case
-    new_png = folder / "new.png"
+    new_png = evidence_path(root, case, ".new.png")
     problem, new_text = screenshot(target, new_png, spec.get("viewport", DEFAULT_VIEWPORT), spec.get("steps") or (),
                                    spec.get("new_selector") or spec.get("selector", ""))
     if problem:
         hint = " Is the app running? Start it with the runbook's run (start_background_process)." \
             if target.startswith("http") else ""
         return CaseResult(case, False, problem + hint, visual=True)
-    problem, ratio, composite = diff_images(evidence.path, new_png, folder / "compare.png")
+    problem, ratio, composite = diff_images(evidence.path, new_png, evidence_path(root, case, ".compare.png"))
+    sync_evidence_names(engine, session_id, root)
     if problem:
         return CaseResult(case, False, problem, visual=True)
     old_words = {w.lower() for w in re.findall(r"[^\W\d_]{3,}", spec.get("text", ""))}
@@ -729,11 +807,13 @@ def _compare_visual(engine, session_id: str, root: Path, evidence: Evidence) -> 
     # Text as well as pixels: found while building this, a nav link missing
     # from the new page changed 0.03% of the pixels and passed on pixels alone.
     ok = ratio <= max_diff() and not missing
-    lines = [f"compare {case}  ({EVIDENCE_DIR}/{case}.png vs {target}, {spec.get('viewport', DEFAULT_VIEWPORT)})",
+    lines = [f"compare {case}  ({EVIDENCE_DIR}/{evidence_path(root, case, '.png').name} vs {target}, "
+             f"{spec.get('viewport', DEFAULT_VIEWPORT)})",
              f"  differing pixels: {ratio:.2%} (allowed {max_diff():.0%}, COMPARE_MAX_DIFF)",
              f"  text missing from the new page: {', '.join(missing[:25])}" if missing
              else "  text: everything in the original is on the new page" if old_words else "",
-             f"  saved: {SCREENS_DIR / case / 'compare.png'} (original | new | differences in red); attached",
+             f"  saved: {EVIDENCE_DIR}/{evidence_path(root, case, '.compare.png').name} (original | new | "
+             f"differences in red); attached",
              f"{case}: {'looks the same' if ok else 'DIFFERS'}"]
     return CaseResult(case, ok, "\n".join(line for line in lines if line), image_url=composite, visual=True,
                       unverified=evidence.unverified)
@@ -783,36 +863,25 @@ def make_evidence_tools(engine, session_id: str, root: Path, role: str = "") -> 
 EVIDENCE_TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "capture_evidence",
-        "description": ("Save one case's evidence from the ground truth into evidences/<case>.*: it runs the "
-                        "runbook's evidence_one on each input (a CLI, curl/wget for an API, a database client for "
-                        "sql), or screenshots url, or copies image. You choose the inputs; never type the "
-                        "answers yourself -- answers= is only for when no command, API, page or file exists, and "
-                        "is saved as not verified."),
+        "description": ("Save one case's ground truth in evidences/: runs the runbook's evidence_one on each input "
+                        "(a CLI, curl/wget, a DB client for sql), or screenshots url, or copies image. You pick the "
+                        "inputs, never the answers (answers= is the flagged last resort)."),
         "parameters": {"type": "object", "properties": {
-            "case": {"type": "string", "description": "lowercase name, e.g. add, divide_by_zero, watchlist_tab"},
-            "inputs": {"type": "array", "items": {"type": "string"},
-                       "description": "behavioural: the inputs to run, e.g. ['1 + 1', '2.5 + 0.25', '-3 + 10']"},
-            "sql": {"type": "string", "description": "a query to save as evidences/<case>.sql and run as the input"},
-            "url": {"type": "string", "description": "visual: the original page (URL or project file) to screenshot"},
-            "image": {"type": "string", "description": "visual: a mockup/screenshot IMAGE file in the project "
-                                                       "(png, jpg, svg, ...) -- never a page; a page is url="},
-            "selector": {"type": "string", "description": "visual: CSS of ONE part of the page to shoot (a chart, "
-                                                          "a card), e.g. #allocation-donut; also used on the new app"},
-            "new_selector": {"type": "string", "description": "visual: the same part's CSS in the new app, when it "
-                                                              "differs from selector"},
-            "new_url": {"type": "string", "description": "visual: where the NEW app shows this state (/, /login, "
-                                                         "index.html)"},
+            "case": {"type": "string", "description": "e.g. add, divide_by_zero, watchlist_tab"},
+            "inputs": {"type": "array", "items": {"type": "string"}, "description": "e.g. ['1 + 1', '-3 + 10']"},
+            "sql": {"type": "string", "description": "a query, run as the input"},
+            "url": {"type": "string", "description": "visual: the original page (URL or file) to screenshot"},
+            "image": {"type": "string", "description": "visual: a mockup IMAGE file (png, jpg, svg); never a page"},
+            "new_url": {"type": "string", "description": "visual: where the NEW app shows it (/, /login, index.html)"},
             "steps": {"type": "array", "items": {"type": "string"},
-                      "description": "visual: actions before the shot, e.g. ['click Watchlist']; also replayed on "
-                                     "the new app (click <text or css>, type <css>=<text>, press <key>, scroll "
-                                     "<px>, wait <ms>)"},
-            "viewport": {"type": "string", "description": "visual: WIDTHxHEIGHT, default 1280x800"},
+                      "description": "visual: e.g. ['click Watchlist'] (click/type <css>=<text>/press/scroll/wait)"},
+            "selector": {"type": "string", "description": "visual: CSS of ONE part to shoot, e.g. #allocation-donut"},
+            "new_selector": {"type": "string", "description": "visual: that part's CSS in the new app, if different"},
+            "viewport": {"type": "string", "description": "WIDTHxHEIGHT, default 1280x800"},
             "match": {"type": "string", "enum": list(MATCH_MODES),
-                      "description": "tokens (default): numbers by value, words exactly, spacing/separators "
-                                     "ignored; exact; contains"},
-            "answers": {"type": "array", "items": {"type": "string"},
-                        "description": "LAST RESORT, one per input, when nothing can produce them"},
-            "from_file": {"type": "string", "description": "where answers= were copied from, e.g. docs/api.md L40-58"},
+                      "description": "tokens (default: numbers by value, words exactly), exact, contains"},
+            "answers": {"type": "array", "items": {"type": "string"}, "description": "LAST RESORT, one per input"},
+            "from_file": {"type": "string", "description": "where answers= came from, e.g. docs/api.md L40-58"},
         }, "required": ["case"]},
     }},
     {"type": "function", "function": {
