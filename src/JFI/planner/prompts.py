@@ -77,11 +77,13 @@ that isn't a node never gets built. You have a limited number of turns, so make 
    (the ground truth's answer for one input) and "compare_one" (the NEW code on the same input), each with
    {{input}} or {{input_file}} (a file holding the input; the safe choice for anything with quotes). They run in a
    POSIX sh: no <<<. E.g. evidence_one = "{{ echo scale=10; cat {{input_file}}; }} | bc -l", compare_one =
-   "{{ cat {{input_file}}; echo exit; }} | python3 main.py". EVERY component that rebuilds part of it gets its
-   own case(s): cases=["<component>_view"] and capture_evidence it -- the whole original screen of that view
-   (url + new_url + steps), or one probe's inputs. Dev compares the finished component with it, after
-   everything under it is built. The detailed cases are the Lead's and Task's. Evidence files are named by task
-   number for you; finish refuses while a rebuilding component has no case or a case has no evidence.
+   "{{ cat {{input_file}}; echo exit; }} | python3 main.py". With a ground truth, EVERY component gets its own
+   case(s) and capture_evidence -- a view: the whole original screen of it (url + new_url + steps); data taken
+   from the original (a CSV, constants): a few of its rows (below); the scaffold or shell: the original's first
+   screen or one probe. Dev compares the finished component with it, after everything under it is built. The
+   detailed cases are the Lead's and Task's. Evidence files are named by task number for you; finish refuses
+   while a component has no case or a case has no evidence.
+   Data taken from the original (CSV/JSON rows, constants): inputs = a few rows or fields to check (e.g. AAPL), answers + from_file="<original> L<a>-<b>" (the values copied from those lines; checked against them), match="contains", and new_command reading the same from the new file (e.g. "grep {{input}} data/holdings.csv").
    No ground truth after all: design_set("assumption", "no_ground_truth", "<why>").
 7. List every deliverable the goal names -- files, docs (e.g. a README), tests, commands -- and check each is
    produced by some component (docs usually go under the "project" component). On the first real run a
@@ -134,7 +136,7 @@ this component; the design (design_get) and runbook tell you how it connects to 
    notes = what Task must know that the stubs don't say, references = where to look (design entries as
    kind:key, e.g. contract:main->calc; source ranges, e.g. page.html L1376-1402). Order them
    with depends_on (the manifest first; a file before the files that import it).
-   GROUND TRUTH (your node, or a component above it, cites reference:<key>): EVERY file node gets its own
+   GROUND TRUTH (the design has a reference -- design_get("reference")): EVERY file node gets its own
    case(s) -- one per operator, endpoint example, screen state or output column, plus the error cases -- each
    on the file node whose code produces it (cases=["add", "divide_by_zero"]); a case belongs to one node. Dev
    compares the finished file with them. For each, capture_evidence: choose the inputs (1 + 1,
@@ -143,7 +145,8 @@ this component; the design (design_get) and runbook tell you how it connects to 
    opens on click needs steps=["click <its label>"] (without steps it's the first screen, and a screen another
    case already has is refused); it runs the ground truth
    and saves it in the session's evidence folder. A screenshot is only for something you can see; a config, data or build
-   output is behavioural (inputs + evidence_one). Files are named by task number for you (1.2_add.txt). Never
+   output is behavioural (inputs + evidence_one). Data taken from the original (CSV/JSON rows, constants): inputs = a few rows or fields to check (e.g. AAPL), answers + from_file="<original> L<a>-<b>" (the values copied from those lines; checked against them), match="contains", and new_command reading the same from the new file (e.g. "grep {{input}} data/holdings.csv").
+   Files are named by task number for you (1.2_add.txt). Never
    type the answers yourself: answers= is the last resort, saved as not verified. finish checks every file node
    has a case, every case has its evidence, and no evidence is left on no node.
 5. If this component can't be done within the design (a missing contract, it belongs elsewhere), call escalate
@@ -171,11 +174,12 @@ markers first (outline_file or list_symbols, then read_symbol); they are your br
    copy is one leaf whatever its size -- Dev copies it with copy_lines -- so name the exact source range: "copy
    L341-957 of portfolio.html into index.html"; split only where the copied text needs editing.
 4. Order leaves with depends_on: helpers before callers, implement before integrate.
-   GROUND TRUTH (SCOPE or a node above it cites reference:<key>, or SCOPE lists cases): EVERY leaf gets its own
+   GROUND TRUTH (the design has a reference, or SCOPE lists cases): EVERY leaf gets its own
    case (cases=["<leaf's case>"]; a deletion needs none) and capture_evidence for it -- the original's answer
    for this one piece: inputs run through evidence_one (new_command="<runs the NEW function on {{input}}>" when
    compare_one runs the whole program), a screenshot of just its part (url + selector + new_url), or a file's
-   lines (answers + from_file). Dev compares the leaf with it when it's done; SCOPE's own cases are compared
+   lines (answers + from_file). Data taken from the original (CSV/JSON rows, constants): inputs = a few rows or fields to check (e.g. AAPL), answers + from_file="<original> L<a>-<b>" (the values copied from those lines; checked against them), match="contains", and new_command reading the same from the new file (e.g. "grep {{input}} data/holdings.csv").
+   Dev compares the leaf with it when it's done; SCOPE's own cases are compared
    when the whole file is done. Never add a separate compare leaf. A leaf's done_when test case uses an input
    and answer from the evidence (list_evidence shows each case's), never your own arithmetic.
 5. Reuse before inventing: if an existing function already does it, say "reuse x()" instead. If the file doesn't

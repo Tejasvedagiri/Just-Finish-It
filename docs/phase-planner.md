@@ -208,9 +208,10 @@ or database), each layer adds its part, checked by its `finish`
   sees one in the goal ("compare it with", "turn X.html into", "migrate the
   database", a mockup file the goal names, ...), unless the Architect records
   `assumption:no_ground_truth`. None of the benchmark goals trips it.
-  Every component that cites a reference gets its own case(s) with evidence
-  (the original screen of its view, or a probe's answers); `finish` refuses
-  without them.
+  Once the design has a reference, every component gets its own case(s) with
+  evidence (the original screen of its view, a few rows of data taken from
+  the original, or a probe's answers), whether it cites the reference or not;
+  `finish` refuses without them.
 - **Lead** gives every file node its own cases and `capture_evidence`s each
   into `.jfi/evidence/<session>/`.
 - **Task** gives every leaf its own case and captures it (`capture_evidence`
@@ -220,8 +221,10 @@ or database), each layer adds its part, checked by its `finish`
   its own evidence when it's done, "There need not be a sub point to validate
   against evidence."
 
-Under a component that cites a reference, the Lead's and Task's `finish` (and
-Task's split) refuse while a new node has no case (a `delete` needs none), a
+When the design has a reference (anywhere in the plan, not only under a
+component citing it: on the portfolio-dashboard run the Architect cited it on
+the view components only, so the scaffold and the CSV data component got no
+evidence), the Lead's and Task's `finish` (and Task's split) refuse while a new node has no case (a `delete` needs none), a
 case has no evidence, or evidence sits on no node -- on the first real run a
 `load_holdings.txt` was captured, never put on a node, and so never compared.
 The Architect's `finish` checks the same for its components.

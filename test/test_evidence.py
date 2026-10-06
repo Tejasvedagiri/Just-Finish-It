@@ -154,6 +154,40 @@ def runner_select_runbook(name):
 
 # ------------------------------------------------------------------ compare
 
+HOLDINGS_ROWS = (  # two rows of portfolio-dashboard.html's holdings table, as the user shared it
+    '<tr><td><div class="sym-name">AAPL</div><div class="sym-full">Apple Inc.</div></td>\n'
+    '  <td class="mono">84</td><td class="mono">$189.40</td><td class="mono">$219.55</td>\n'
+    '<tr><td><div class="sym-name">MSFT</div><div class="sym-full">Microsoft Corp.</div></td>\n'
+    '  <td class="mono">40</td><td class="mono">$402.10</td><td class="mono">$438.22</td>\n')
+
+
+def test_data_taken_from_the_original_is_evidence_too(project):
+    """Observed on the portfolio-dashboard run: the component extracting the
+    page's data into CSV files (and its files) had no evidence at all. Rows
+    copied from the original are checked against its lines -- a made-up value
+    is refused -- even with an evidence_one in the runbook, and the CSV is
+    compared with them through the case's own command."""
+    engine, root = project
+    (root / "page.html").write_text(HOLDINGS_ROWS)
+    (root / "data").mkdir()
+    (root / "data/holdings.csv").write_text("symbol,name,shares,avg_cost,price\n"
+                                            "AAPL,Apple Inc.,84,189.40,219.55\nMSFT,Microsoft Corp.,40,402.10,438.22\n")
+    made_up = capture_evidence(engine, "s", root, "task", "holdings_rows", inputs=["AAPL"],
+                               answers=["AAPL Apple Inc. 85 189.40"], from_file="page.html L1-2")
+    assert made_up.startswith("Error: 85 (from the answer 'AAPL Apple Inc. 85 189.40') isn't in page.html L1-2")
+    saved = capture_evidence(engine, "s", root, "task", "holdings_rows", inputs=["AAPL", "MSFT"],
+                             answers=["AAPL Apple Inc. 84 189.40 219.55", "MSFT Microsoft Corp. 40 402.10 438.22"],
+                             from_file="page.html L1-4", match="contains",
+                             new_command="grep {input} data/holdings.csv")
+    assert saved.startswith("Saved") and "source: file page.html L1-4" in saved  # not the runbook's evidence_one
+    assert compare_case(engine, "s", root, "holdings_rows").ok
+
+    (root / "data/holdings.csv").write_text("symbol,name,shares,avg_cost,price\n"
+                                            "AAPL,Apple Inc.,48,189.40,219.55\nMSFT,Microsoft Corp.,40,402.10,438.22\n")
+    result = compare_case(engine, "s", root, "holdings_rows")
+    assert not result.ok and "holdings_rows: 1 of 2 differ" in result.report
+
+
 def test_numbers_compare_by_value_and_separators_dont_count():
     """bc prints 4 and 3.50000000000000000000 where Python prints 4.0 and 3.5;
     mysql -N separates columns with tabs where psql -At uses |."""
@@ -255,6 +289,7 @@ def test_every_node_under_a_ground_truth_gets_its_own_evidence(project):
     file node and every leaf under a component that cites a reference has its
     own case; no compare leaves; a deletion needs none."""
     engine, root = project
+    design_set(engine, "s", "reference", "bc", "behavioural: bc -l")
     comp = _good(engine, add_node(engine, "s", "architect", None, "evaluator in calc/", done_when="works",
                                   references=["reference:bc"]))
     planner = Planner(Console([]), engine, "s", "calc vs bc", root, lambda role: LLM(), FallbackJudge())
@@ -291,6 +326,19 @@ def test_every_node_under_a_ground_truth_gets_its_own_evidence(project):
     assert update_node(engine, "s", "task", impl_id, cases=["add"]).startswith("Updated")
     capture_evidence(engine, "s", root, "task", "add", ["1 + 1"])
     assert not task_finish(file_node, "done").startswith("Error")
+    # A component that doesn't cite the reference needs its evidence too: on
+    # the portfolio-dashboard run the CSV data component and its files had none.
+    data = _good(engine, add_node(engine, "s", "architect", None, "extract the data into data/*.csv",
+                                  done_when="csvs exist"))
+    data_row = next(n for n in load_nodes(engine, "s") if n.id == data)
+    data_finish = planner._finish(ScopeAnchor("lead", data, "data", "finish"), "lead", "breakdown", data_row)
+    csv_file = _good(engine, add_node(engine, "s", "lead", data, "data/holdings.csv", done_when="rows",
+                                      files=["data/holdings.csv"]))
+    assert f"a case on node(s) {csv_file}" in data_finish(data, "done")
+    [bare] = [p for p in planner._reference_problems(load_nodes(engine, "s"), {
+        "evidence_one": "x {input}", "compare_one": "y {input}"}) if p.startswith("a case on")]
+    assert bare.startswith(f"a case on node(s) {comp}, {data} ")  # every component, citing it or not
+
     # No new compare leaves: "compare" isn't a kind the planner can give any more.
     added = add_node(engine, "s", "task", file_node, "compare add with its evidence", done_when="matches",
                      files=["calc/ops.py"], kind="compare", cases=["add2"])

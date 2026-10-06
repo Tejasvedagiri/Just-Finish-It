@@ -447,22 +447,22 @@ class Planner:
     def _finish(self, anchor: ScopeAnchor, role: str, mode: str, node: Optional[Leaf]):
         if role == "architect" and node is None:
             return self._architect_finish(anchor)
-        if mode in ("breakdown", "split") and role in ("lead", "task") and self._rebuilds_ground_truth(node):
+        if mode in ("breakdown", "split") and role in ("lead", "task") and self._has_ground_truth():
             return self._cases_finish(anchor, node)
         return make_finish(anchor)
 
-    def _rebuilds_ground_truth(self, node: Leaf) -> bool:
-        """The node, or a component above it, cites a reference entry."""
-        by_id = {n.id: n for n in load_nodes(self.engine, self.session_id)}
-        current: Optional[Leaf] = node
-        while current is not None:
-            if any(str(r).startswith("reference:") for r in current.references or []):
-                return True
-            current = by_id.get(current.parent_id) if current.parent_id is not None else None
-        return False
+    def _has_ground_truth(self) -> bool:
+        """The design has a reference: then every node has its own evidence,
+        not only those under a component citing it. Observed on the
+        portfolio-dashboard run: the Architect cited the reference on the
+        view components only, so the scaffold and the CSV data extracted
+        from the original (component 2 and its files) got no evidence."""
+        with get_session(self.engine) as db:
+            return db.exec(select(DesignEntry).where(DesignEntry.session_id == self.session_id,
+                                                     DesignEntry.kind == "reference")).first() is not None
 
     def _case_problems(self, nodes: List[Leaf]) -> List[str]:
-        """Every node rebuilding part of a ground truth has its own case(s)
+        """Every node of a session with a ground truth has its own case(s)
         with evidence captured: Dev compares each node with them when it's
         done (docs/old_new.md). A deletion has nothing to compare."""
         problems = []
@@ -488,8 +488,8 @@ class Planner:
         return [f"a node for the evidence of {', '.join(stray)} (update_node cases=[...] on the node it checks)"]
 
     def _cases_finish(self, anchor: ScopeAnchor, parent: Leaf):
-        """A breakdown under a ground truth leaves every new node with its own
-        evidence."""
+        """A breakdown in a session with a ground truth leaves every new node
+        with its own evidence."""
         plain = make_finish(anchor)
 
         def finish(node_id: int = 0, summary: str = "") -> str:
@@ -514,10 +514,8 @@ class Planner:
                     f'"no_ground_truth", "<why>")']
         missing = []
         cited = {str(r) for n in nodes if n.level == "architect" for r in (n.references or [])}
-        rebuilders = [n for n in nodes if n.level == "architect"
-                      and any(str(r).startswith("reference:") for r in n.references or [])]
-        missing += self._case_problems(rebuilders)
         if references:
+            missing += self._case_problems([n for n in nodes if n.level == "architect" and n.parent_id is None])
             missing += self._unowned_cases()
         for ref in references:
             if not re.match(r"\s*(visual|behaviou?ral)\b", ref.text, re.I):

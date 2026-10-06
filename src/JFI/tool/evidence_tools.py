@@ -632,7 +632,19 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
                 "or url/image for a visual case.")
     header = {"case": case}
     evidence_one = _runbook(engine, session_id, "evidence_one")
-    if evidence_one is not None:
+    if answers and from_file:
+        # Copied from a file (the original's data, documented examples): taken
+        # over evidence_one, which runs the ground truth on an input and can't
+        # read a row out of a page. Checked against the file, so a "copied"
+        # answer the model made up is refused rather than saved as verified.
+        if len(answers) != len(inputs):
+            return f"Error: {len(inputs)} input(s) but {len(answers)} answer(s); give one answer per input."
+        problem = _copied_problem(root, from_file, answers)
+        if problem:
+            return problem
+        items = [Item(value, str(answer)) for value, answer in zip(inputs, answers)]
+        header["source"] = f"file {from_file}"
+    elif evidence_one is not None:
         items, broken = [], None
         for n, value in enumerate(inputs):
             code, stdout, stderr = run(fill(evidence_one.command, root, session_id, value, n, case), root)
@@ -659,7 +671,7 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
         if source_file and not (root / source_file).is_file():
             return f"Error: from_file {source_file!r} doesn't exist in the project."
         items = [Item(value, str(answer)) for value, answer in zip(inputs, answers)]
-        header["source"] = f"file {from_file}" if from_file else LLM_SOURCE
+        header["source"] = LLM_SOURCE
     else:
         return ("Error: there's no way to get the ground truth's answers. runbook_set('evidence_one', "
                 "'<command that prints the ground truth's answer for {input}>') -- a CLI, curl/wget for an API, "
@@ -679,6 +691,26 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
         else ""
     return f"Saved {shown(root, path)} ({len(items)} input(s), source: {header['source']}):\n" \
            f"{_preview(items)}{warn}"
+
+
+def _copied_problem(root: Path, from_file: str, answers: Sequence[str]) -> Optional[str]:
+    """An Error unless every word and number of each answer is in from_file's
+    lines ("page.html L120-140", or the whole file)."""
+    match = re.match(r"^(.*?)(?:\s+L(\d+)(?:\s*-\s*L?(\d+))?)?\s*$", from_file.strip())
+    name, first, last = match.group(1), match.group(2), match.group(3)
+    path = Path(root) / name
+    if not path.is_file():
+        return f"Error: from_file {name!r} doesn't exist in the project."
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if first:
+        lines = lines[int(first) - 1:int(last or first)]
+    have = set(_tokens("\n".join(lines)))
+    for answer in answers:
+        missing = [t for t in _tokens(str(answer)) if t not in have and not any(_same_token(t, h) for h in have)]
+        if missing:
+            return (f"Error: {', '.join(missing[:8])} (from the answer {str(answer)[:60]!r}) isn't in {from_file}. "
+                    f"Copy the answers from those lines, or name the lines they're on.")
+    return None
 
 
 def _capture_visual(engine, session_id: str, root: Path, role: str, case: str, url: str, image: str,
@@ -958,7 +990,7 @@ EVIDENCE_TOOL_SCHEMAS = [
             "viewport": {"type": "string", "description": "WIDTHxHEIGHT, default 1280x800"},
             "match": {"type": "string", "enum": list(MATCH_MODES),
                       "description": "tokens (default: numbers by value, words exactly), exact, contains"},
-            "answers": {"type": "array", "items": {"type": "string"}, "description": "LAST RESORT, one per input"},
+            "answers": {"type": "array", "items": {"type": "string"}, "description": "one per input: copied from from_file (checked), else LAST RESORT"},
             "from_file": {"type": "string", "description": "where answers= came from, e.g. docs/api.md L40-58"},
             "new_command": {"type": "string", "description": "runs the NEW code for THIS case, if not compare_one"},
         }, "required": ["case"]},
