@@ -180,6 +180,34 @@ Every verdict is stored as a `PlannerVerdict` row.
 - Depth is capped at `MAX_LEAF_DEPTH` (5); a function that already exists in the
   plan, or a file another component owns, is refused as a duplicate.
 
+- Ground truth ([`old_new.md`](old_new.md)): a Lead's case sits on one file
+  node only; a `compare` leaf needs `cases` whose evidence exists in
+  `evidences/`, cases its file node owns, and a `depends_on`; only the Lead
+  puts cases on file nodes.
+
+## Ground truth (`reference`, evidence and compare leaves)
+
+When the goal comes with something the build must match (a command like `bc`,
+a page, a mockup, an input with its expected output, API docs, an old program
+or database), each layer adds its part, checked by its `finish`
+([`old_new.md`](old_new.md) has the whole design):
+
+- **Architect** finds and probes it (`execute_command` is in its core set for
+  that), records `design_set("reference", key, "visual: ..." / "behavioural:
+  ...")` with what must match and what may differ, has each component that
+  rebuilds part of it cite `reference:<key>`, and for a behavioural one sets
+  the runbook's `evidence_one` (the ground truth on one input) and
+  `compare_one` (the new code on one input), with `{input}` or `{input_file}`.
+  `finish` refuses without them when `ground_truth_hint` (`planner/loop.py`)
+  sees one in the goal ("compare it with", "turn X.html into", "migrate the
+  database", a mockup file the goal names, ...), unless the Architect records
+  `assumption:no_ground_truth`. None of the benchmark goals trips it.
+- **Lead** names the cases for its files (`cases` on each file node) and
+  `capture_evidence`s each into `evidences/`; `finish` refuses a component
+  citing a reference with no cases or missing evidence.
+- **Task** adds, after the leaf that builds a case, a `compare` leaf for it;
+  `finish` refuses a case with no compare leaf, or with two.
+
 ## Guards
 
 - `PLANNER_REDO_CAP` (2): redos per node before it's escalated.

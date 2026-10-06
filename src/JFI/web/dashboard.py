@@ -289,6 +289,58 @@ def _render_runbook_and_design(engine, session_id: str) -> None:
             st.dataframe(design, width="stretch", hide_index=True)
 
 
+def _render_evidence(engine, session_id: str) -> None:
+    """The ground truth the build is checked against (docs/old_new.md): every
+    case in evidences/, how it was captured, and how its compare task went --
+    with Accept, Edit and Re-capture. An edit or re-capture changes the
+    evidence, so a running session compares that case again by itself."""
+    from JFI.planner.nodes import load_nodes
+    from JFI.tool.evidence_tools import (
+        EVIDENCE_DIR, SCREENS_DIR, list_cases, mark_reviewed, read_evidence, recapture, save_edited_text,
+    )
+
+    root = _project_root()
+    cases = list_cases(root)
+    if not cases:
+        return
+    compare_status = {c: n.status.value for n in load_nodes(engine, session_id)
+                      if n.kind == "compare" for c in (n.cases or [])}
+    rows = []
+    for case in cases:
+        evidence = read_evidence(root, case)
+        reviewed = (evidence.spec if evidence.visual else evidence.header).get("reviewed", "")
+        rows.append({"case": case, "kind": "visual" if evidence.visual else f"{len(evidence.items)} input(s)",
+                     "source": ("⚠ " if evidence.unverified else "") + evidence.source,
+                     "reviewed": reviewed, "compare task": compare_status.get(case, "")})
+    unverified = sum(r["source"].startswith("⚠") for r in rows)
+    title = f"Evidence ({len(cases)})" + (f" — {unverified} not verified" if unverified else "")
+    with st.expander(title, expanded=bool(unverified)):
+        st.caption(f"The ground truth in `{EVIDENCE_DIR}/`. ⚠ = written by the model, not captured from a command, "
+                   "page or file: check those first. Turn Auto-refresh off while editing.")
+        st.dataframe(rows, width="stretch", hide_index=True)
+        case = st.selectbox("Case", cases, key="evidence_case")
+        evidence = read_evidence(root, case)
+        edited = None
+        if evidence.visual:
+            st.image(str(evidence.path), caption=f"{EVIDENCE_DIR}/{case}.png -- {evidence.source}")
+            compared = root / SCREENS_DIR / case / "compare.png"
+            if compared.is_file():
+                st.image(str(compared), caption="last comparison: original | new | differences in red")
+        else:
+            edited = st.text_area(f"{EVIDENCE_DIR}/{case}.txt", evidence.path.read_text(encoding="utf-8"),
+                                  height=260, key=f"evidence_text_{case}")
+        accept, save, again = st.columns(3)
+        message = None
+        if accept.button("Accept", key=f"evidence_accept_{case}"):
+            message = mark_reviewed(root, case)
+        if edited is not None and save.button("Save edit", key=f"evidence_save_{case}"):
+            message = save_edited_text(root, case, edited)
+        if again.button("Re-capture", key=f"evidence_recapture_{case}"):
+            message = recapture(engine, session_id, root, case)
+        if message:
+            (st.error if message.startswith("Error") else st.success)(message)
+
+
 def _render_db_browser_tab(engine, selected_session_id: str) -> None:
     """Raw table view of .jfi/JFI.db -- a plain, mechanical browser (pick a
     table, see its rows) rather than a purpose-built view of any one of
@@ -395,6 +447,7 @@ def _render_session_tab(db_engine, jfi_dir: Path, selected_name: str) -> None:
             st.dataframe(judge_rows, width="stretch", hide_index=True)
         _render_node_detail(judge_rows)
         _render_runbook_and_design(db_engine, session_id)
+        _render_evidence(db_engine, session_id)
     else:
         st.info("No plan yet for this session.")
 

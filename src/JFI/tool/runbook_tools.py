@@ -23,7 +23,7 @@ _NAME = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 _KILL_BY_NAME = re.compile(r"\btaskkill\b[^|&]*\s/IM\b|\bpkill\b|\bkillall\b|Stop-Process\s+-Name\b", re.I)
 #: Entries later roles execute and read the exit code of. stop/view may be
 #: instructions (Ctrl+C, a URL to open), so they aren't checked.
-COMMAND_ENTRIES = ("setup", "run", "test", "test_one", "build", "e2e")
+COMMAND_ENTRIES = ("setup", "run", "test", "test_one", "build", "e2e", "evidence_one", "compare_one")
 _KNOWN_RUNNERS = {"npm", "npx", "node", "pnpm", "yarn", "bun", "deno", "python", "python3", "py", "uv", "pip",
                   "pytest", "go", "cargo", "make", "dotnet", "mvn", "gradle", "java", "ruby", "bundle", "php",
                   "composer", "bash", "sh", "cmd", "powershell", "pwsh", "docker", "vite", "vitest", "jest",
@@ -34,7 +34,8 @@ def _starts_with_a_program(command: str) -> bool:
     first = command.strip().split()[0].strip("\"'") if command.strip() else ""
     name = first.replace("\\", "/").rsplit("/", 1)[-1].lower()
     name = re.sub(r"\.(exe|cmd|bat|ps1)$", "", name)
-    return (name in _KNOWN_RUNNERS or "/" in first.replace("\\", "/") or first.startswith(".")
+    # A shell group, `{ echo scale=10; cat {input_file}; } | bc -l`, runs programs too.
+    return (name in _KNOWN_RUNNERS or "/" in first.replace("\\", "/") or first.startswith((".", "{", "("))
             or shutil.which(first) is not None)
 
 

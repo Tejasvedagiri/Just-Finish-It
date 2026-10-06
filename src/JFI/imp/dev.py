@@ -46,6 +46,7 @@ from JFI.planner.nodes import BREAKDOWN, children_of, load_nodes, path_of, targe
 from JFI.tool.checkpoint_tools import checkpoint, ensure_baseline
 from JFI.tool.code_tools import DOC_SUFFIXES, _symbols, make_code_tools, resolve_path, scan_markers
 from JFI.tool.design_tools import design_index, make_design_tools, references_text
+from JFI.tool.evidence_tools import compare_cases, evidence_hash, make_evidence_tools
 from JFI.tool.note_tools import add_reviewer_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.result_cap import cap_result
@@ -67,6 +68,9 @@ MARK_LEAF_DONE_SCHEMA = {"type": "function", "function": {
         "summary": {"type": "string", "description": "One line: what you did."},
         "test_id": {"type": "string", "description": "e.g. tests/test_ops.py::test_add"},
         "check": {"type": "string"},
+        "accept_difference": {"type": "string", "description": (
+            "compare leaves only: why a remaining VISUAL difference from the evidence is intended (it's "
+            "recorded for the reviewer). Never for a behavioural mismatch.")},
     }, "required": ["leaf_id", "summary"]},
 }}
 
@@ -199,6 +203,7 @@ class Imp:
         while True:
             if self.console.should_stop():
                 return ImpResult(False, self.episodes, "stopped")
+            self._requeue_changed_evidence()
             leaf = next_leaf(load_nodes(self.engine, self.session_id), self.deferred)
             if leaf is None:
                 break
@@ -207,6 +212,25 @@ class Imp:
         self._finish_up()
         left = [n for n in dev_leaves(load_nodes(self.engine, self.session_id)) if n.status not in FINISHED]
         return ImpResult(not left, self.episodes, f"{len(left)} leaves unfinished" if left else "")
+
+    def _requeue_changed_evidence(self) -> None:
+        """A compare leaf that passed is checked again when its evidence was
+        edited or re-captured since (by a person, or the dashboard)."""
+        for leaf in dev_leaves(load_nodes(self.engine, self.session_id)):
+            if leaf.kind != "compare" or leaf.status != LeafStatus.DONE or not leaf.evidence_hash:
+                continue
+            if evidence_hash(self.root, leaf.cases or []) == leaf.evidence_hash:
+                continue
+            with get_session(self.engine) as db:
+                row = db.get(Leaf, leaf.id)
+                row.status, row.started_at, row.ended_at, row.attempt_count = LeafStatus.TODO, None, None, 0
+                row.fix_note = (f"the evidence for {', '.join(leaf.cases or [])} changed after this leaf passed "
+                                f"(edited or re-captured): compare again and fix the code if it no longer matches")
+                db.add(row)
+                db.commit()
+            self._event(leaf.id, "reopen", "evidence changed")
+            self.console.display_system(f"Evidence for {', '.join(leaf.cases or [])} changed: leaf {leaf.id} "
+                                        f"is compared again.")
 
     def _work(self, leaf: Leaf) -> bool:
         if leaf.attempt_count >= max_dev_attempts():
@@ -275,6 +299,18 @@ class Imp:
             db.commit()
 
     def _split(self, leaf: Leaf) -> None:
+        if leaf.kind == "compare":
+            # A comparison can't be split into smaller ones; what doesn't match
+            # goes to the reviewer, who can reopen the code's own leaf.
+            with get_session(self.engine) as db:
+                row = db.get(Leaf, leaf.id)
+                row.status, row.ended_at = LeafStatus.SKIPPED, utcnow()
+                db.add(row)
+                db.commit()
+            add_reviewer_note(self.engine, self.session_id,
+                              f"Dev: compare leaf {leaf.id} ({leaf.description}) still doesn't match its evidence "
+                              f"({', '.join(leaf.cases or [])}) after {leaf.attempt_count} attempt(s); skipped.")
+            return
         with get_session(self.engine) as db:
             row = db.get(Leaf, leaf.id)
             row.plan_status = BREAKDOWN
@@ -292,12 +328,55 @@ class Imp:
 
     # ---------------------------------------------------------------- the gate
 
+    def _mark_compare_done(self, leaf: Leaf):
+        """A compare leaf is done when the new code matches its cases'
+        evidence (docs/old_new.md) -- checked here, not claimed."""
+        cases = list(leaf.cases or [])
+        start_hash = evidence_hash(self.root, cases)
+
+        def mark_leaf_done(leaf_id: int, summary: str = "", test_id: Optional[str] = None,
+                           check: Optional[str] = None, accept_difference: str = "") -> str:
+            if int(leaf_id) != leaf.id:
+                return f"Error: this conversation is about leaf {leaf.id}, not {leaf_id}."
+            if not cases:
+                return "Error: this compare leaf names no case; add_reviewer_note it and stop."
+            if evidence_hash(self.root, cases) != start_hash:
+                return ("Error: evidences/ changed while you worked on this leaf. The evidence is the ground truth: "
+                        "put it back as it was (git checkout it, or ask in add_reviewer_note) and change the code "
+                        "instead.")
+            results = compare_cases(self.engine, self.session_id, self.root, cases)
+            bad = [r for r in results if not r.ok]
+            report = "\n\n".join(r.report for r in results)
+            if not bad:
+                self._finish_leaf(leaf.id, evidence_hash=start_hash)
+                return f"Done: leaf {leaf.id} matches its evidence.\n{report}"
+            blocker = self._missing_dependency(leaf, "\n".join(r.output for r in bad))
+            if blocker is not None and self.deferrals.get(leaf.id, 0) < MAX_DEFERRALS:
+                self.deferrals[leaf.id] = self.deferrals.get(leaf.id, 0) + 1
+                self.deferred[leaf.id] = blocker.id
+                self._event(leaf.id, "skip", f"waits for leaf {blocker.id}: its stub raised NotImplementedError")
+                return (f"Deferred: the new code reached {not_implemented_symbol(bad[0].output, self.root)}(), which "
+                        f"is still a stub (leaf {blocker.id} implements it). This leaf is retried after it.")
+            accept_difference = (accept_difference or "").strip()
+            if accept_difference and all(r.visual for r in bad):
+                add_reviewer_note(self.engine, self.session_id,
+                                  f"Dev: leaf {leaf.id} accepted a visual difference from its evidence "
+                                  f"({', '.join(r.case for r in bad)}): {accept_difference}")
+                self._finish_leaf(leaf.id, evidence_hash=start_hash)
+                return f"Done: leaf {leaf.id}, with the visual difference recorded for the reviewer."
+            return cap_result(f"Error: the new code doesn't match the evidence yet. Fix the code in "
+                              f"{', '.join(leaf.files or []) or 'its files'} and call mark_leaf_done again.\n"
+                              f"{report}", "Only the end of the output is shown.")
+        return mark_leaf_done
+
     def _mark_leaf_done(self, leaf: Leaf):
+        if leaf.kind == "compare":
+            return self._mark_compare_done(leaf)
         document = self._document(leaf)
         before = _passage_counts(document) if document else None
 
         def mark_leaf_done(leaf_id: int, summary: str = "", test_id: Optional[str] = None,
-                           check: Optional[str] = None) -> str:
+                           check: Optional[str] = None, accept_difference: str = "") -> str:
             if int(leaf_id) != leaf.id:
                 return f"Error: this conversation is about leaf {leaf.id}, not {leaf_id}."
             if leaf.kind == "passage" and document and not test_id and not check:
@@ -355,10 +434,12 @@ class Imp:
                      if n.id != leaf.id and n.status not in FINISHED
                      and target_symbol(n.description) == symbol), None)
 
-    def _finish_leaf(self, leaf_id: int) -> None:
+    def _finish_leaf(self, leaf_id: int, evidence_hash: Optional[str] = None) -> None:
         with get_session(self.engine) as db:
             row = db.get(Leaf, leaf_id)
             row.status, row.ended_at, row.fix_note = LeafStatus.DONE, utcnow(), None
+            if evidence_hash:
+                row.evidence_hash = evidence_hash
             row.checkpoint = checkpoint(self.root, self.session_id, f"leaf {leaf_id}: {row.description}")                 or row.checkpoint
             db.add(row)
             db.commit()
@@ -383,7 +464,9 @@ class Imp:
                              files=leaf.files or [], path=path_of(by_id, leaf), reason=" ".join(why),
                              notes=leaf.notes or "",
                              references=references_text(self.engine, self.session_id, leaf.references),
-                             finish=f"mark_leaf_done({leaf.id}, summary, test_id=... or check=...)")
+                             cases=leaf.cases or [],
+                             finish=f"mark_leaf_done({leaf.id}, summary"
+                                    + (")" if leaf.kind == "compare" else ", test_id=... or check=...)"))
         return self._episode(anchor, dev_prompt(leaf.kind, leaf.description), self._mark_leaf_done(leaf), "leaf",
                              task=title)
 
@@ -394,7 +477,7 @@ class Imp:
         and a command captured at the start kept failing after the real
         run's Dev had corrected it, until the episode hit its turn cap."""
         def mark_leaf_done(leaf_id: int = 0, summary: str = "", test_id: Optional[str] = None,
-                           check: Optional[str] = None) -> str:
+                           check: Optional[str] = None, accept_difference: str = "") -> str:
             row = self._runbook(entry) if entry else None
             if row is None:
                 return "Done."
@@ -415,6 +498,7 @@ class Imp:
                 **make_runbook_tools(self.engine, self.session_id, "dev"),
                 **make_design_tools(self.engine, self.session_id, "dev"),
                 **make_code_tools(self.root),
+                **make_evidence_tools(self.engine, self.session_id, self.root, "dev"),
                 "add_reviewer_note": lambda text: add_reviewer_note(self.engine, self.session_id, f"Dev: {text}"),
                 "mark_leaf_done": finish_tool}
         system = build_system_message(anchor, prompt, [runbook_index(self.engine, self.session_id),

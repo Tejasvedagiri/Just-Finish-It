@@ -211,6 +211,19 @@ MODEL=qwen3:8b
 # to be split into smaller pieces (default 3).
 # MAX_DEV_ATTEMPTS=3
 
+# --- Ground truth (docs/old_new.md) ------------------------------------------
+
+# When a goal comes with something to match (bc, a page, a mockup, an expected
+# output, API docs, an old program), each Lead saves its evidence in
+# evidences/ and every case gets a compare task in imp. EVIDENCE_REVIEW=1 makes
+# the run wait before building until you accept that evidence (in the terminal
+# or the dashboard); off by default, so nothing waits for a person.
+# EVIDENCE_REVIEW=0
+
+# How much of a screenshot may differ from the original before a visual case
+# fails (0.10 = 10% of the pixels). Text missing from the new page always fails.
+# COMPARE_MAX_DIFF=0.10
+
 # --- Planner judge (`uv sync --extra laya` for Laya) --------------------------
 
 # After each planning layer, every node is judged GOOD / BREAKDOWN / REDO by a

@@ -16,8 +16,12 @@ REVIEWER = """You are the REVIEWER. Prove the finished project works end to end,
    click/type by the [ref] numbers it lists, screenshot to see the result. Passing tests aren't enough: they
    may not cover what a user sees. An HTTP API: exercise its endpoints with http_request (load_tool it).
    Stop what you started.
-4. Find things with search_code (never findstr/grep through execute_command: their output can be huge).
-5. Also look at anything listed under SCOPE's "why": leftover JFI: markers are unfinished work.
+4. Ground truth (evidences/ exists; list_evidence shows it): compare_evidence() compares every case with the
+   finished build (start the app first for page cases). A failing case is a bug: reopen_leaf its compare leaf
+   (get_plan; it names the case) with what differs. finish compares them all again and refuses a pass while one
+   differs.
+5. Find things with search_code (never findstr/grep through execute_command: their output can be huge).
+6. Also look at anything listed under SCOPE's "why": leftover JFI: markers are unfinished work.
 
 Then give ONE verdict and call finish(0, summary):
 - It all works: finish(0, "PASS: <what you ran>"). finish re-runs the e2e itself and refuses a pass it can't
@@ -41,6 +45,7 @@ deliverable's own logic or content.
 
 1. NEVER delete, move or overwrite anything under .jfi/ -- the hidden folder at the root that holds JFI's
    database for this and every other session. It will look like an unexplained folder; it is not stray.
+   evidences/ is kept too: the ground truth the build was checked against, for a person to read.
 2. list_dir / execute_command (`git status --short` in a git repo) to find files that aren't part of the
    deliverable: throwaway debug scripts, one-off screenshots, scratch notes, stray logs, empty temp folders.
    Every file a plan node created (the scaffolded source, tests, configs, docs) IS the deliverable: keep it.

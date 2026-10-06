@@ -26,6 +26,7 @@ import os
 import re
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +50,7 @@ from JFI.planner.nodes import (
 from JFI.planner.prompts import ROLE_PROMPTS
 from JFI.tool.code_tools import make_code_tools
 from JFI.tool.design_tools import design_index, make_design_tools, references_text
+from JFI.tool.evidence_tools import make_evidence_tools, read_evidence
 from JFI.tool.note_tools import add_reviewer_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.runbook_tools import make_runbook_tools, runbook_index
@@ -71,8 +73,32 @@ ARCHITECT_CONTINUATIONS = 2
 REQUIRED_RUNBOOK = ("setup", "run", "test", "test_one", "build", "e2e", "script", "entry", "src_dir", "test_dir",
                     "test_naming")
 _PATH = re.compile(r"[\w./\\-]+\.\w+")
+# What says a goal comes with a ground truth to match (docs/old_new.md). The
+# Architect's finish then wants a reference entry -- or an assumption saying
+# there is none, so a false hit costs one line, not a stuck plan.
+_THING = r"(https?://\S+|[\w./-]+\.(html?|png|jpe?g|svg|pdf|csv|json|sh|py|js|sql)\b|the (old|original|existing|legacy|current)\b|database\b)"
+# Each phrase only counts when it points at something concrete: the benchmark
+# goals' own prose ("make it look like a real pricing page", "the expected
+# values" of a return dict) must not read as a ground truth.
+_GROUND_TRUTH_WORDS = re.compile(
+    r"\b(compare|check|verify|validate|test)\b[^.\n]{0,40}\b(with|against)\b|\bground[- ]truth\b|\bgolden\b|"
+    r"\bpixel[- ]perfect\b|figma\.com/|\b(looks?|match(es)?|same as)\b[^\n]{0,20}?" + _THING + "|"
+    r"\b(convert|turn|rebuild|migrate|rewrite|reimplement|re-implement|port)\b[^\n]{0,60}?" + _THING, re.I)
+_REFERENCE_FILE = re.compile(r"\.(png|jpe?g|svg|pdf|webp|gif)$|expected|golden", re.I)
 GOAL_MAX_CHARS = 16_000  # ~4k tokens, a small share of an episode on a 32k window
 FEEDBACK_MAX_CHARS = 12_000
+
+
+def ground_truth_hint(goal: str, root: Path) -> Optional[str]:
+    """Why the goal looks like it names something the build must match, or None."""
+    match = _GROUND_TRUTH_WORDS.search(goal or "")
+    if match:
+        return f'the goal says "{match.group(0).strip()}"'
+    for path in _PATH.findall(goal or ""):
+        rel = repo_path(path)
+        if _REFERENCE_FILE.search(rel) and (Path(root) / rel).is_file():
+            return f"the goal names {rel}"
+    return None
 
 
 def redo_cap() -> int:
@@ -386,15 +412,16 @@ class Planner:
                                  files=node.files or [], path=path_of(by_id, node),
                                  finish=f"{ROLE_FINISH_TOOL[role]}({node.id}, summary)", reason=reason,
                                  notes=node.notes or "",
-                                 references=references_text(self.engine, self.session_id, node.references))
+                                 references=references_text(self.engine, self.session_id, node.references),
+                                 cases=node.cases or [])
         scope_id = node.id if node is not None else None
         impl = {**self.pool_tools(role),
-                **self._locked(make_node_tools(self.engine, self.session_id, role, scope_id)),
+                **self._locked(make_node_tools(self.engine, self.session_id, role, scope_id, self.root)),
                 **self._locked(make_runbook_tools(self.engine, self.session_id, role)),
                 **self._locked(make_design_tools(self.engine, self.session_id, role)),
                 **make_code_tools(self.root),
-                "finish": self._architect_finish(anchor) if role == "architect" and node is None
-                else make_finish(anchor)}
+                **make_evidence_tools(self.engine, self.session_id, self.root, role),
+                "finish": self._finish(anchor, role, mode, node)}
         system = build_system_message(anchor, ROLE_PROMPTS[(role, mode)],
                                       [runbook_index(self.engine, self.session_id),
                                        design_index(self.engine, self.session_id)])
@@ -412,6 +439,82 @@ class Planner:
                     return fn(*args, **kwargs)
             return call
         return {name: guard(fn) for name, fn in tools.items()}
+
+    def _finish(self, anchor: ScopeAnchor, role: str, mode: str, node: Optional[Leaf]):
+        if role == "architect" and node is None:
+            return self._architect_finish(anchor)
+        if mode == "breakdown" and role == "lead" and any(str(r).startswith("reference:")
+                                                           for r in node.references or []):
+            return self._lead_finish(anchor, node)
+        if mode == "breakdown" and role == "task" and node.cases:
+            return self._task_finish(anchor, node)
+        return make_finish(anchor)
+
+    def _lead_finish(self, anchor: ScopeAnchor, component: Leaf):
+        """A component that rebuilds part of a ground truth leaves the Lead
+        with its cases on its files and their evidence captured."""
+        plain = make_finish(anchor)
+
+        def finish(node_id: int = 0, summary: str = "") -> str:
+            files = children_of(load_nodes(self.engine, self.session_id), component.id)
+            cases = [c for f in files for c in (f.cases or [])]
+            refs = ", ".join(r for r in component.references or [] if str(r).startswith("reference:"))
+            if not cases:
+                return (f"Error: not finished yet. This component rebuilds part of {refs}: name the cases its files "
+                        f"must match (cases=[...] on each file node, update_node for ones you added) and "
+                        f"capture_evidence each one.")
+            missing = [c for c in cases if read_evidence(self.root, c) is None]
+            if missing:
+                return (f"Error: not finished yet. No evidence for {', '.join(missing)}: capture_evidence each "
+                        f"one (it runs the ground truth for you).")
+            return plain(node_id, summary)
+        return finish
+
+    def _task_finish(self, anchor: ScopeAnchor, file_node: Leaf):
+        """Every case of the file is checked by exactly one compare leaf."""
+        plain = make_finish(anchor)
+
+        def finish(node_id: int = 0, summary: str = "") -> str:
+            leaves = children_of(load_nodes(self.engine, self.session_id), file_node.id)
+            checked = Counter(c for leaf in leaves if leaf.kind == "compare" for c in (leaf.cases or []))
+            unchecked = [c for c in file_node.cases if not checked[c]]
+            doubled = [c for c, n in checked.items() if n > 1]
+            if unchecked:
+                return (f"Error: not finished yet. Case(s) {', '.join(unchecked)} have no compare leaf: add_node "
+                        f"kind=\"compare\", cases=[<case>], depends_on=[<the leaf that builds it>], after that leaf.")
+            if doubled:
+                return f"Error: case(s) {', '.join(doubled)} are checked by more than one compare leaf; keep one."
+            return plain(node_id, summary)
+        return finish
+
+    def _reference_problems(self, nodes: List[Leaf], runbook: dict) -> List[str]:
+        """The Architect's part of the ground truth (docs/old_new.md)."""
+        with get_session(self.engine) as db:
+            design = list(db.exec(select(DesignEntry).where(DesignEntry.session_id == self.session_id,
+                                                            DesignEntry.kind.in_(("reference", "assumption")))))
+        references = [d for d in design if d.kind == "reference"]
+        hint = ground_truth_hint(self.goal, self.root)
+        if hint and not references and not any(d.key == "no_ground_truth" for d in design):
+            return [f'the ground truth ({hint}): design_set("reference", "<key>", "visual: <the page, mockup or '
+                    f'image>; must match / may differ" or "behavioural: <the command, docs, expected output or old '
+                    f'program>; must match / may differ"), or, if the goal has none, design_set("assumption", '
+                    f'"no_ground_truth", "<why>")']
+        missing = []
+        cited = {str(r) for n in nodes if n.level == "architect" for r in (n.references or [])}
+        for ref in references:
+            if not re.match(r"\s*(visual|behaviou?ral)\b", ref.text, re.I):
+                missing.append(f'reference {ref.key}\'s text to start with "visual:" or "behavioural:"')
+            if f"reference:{ref.key}" not in cited:
+                missing.append(f"a component citing reference:{ref.key} in its references (and saying in its notes "
+                               f"which part of it that component rebuilds)")
+        if any(re.match(r"\s*behaviou?ral\b", r.text, re.I) for r in references):
+            for name, what in (("evidence_one", "how to get the ground truth's answer for one input"),
+                               ("compare_one", "how to run the NEW code on one input")):
+                if name not in runbook:
+                    missing.append(f"runbook entry {name}: {what}, with {{input}} or {{input_file}}")
+                elif "{input" not in runbook[name]:
+                    missing.append(f"an {{input}} or {{input_file}} placeholder in {name}'s command")
+        return missing
 
     def _architect_finish(self, anchor: ScopeAnchor):
         """The Architect's finish refuses until the base it owns is complete:
@@ -455,6 +558,7 @@ class Planner:
             nodes = load_nodes(self.engine, self.session_id)
             if "entry" in runbook:
                 missing += self._entry_problems(runbook["entry"], nodes)
+            missing += self._reference_problems(nodes, runbook)
             top_level = [n for n in nodes if n.parent_id is None]
             if len(top_level) >= 3 and not contracts:
                 # Observed on the stui run: 16 components and no contract, so

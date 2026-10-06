@@ -49,6 +49,22 @@ refused with the template and its example id.
 Two turns before the turn cap the episode is told so (`TURNS_LEFT_WARNING` in
 `episode/engine.py`), the way the token budget already warned.
 
+A **`compare` leaf** ([`old_new.md`](old_new.md)) has its own prompt and gate:
+Dev runs `compare_evidence(case)` (the new code on the evidence's inputs
+through the runbook's `compare_one`, or the new app screenshotted in the
+case's state), fixes the code, and `mark_leaf_done` compares again itself; it
+is done only when every case matches. A remaining *visual* difference can be
+accepted with `accept_difference="<why>"`, which goes to the reviewer notes.
+Evidence that changes during the episode is refused (the evidence is the
+ground truth; Dev fixes the code). A passed compare leaf whose evidence is
+later edited or re-captured is re-queued (`_requeue_changed_evidence`, by the
+`evidence_hash` it passed against). A compare leaf that runs out of attempts is
+skipped with a reviewer note, never split.
+
+With `EVIDENCE_REVIEW=1` (off by default) imp first waits for a person to
+accept the evidence (`runner._evidence_review`), and asks again only when it
+changed since.
+
 ## Git checkpoints (`tool/checkpoint_tools.py`)
 
 When `mark_leaf_done` passes, the project is committed to a private repository,

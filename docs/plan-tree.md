@@ -31,6 +31,10 @@ markdown `render_plan_markdown` renders for the dashboards.
   The judge reads the description only.
 - **`checkpoint`**: the git commit taken when the leaf passed
   (`tool/checkpoint_tools.py`).
+- **`cases`** ([`old_new.md`](old_new.md)): on a Lead file node, the
+  ground-truth cases its file must match; on a `compare` leaf, the cases it
+  checks (evidence in `evidences/<case>.*`). **`evidence_hash`**: the evidence a
+  compare leaf passed against, so an edit or re-capture re-queues it.
 - **Order:** siblings sort by a gap-numbered `sort_key` (10, 20, 30…).
 - **Numbers like `1.2.3` are computed** (`display_number`) and never
   stored. Nothing ever renumbers anything.

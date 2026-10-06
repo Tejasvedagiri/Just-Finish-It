@@ -15,6 +15,7 @@ from JFI.tool.browser_session import BROWSER_TOOL_SCHEMA
 from JFI.tool.checkpoint_tools import CHECKPOINT_TOOL_SCHEMAS
 from JFI.tool.code_tools import CODE_TOOL_SCHEMAS
 from JFI.tool.design_tools import DESIGN_TOOL_SCHEMAS
+from JFI.tool.evidence_tools import EVIDENCE_TOOL_SCHEMAS
 from JFI.tool.runbook_tools import RUNBOOK_TOOL_SCHEMAS
 from JFI.tool.schemas import TOOL_SCHEMAS
 
@@ -31,7 +32,7 @@ FINISH_SCHEMA = {"type": "function", "function": {
 
 def _known_schemas(extra: Sequence[dict]) -> Dict[str, dict]:
     schemas = {t["function"]["name"]: t for t in TOOL_SCHEMAS}
-    for t in [*RUNBOOK_TOOL_SCHEMAS, *DESIGN_TOOL_SCHEMAS, *CODE_TOOL_SCHEMAS, *NODE_TOOL_SCHEMAS, *CHECKPOINT_TOOL_SCHEMAS,
+    for t in [*RUNBOOK_TOOL_SCHEMAS, *DESIGN_TOOL_SCHEMAS, *EVIDENCE_TOOL_SCHEMAS, *CODE_TOOL_SCHEMAS, *NODE_TOOL_SCHEMAS, *CHECKPOINT_TOOL_SCHEMAS,
               BROWSER_TOOL_SCHEMA, FINISH_SCHEMA,
               *extra]:
         schemas[t["function"]["name"]] = t

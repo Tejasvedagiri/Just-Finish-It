@@ -32,6 +32,7 @@ from JFI.planner.nodes import load_nodes
 from JFI.review.prompts import CLEANUP, REVIEW_CONTINUE, REVIEWER
 from JFI.tool.checkpoint_tools import make_checkpoint_tools, revert_leaf
 from JFI.tool.code_tools import list_dir, read_file_range, scan_markers, search_code
+from JFI.tool.evidence_tools import compare_cases, list_cases, make_evidence_tools, read_evidence
 from JFI.tool.note_tools import REVIEW_REPORT, get_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.result_cap import cap_result
@@ -104,6 +105,7 @@ class Reviewer:
                 "search_code": lambda pattern, path=".", regex=False: search_code(self.root, pattern, path, regex),
                 "list_dir": lambda path=".": list_dir(self.root, path),
                 **make_checkpoint_tools(self.engine, self.session_id, self.root),
+                **make_evidence_tools(self.engine, self.session_id, self.root, "reviewer"),
                 "reopen_leaf": self._reopen_leaf(reopened),
                 "finish": self._finish(reopened, report_before)}
         system = build_system_message(anchor, REVIEWER, [runbook_index(self.engine, self.session_id)])
@@ -149,10 +151,34 @@ class Reviewer:
             return f"Reopened leaf {leaf.id} ({leaf.description}) for Dev with your fix note.{reverted}"
         return reopen_leaf
 
+    def _evidence_check(self) -> tuple[Optional[str], str]:
+        """(a refusal, or None; a note for the pass). Every ground-truth case
+        is compared again over the finished build: a later leaf can break
+        what an earlier compare leaf checked."""
+        cases = list_cases(self.root)
+        if not cases:
+            return None, ""
+        results = compare_cases(self.engine, self.session_id, self.root, cases)
+        bad = [r for r in results if not r.ok]
+        unverified = [c for c in cases if getattr(read_evidence(self.root, c), "unverified", False)]
+        note = (f" Checked against generated (LLM, not verified) evidence only: {', '.join(unverified)}."
+                if unverified else "")
+        if not bad:
+            return None, f" All {len(results)} ground-truth case(s) match their evidence.{note}"
+        owners = {c: n.id for n in dev_leaves(load_nodes(self.engine, self.session_id))
+                  if n.kind == "compare" for c in (n.cases or [])}
+        lines = [f"- {r.case} (compare leaf {owners.get(r.case, '?')}):\n{r.report}" for r in bad]
+        return (cap_result("Error: not a pass -- the build doesn't match its ground truth. reopen_leaf the compare "
+                           "leaf of each failing case (or the leaf whose code is wrong) with what differs:\n"
+                           + "\n".join(lines), "Only the end of the output is shown."), note)
+
     def _finish(self, reopened: List[int], report_before: Optional[str]):
         def finish(node_id: int = 0, summary: str = "") -> str:
             if reopened or get_note(self.engine, self.session_id, REVIEW_REPORT) not in (None, report_before):
                 return "Review finished: the problems are routed."
+            refusal, evidence_note = self._evidence_check()
+            if refusal:
+                return refusal
             e2e = self._runbook("e2e")
             if e2e is None and self._is_document():
                 # A document goal (G4) has no command to run: the mechanical
@@ -162,7 +188,7 @@ class Reviewer:
                     return ("Error: not a pass -- placeholders are left: "
                             + "; ".join(f"{p}:{no} {m}" for p, no, m in left[:20])
                             + ". reopen_leaf the passages they belong to.")
-                return "PASS confirmed: no placeholder is left in the document."
+                return "PASS confirmed: no placeholder is left in the document." + evidence_note
             if e2e is None:
                 return ("Error: the runbook has no e2e entry, so a pass can't be confirmed. Report it with "
                         "write_review_report as not checked, then finish.")
@@ -172,7 +198,7 @@ class Reviewer:
                                   f"reopen_leaf for a bug in built code, write_review_report for missing work.\n"
                                   f"{output}", "Only the end of the output is shown.")
             runbook_set(self.engine, self.session_id, "e2e", e2e.command, e2e.notes, True, "reviewer")
-            return f"PASS confirmed: `{e2e.command}` passed."
+            return f"PASS confirmed: `{e2e.command}` passed." + evidence_note
         return finish
 
     def _mark_passed(self) -> None:

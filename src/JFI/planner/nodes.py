@@ -14,12 +14,14 @@ Rules enforced here, in code, not just in prompts:
 import html
 import os
 import re
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
 from sqlmodel import select
 
 from JFI.models import Leaf, Phase, PlanEvent, RunbookEntry, get_session
 from JFI.models.enums import LeafStatus
+from JFI.tool.evidence_tools import case_problem, read_evidence
 from JFI.tool.result_cap import cap_result
 
 GOOD, BREAKDOWN, REDO = "GOOD", "BREAKDOWN", "REDO"
@@ -117,6 +119,8 @@ def render_node(node: Leaf) -> str:
         bits.append(f"files: {', '.join(node.files)}")
     if node.depends_on:
         bits.append(f"depends_on: {node.depends_on}")
+    if node.cases:
+        bits.append(f"cases: {', '.join(node.cases)}")
     bits.append(f"status: {node.plan_status or 'unjudged'}" + (f" ({node.redo_reason})" if node.redo_reason else ""))
     return "\n  ".join(bits)
 
@@ -168,7 +172,7 @@ def _file_owner(nodes: Sequence[Leaf], files: Sequence[str]) -> Optional[Leaf]:
 # ------------------------------------------------------------------ writes
 
 KINDS = ("project", "component", "code", "artifact", "section", "implement", "integrate", "modify", "delete",
-         "fill", "passage")
+         "fill", "passage", "compare")
 
 
 def _normalise_kind(kind: Optional[str]) -> Optional[str]:
@@ -268,10 +272,54 @@ def _test_path_problem(engine, session_id: str, files: Sequence[str]) -> Optiona
             f"runbook's test_dir and test_naming give.")
 
 
+def _normalise_cases(cases: Sequence[str]) -> tuple[list, Optional[str]]:
+    names = [str(c).strip().lower() for c in (cases or []) if str(c).strip()]
+    for name in names:
+        problem = case_problem(name)
+        if problem:
+            return [], problem
+    return list(dict.fromkeys(names)), None
+
+
+def _cases_problem(nodes: Sequence[Leaf], role: str, scope_id: Optional[int], node_id: Optional[int], kind: Optional[str],
+                   cases: Sequence[str], depends_on: Sequence[int], root: Optional[Path]) -> Optional[str]:
+    """The ground-truth rules (docs/old_new.md), checked here rather than
+    trusted to the prompt: a Lead's case is on one file node only; a compare
+    leaf names cases whose evidence exists, that its file node owns, and
+    comes after the leaf that builds them."""
+    if kind == "compare":
+        if not cases:
+            return ("Error: a compare leaf needs cases=[...]: the case(s) it checks, each with its evidence in "
+                    "evidences/<case>.*.")
+        if not depends_on:
+            return ("Error: a compare leaf needs depends_on=[<the leaf that builds what it checks>]: it runs "
+                    "after that leaf.")
+        if root is not None:
+            missing = [c for c in cases if read_evidence(root, c) is None]
+            if missing:
+                return (f"Error: no evidence for {', '.join(missing)} in evidences/. A compare leaf checks evidence "
+                        f"the Lead captured; list_evidence shows what exists.")
+        scope = next((n for n in nodes if n.id == scope_id), None)
+        if role == "task" and scope is not None and scope.cases:
+            foreign = [c for c in cases if c not in scope.cases]
+            if foreign:
+                return (f"Error: {', '.join(foreign)} isn't one of this file's cases ({', '.join(scope.cases)}). "
+                        f"Only check the cases in SCOPE.")
+    elif cases and role == "lead":
+        taken = {c: n.id for n in nodes if n.level == "lead" and n.id != node_id for c in (n.cases or [])}
+        clash = [c for c in cases if c in taken]
+        if clash:
+            return (f"Error: case {clash[0]} is already on node {taken[clash[0]]}. A case belongs to one file: the "
+                    f"file whose code produces it.")
+    elif cases and role != "lead":
+        return "Error: only the Lead puts cases on a file node, and only Task's compare leaves check them."
+    return None
+
+
 def add_node(engine, session_id: str, role: str, scope_id: Optional[int], description: str,
              done_when: str = "", files: Sequence[str] = (), depends_on: Sequence[int] = (),
              kind: Optional[str] = None, parent_id: Optional[int] = None, notes: str = "",
-             references: Sequence[str] = ()) -> str:
+             references: Sequence[str] = (), cases: Sequence[str] = (), root: Optional[Path] = None) -> str:
     description, done_when, notes = _plain(description), _plain(done_when), _plain(notes)
     if not description:
         return "Error: a node needs a description."
@@ -303,6 +351,10 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
     missing = [d for d in depends_on if d not in by_id]
     if missing:
         return _unknown_ids(nodes, parent_id, missing)
+    cases, problem = _normalise_cases(cases)
+    problem = problem or _cases_problem(nodes, role, scope_id, None, kind, cases, depends_on, root)
+    if problem:
+        return problem
     test_problem = _test_path_problem(engine, session_id, files)
     if test_problem:
         return test_problem
@@ -322,7 +374,7 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
         node = Leaf(session_id=session_id, parent_id=parent_id, phase=Phase.IMP, sort_key=sort_key,
                     description=description, level=role, kind=kind, done_when=done_when or None,
                     notes=notes or None, references=list(references) or None,
-                    files=list(files) or None, depends_on=list(depends_on) or None)
+                    files=list(files) or None, depends_on=list(depends_on) or None, cases=cases or None)
         db.add(node)
         db.commit()
         db.refresh(node)
@@ -332,7 +384,8 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
 def update_node(engine, session_id: str, role: str, node_id: int, description: Optional[str] = None,
                 done_when: Optional[str] = None, files: Optional[Sequence[str]] = None,
                 depends_on: Optional[Sequence[int]] = None, kind: Optional[str] = None,
-                notes: Optional[str] = None, references: Optional[Sequence[str]] = None) -> str:
+                notes: Optional[str] = None, references: Optional[Sequence[str]] = None,
+                cases: Optional[Sequence[str]] = None, root: Optional[Path] = None) -> str:
     nodes = load_nodes(engine, session_id)
     by_id = {n.id: n for n in nodes}
     node = by_id.get(node_id)
@@ -360,6 +413,13 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
         test_problem = _test_path_problem(engine, session_id, files)
         if test_problem:
             return test_problem
+    if cases is not None:
+        cases, problem = _normalise_cases(cases)
+        problem = problem or _cases_problem(
+            nodes, role, node.parent_id if role == "task" else None, node_id, _normalise_kind(kind) or node.kind,
+            cases, depends_on if depends_on is not None else (node.depends_on or []), root)
+        if problem:
+            return problem
     with get_session(engine) as db:
         row = db.get(Leaf, node_id)
         if description is not None:
@@ -374,6 +434,8 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
             row.files = list(files) or None
         if depends_on is not None:
             row.depends_on = list(depends_on) or None
+        if cases is not None:
+            row.cases = list(cases) or None
         if _normalise_kind(kind) is not None:
             row.kind = _normalise_kind(kind)
         row.plan_status = None  # rewritten -> re-judged
@@ -475,14 +537,16 @@ def render_plan(engine, session_id: str) -> str:
 
 # ------------------------------------------------------------------ tool binding + schemas
 
-def make_node_tools(engine, session_id: str, role: str, scope_id: Optional[int]) -> Dict[str, Callable]:
+def make_node_tools(engine, session_id: str, role: str, scope_id: Optional[int],
+                    root: Optional[Path] = None) -> Dict[str, Callable]:
     return {
         "add_node": lambda description, done_when="", files=(), depends_on=(), kind=None, parent_id=None,
-        notes="", references=(): add_node(engine, session_id, role, scope_id, description, done_when, files,
-                                          depends_on, kind, parent_id, notes, references),
+        notes="", references=(), cases=(): add_node(engine, session_id, role, scope_id, description, done_when, files,
+                                                    depends_on, kind, parent_id, notes, references, cases, root),
         "update_node": lambda node_id, description=None, done_when=None, files=None, depends_on=None, kind=None,
-        notes=None, references=None: update_node(engine, session_id, role, node_id, description, done_when, files,
-                                                 depends_on, kind, notes, references),
+        notes=None, references=None, cases=None: update_node(engine, session_id, role, node_id, description,
+                                                             done_when, files, depends_on, kind, notes, references,
+                                                             cases, root),
         "delete_node": lambda node_id: delete_node(engine, session_id, role, node_id),
         "get_node": lambda node_id: get_node(engine, session_id, node_id),
         "list_nodes": lambda parent_id=None: list_nodes(engine, session_id, parent_id),
@@ -510,7 +574,10 @@ _FIELDS = {
     "files": {"type": "array", "items": {"type": "string"}, "description": "files it creates/changes + test file"},
     "depends_on": {"type": "array", "items": {"type": "integer"}, "description": "node ids that must be done first"},
     "kind": {"type": "string", "description": "ONE word. Architect: component or project. Lead: code or artifact. "
-                                              "Task: implement, integrate, modify, delete or fill."},
+                                              "Task: implement, integrate, modify, delete, fill or compare."},
+    "cases": {"type": "array", "items": {"type": "string"},
+              "description": "ground-truth cases (evidence in evidences/<case>.*). Lead: the cases this file's code "
+                             "must match. Task, on a compare leaf: the case(s) it checks"},
 }
 NODE_TOOL_SCHEMAS = [
     _fn("add_node", "Add a plan node. Architect adds top-level nodes; Lead and Task add nodes under the node "

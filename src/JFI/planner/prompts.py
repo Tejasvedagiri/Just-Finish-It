@@ -20,7 +20,8 @@ RULES = """RULES FOR EVERY NODE YOU WRITE
   A missing or non-numeric amount skips that line with a warning instead of stopping the load. Use the standard
   csv module (no pandas); don't touch report.py."
 - Every node is work that changes a file. Running the tests or checking that it all works is never a node: that
-  is the runbook's test and e2e.
+  is the runbook's test and e2e. The one exception is Task's kind="compare" leaf, which checks a case against
+  its ground-truth evidence (below).
 - Before you finish, check: no operational steps, every node has done_when (and files, below the Architect)."""
 
 ARCHITECT_CREATE = f"""You are the ARCHITECT. You decide the base and design of the app for the goal in SCOPE, and list
@@ -66,6 +67,18 @@ that isn't a node never gets built. You have a limited number of turns, so make 
    A runbook or design that already has entries was carried over from this project's last session: runbook_get
    and design_get them first, keep what still fits this goal and correct the rest.
 6. Record assumptions and anything deliberately out of scope with design_set.
+   GROUND TRUTH: when the goal comes with something the build must match -- a command (bc, curl, nvidia-smi), a
+   page, a mockup or screenshot, an input file with its expected output, API docs, an old program or database --
+   find it (the goal, the project's files, commands on PATH) and probe it with execute_command (run bc on 1 + 1,
+   curl one endpoint) to see how it behaves. Then design_set("reference", "<key>", "visual: <page/mockup/image>"
+   or "behavioural: <command/docs/expected output/old program>", then what must match and what may differ (e.g.
+   4 vs 4.0, trailing zeros, error wording, sample data)). Each component that rebuilds part of it cites
+   "reference:<key>" in its references and says in its notes which part. Behavioural: runbook_set "evidence_one"
+   (the ground truth's answer for one input) and "compare_one" (the NEW code on the same input), each with
+   {{input}} or {{input_file}} (a file holding the input; the safe choice for anything with quotes). They run in a
+   POSIX sh: no <<<. E.g. evidence_one = "{{ echo scale=10; cat {{input_file}}; }} | bc -l", compare_one =
+   "{{ cat {{input_file}}; echo exit; }} | python3 main.py". Don't list cases or capture anything: that's the Lead's.
+   No ground truth after all: design_set("assumption", "no_ground_truth", "<why>").
 7. List every deliverable the goal names -- files, docs (e.g. a README), tests, commands -- and check each is
    produced by some component (docs usually go under the "project" component). On the first real run a
    required README.md was never planned and the review failed on it. Then call finish.
@@ -117,6 +130,12 @@ this component; the design (design_get) and runbook tell you how it connects to 
    notes = what Task must know that the stubs don't say, references = where to look (design entries as
    kind:key, e.g. contract:main->calc; source ranges, e.g. page.html L1376-1402). Order them
    with depends_on (the manifest first; a file before the files that import it).
+   GROUND TRUTH (your node cites reference:<key>): name the cases its part needs -- one per operator, endpoint
+   example, screen state or output column, plus the error cases -- and put each on the file node whose code
+   produces it (cases=["add", "divide_by_zero"]). For each, capture_evidence: choose the inputs (1 + 1,
+   2.5 + 0.25, -3 + 10), or url + new_url (+ steps) for a page state, image + new_url for a mockup, sql for a
+   query; it runs the ground truth and saves evidences/<case>.*. Never type the answers yourself: answers= is
+   the last resort, saved as not verified. finish checks every case has its evidence.
 5. If this component can't be done within the design (a missing contract, it belongs elsewhere), call escalate
    with the reason instead. Then call finish.
 A document section (kind="section"; the design has an outline): scaffold its .md file with the heading as the
@@ -142,6 +161,10 @@ markers first (outline_file or list_symbols, then read_symbol); they are your br
    copy is one leaf whatever its size -- Dev copies it with copy_lines -- so name the exact source range: "copy
    L341-957 of portfolio.html into index.html"; split only where the copied text needs editing.
 4. Order leaves with depends_on: helpers before callers, implement before integrate.
+   CASES in SCOPE (ground truth): after the leaf that builds a case, add one compare leaf for it: add_node
+   "compare <what> with evidences/<case>", kind="compare", cases=["<case>"], files=[the source file],
+   depends_on=[that leaf], done_when="compare_evidence <case> matches". An implement leaf's done_when test case
+   uses an input and answer from the evidence (read evidences/<case>.txt), never your own arithmetic.
 5. Reuse before inventing: if an existing function already does it, say "reuse x()" instead. If the file doesn't
    fit the design, call escalate. Then call finish.
 A document file (.md with "JFI: passage" fill lines): one kind="passage" leaf per fill line, "write the <topic>

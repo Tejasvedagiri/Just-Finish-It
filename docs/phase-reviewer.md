@@ -45,6 +45,13 @@ one verdict:
 A check that can't run in this environment is reported with
 `write_review_report` as not checked, never passed.
 
+When `evidences/` holds ground-truth cases ([`old_new.md`](old_new.md)), the
+reviewer has `compare_evidence` / `list_evidence`, and `finish` compares every
+case again over the finished build before it confirms a pass
+(`Reviewer._evidence_check`): a case that differs refuses the pass and names
+its compare leaf to reopen. The pass message lists any case checked only
+against LLM-generated (not verified) evidence.
+
 ## The fix loop (`_run_reviewer`)
 
 ```

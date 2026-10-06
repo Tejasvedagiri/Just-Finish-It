@@ -77,7 +77,7 @@ class Leaf(SQLModel, table=True):
     # breaks it down (next layer) and who redoes it (the same role).
     level: Optional[str] = Field(default=None, index=True)
     # component: "component"/"project"; file: "code"/"artifact"/"section";
-    # leaf: "implement"/"modify"/"delete"/"fill"/"passage".
+    # leaf: "implement"/"modify"/"delete"/"fill"/"passage"/"compare".
     kind: Optional[str] = None
     # The planning status Laya (or its fallback) sets: NULL = unjudged,
     # "GOOD" / "BREAKDOWN" / "REDO". Separate from `status` (Dev's progress).
@@ -110,6 +110,13 @@ class Leaf(SQLModel, table=True):
     reopened_count: int = Field(default=0)
     # The git checkpoint taken when the leaf passed (JFI.tool.checkpoint_tools).
     checkpoint: Optional[str] = None
+    # Ground-truth cases (docs/old_new.md): on a Lead file node, the cases its
+    # file must match; on a compare leaf, the cases it checks. Each case has
+    # its evidence in evidences/<case>.*.
+    cases: Optional[list[str]] = Field(default=None, sa_column=Column(JSON))
+    # A compare leaf's evidence fingerprint when it passed: if the evidence is
+    # edited or re-captured afterwards, the leaf is compared again.
+    evidence_hash: Optional[str] = None
 
     created_at: datetime = Field(default_factory=utcnow)
 

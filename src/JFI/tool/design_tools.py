@@ -17,7 +17,7 @@ from JFI.models import DesignEntry, get_session
 from JFI.models._util import utcnow
 from JFI.tool.result_cap import cap_result
 
-KINDS = ("stack", "component", "contract", "convention", "assumption", "out_of_scope", "outline")
+KINDS = ("stack", "component", "contract", "convention", "assumption", "out_of_scope", "outline", "reference")
 
 
 def design_set(engine, session_id: str, kind: str, key: str, text: str, role: str = "") -> str:
@@ -112,8 +112,9 @@ DESIGN_TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "design_set",
         "description": ("Add or update one design entry: the stack, a component, a contract between "
-                        "components, a convention, an assumption, something out of scope, or a document "
-                        "outline section."),
+                        "components, a convention, an assumption, something out of scope, a document "
+                        "outline section, or a reference: the ground truth the build must match (a command, "
+                        "page, mockup, expected output, API docs, old program) and what must match / may differ."),
         "parameters": {"type": "object", "properties": {
             "kind": {"type": "string", "enum": list(KINDS)},
             "key": {"type": "string", "description": "e.g. persistence, api->persistence"},
