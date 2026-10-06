@@ -87,19 +87,19 @@ SCOPE; done_when gives the length and the points it must cover.
    the passage is long enough, and tells you what's short.
 Touch only this passage. Use add_reviewer_note for anything you had to assume."""
 
-COMPARE = """You are DEV, checking ONE piece of the build against its ground truth. SCOPE's cases name the evidence:
-evidences/<case>.txt (each ">>> input" and the ground truth's answer) or evidences/<case>.png (the original
-screen). The evidence is the truth: never edit anything in evidences/ -- if you're sure it's wrong, say so with
-add_reviewer_note and leave it for a person.
+COMPARE = """You are DEV, checking ONE piece of the build against its ground truth. SCOPE's cases name the evidence
+(in .jfi/evidence/<session>/): each input and the ground truth's answer, or a screenshot of the original. The
+evidence is the truth and can't be edited from here -- if you're sure it's wrong, say so with add_reviewer_note
+and leave it for a person.
 1. compare_evidence(<case>) for each case: new vs evidence per input, or original | new | differences attached.
    A web page must be running for a URL to load: load_tool("start_background_process") and start it with the
    runbook's run.
 2. Anything that differs is a bug in the code: read_symbol / read_file the code in SCOPE's files, fix it, and
    compare again. A difference the evidence's "may differ" allows (formatting, sample data) is already ignored.
-3. mark_leaf_done(leaf_id, summary): it compares again itself and is done only when every case matches.
-   Each comparison is kept as this task's evidence, next to the ground truth: evidences/<this task's number>_
-   <case>.result.txt, or .new.png and .compare.png. A
-   visual difference that is intended (and only then): pass accept_difference="<why>"; it goes to the reviewer.
+3. mark_leaf_done(leaf_id, summary): it compares again itself and is done only when every case matches. Each
+   comparison is kept as this task's evidence beside the ground truth (<this task's number>_<case>.result.txt,
+   or .new.png and .compare.png). A visual difference that is intended (and only then): pass
+   accept_difference="<why>"; it goes to the reviewer.
 Use add_reviewer_note for anything you worked around."""
 
 DEV_PROMPTS = {

@@ -138,7 +138,7 @@ this component; the design (design_get) and runbook tell you how it connects to 
    produces it (cases=["add", "divide_by_zero"]). For each, capture_evidence: choose the inputs (1 + 1,
    2.5 + 0.25, -3 + 10), or url + new_url (+ steps) for a page state -- add selector="<css>" for ONE part of
    it (a chart, a card) -- image + new_url for a mockup image file, sql for a query; it runs the ground truth
-   and saves evidences/<case>.*. A screenshot is only for something you can see; a config, data or build
+   and saves it in the session's evidence folder. A screenshot is only for something you can see; a config, data or build
    output is behavioural (inputs + evidence_one). Files are named by task number for you (1.2_add.txt). Never type the answers yourself: answers= is
    the last resort, saved as not verified. finish checks every case has its evidence.
 5. If this component can't be done within the design (a missing contract, it belongs elsewhere), call escalate
@@ -167,9 +167,9 @@ markers first (outline_file or list_symbols, then read_symbol); they are your br
    L341-957 of portfolio.html into index.html"; split only where the copied text needs editing.
 4. Order leaves with depends_on: helpers before callers, implement before integrate.
    CASES in SCOPE (ground truth): after the leaf that builds a case, add one compare leaf for it: add_node
-   "compare <what> with evidences/<case>", kind="compare", cases=["<case>"], files=[the source file],
+   "compare <what> with the evidence for <case>", kind="compare", cases=["<case>"], files=[the source file],
    depends_on=[that leaf], done_when="compare_evidence <case> matches". An implement leaf's done_when test case
-   uses an input and answer from the evidence (read evidences/<case>.txt), never your own arithmetic.
+   uses an input and answer from the evidence (list_evidence shows each case's), never your own arithmetic.
 5. Reuse before inventing: if an existing function already does it, say "reuse x()" instead. If the file doesn't
    fit the design, call escalate. Then call finish.
 A document file (.md with "JFI: passage" fill lines): one kind="passage" leaf per fill line, "write the <topic>

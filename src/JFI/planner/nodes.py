@@ -282,7 +282,8 @@ def _normalise_cases(cases: Sequence[str]) -> tuple[list, Optional[str]]:
 
 
 def _cases_problem(nodes: Sequence[Leaf], role: str, scope_id: Optional[int], node_id: Optional[int], kind: Optional[str],
-                   cases: Sequence[str], depends_on: Sequence[int], root: Optional[Path]) -> Optional[str]:
+                   cases: Sequence[str], depends_on: Sequence[int], root: Optional[Path],
+                   session_id: str = "") -> Optional[str]:
     """The ground-truth rules (docs/old_new.md), checked here rather than
     trusted to the prompt: a Lead's case is on one file node only; a compare
     leaf names cases whose evidence exists, that its file node owns, and
@@ -290,14 +291,14 @@ def _cases_problem(nodes: Sequence[Leaf], role: str, scope_id: Optional[int], no
     if kind == "compare":
         if not cases:
             return ("Error: a compare leaf needs cases=[...]: the case(s) it checks, each with its evidence in "
-                    "evidences/<case>.*.")
+                    "the session's evidence folder.")
         if not depends_on:
             return ("Error: a compare leaf needs depends_on=[<the leaf that builds what it checks>]: it runs "
                     "after that leaf.")
         if root is not None:
-            missing = [c for c in cases if read_evidence(root, c) is None]
+            missing = [c for c in cases if read_evidence(root, session_id, c) is None]
             if missing:
-                return (f"Error: no evidence for {', '.join(missing)} in evidences/. A compare leaf checks evidence "
+                return (f"Error: no evidence for {', '.join(missing)} in the evidence folder. A compare leaf checks evidence "
                         f"the Lead captured; list_evidence shows what exists.")
         scope = next((n for n in nodes if n.id == scope_id), None)
         if role == "task" and scope is not None and scope.cases:
@@ -357,7 +358,7 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
     if missing:
         return _unknown_ids(nodes, parent_id, missing)
     cases, problem = _normalise_cases(cases)
-    problem = problem or _cases_problem(nodes, role, scope_id, None, kind, cases, depends_on, root)
+    problem = problem or _cases_problem(nodes, role, scope_id, None, kind, cases, depends_on, root, session_id)
     if problem:
         return problem
     test_problem = _test_path_problem(engine, session_id, files)
@@ -422,7 +423,7 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
         cases, problem = _normalise_cases(cases)
         problem = problem or _cases_problem(
             nodes, role, node.parent_id if role == "task" else None, node_id, _normalise_kind(kind) or node.kind,
-            cases, depends_on if depends_on is not None else (node.depends_on or []), root)
+            cases, depends_on if depends_on is not None else (node.depends_on or []), root, session_id)
         if problem:
             return problem
     with get_session(engine) as db:
@@ -581,7 +582,7 @@ _FIELDS = {
     "kind": {"type": "string", "description": "ONE word. Architect: component or project. Lead: code or artifact. "
                                               "Task: implement, integrate, modify, delete, fill or compare."},
     "cases": {"type": "array", "items": {"type": "string"},
-              "description": "ground-truth cases (evidence in evidences/<case>.*). Lead: the cases this file's code "
+              "description": "ground-truth cases (each has its evidence, captured with capture_evidence). Lead: the cases this file's code "
                              "must match. Task, on a compare leaf: the case(s) it checks"},
 }
 NODE_TOOL_SCHEMAS = [

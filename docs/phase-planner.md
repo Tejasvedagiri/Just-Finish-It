@@ -182,7 +182,7 @@ Every verdict is stored as a `PlannerVerdict` row.
 
 - Ground truth ([`old_new.md`](old_new.md)): a Lead's case sits on one file
   node only; a `compare` leaf needs `cases` whose evidence exists in
-  `evidences/`, cases its file node owns, and a `depends_on`; only the Lead
+  the session's evidence folder (`.jfi/evidence/<session>/`), cases its file node owns, and a `depends_on`; only the Lead
   puts cases on file nodes.
 
 ## Ground truth (`reference`, evidence and compare leaves)
@@ -203,7 +203,7 @@ or database), each layer adds its part, checked by its `finish`
   database", a mockup file the goal names, ...), unless the Architect records
   `assumption:no_ground_truth`. None of the benchmark goals trips it.
 - **Lead** names the cases for its files (`cases` on each file node) and
-  `capture_evidence`s each into `evidences/`; `finish` refuses a component
+  `capture_evidence`s each into `.jfi/evidence/<session>/`; `finish` refuses a component
   citing a reference with no cases or missing evidence.
 - **Task** adds, after the leaf that builds a case, a `compare` leaf for it;
   `finish` refuses a case with no compare leaf, or with two.

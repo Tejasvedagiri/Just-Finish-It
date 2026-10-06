@@ -220,7 +220,7 @@ class Imp:
         for leaf in dev_leaves(load_nodes(self.engine, self.session_id)):
             if leaf.kind != "compare" or leaf.status != LeafStatus.DONE or not leaf.evidence_hash:
                 continue
-            if evidence_hash(self.root, leaf.cases or []) == leaf.evidence_hash:
+            if evidence_hash(self.root, self.session_id, leaf.cases or []) == leaf.evidence_hash:
                 continue
             with get_session(self.engine) as db:
                 row = db.get(Leaf, leaf.id)
@@ -333,7 +333,7 @@ class Imp:
         """A compare leaf is done when the new code matches its cases'
         evidence (docs/old_new.md) -- checked here, not claimed."""
         cases = list(leaf.cases or [])
-        start_hash = evidence_hash(self.root, cases)
+        start_hash = evidence_hash(self.root, self.session_id, cases)
 
         def mark_leaf_done(leaf_id: int, summary: str = "", test_id: Optional[str] = None,
                            check: Optional[str] = None, accept_difference: str = "") -> str:
@@ -341,8 +341,8 @@ class Imp:
                 return f"Error: this conversation is about leaf {leaf.id}, not {leaf_id}."
             if not cases:
                 return "Error: this compare leaf names no case; add_reviewer_note it and stop."
-            if evidence_hash(self.root, cases) != start_hash:
-                return ("Error: evidences/ changed while you worked on this leaf. The evidence is the ground truth: "
+            if evidence_hash(self.root, self.session_id, cases) != start_hash:
+                return ("Error: the evidence changed while you worked on this leaf. The evidence is the ground truth: "
                         "put it back as it was (git checkout it, or ask in add_reviewer_note) and change the code "
                         "instead.")
             results = compare_cases(self.engine, self.session_id, self.root, cases)

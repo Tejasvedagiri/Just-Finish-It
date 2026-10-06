@@ -1,16 +1,16 @@
 """Ground-truth evidence (docs/old_new.md): what the new code has to match,
-captured once into the project's evidences/ folder, and compared with what
+captured once into the session's .jfi/evidence/<session_id>/ folder, and compared with what
 the new code gives.
 
 A **case** is one named thing to match (`add`, `watchlist_tab`,
 `active_customers`). Its evidence is one of:
 
-- behavioural: `evidences/<case>.txt` -- header lines (`# key: value`), then
+- behavioural: `<case>.txt` -- header lines (`# key: value`), then
   one `>>> <input>` line per input followed by the ground truth's output
   (`!error <text>` when the ground truth failed on it). An input `@file`
-  names a file in evidences/ (a SQL query, a request body) instead.
-- visual: `evidences/<case>.png` (the original, screenshotted or copied)
-  plus `evidences/<case>.json` (how it was shot, and where the new app shows
+  names a file in the evidence folder (a SQL query, a request body) instead.
+- visual: `<case>.png` (the original, screenshotted or copied)
+  plus `<case>.json` (how it was shot, and where the new app shows
   the same state).
 
 Evidence is written by `capture_evidence`, never typed: a hand-written
@@ -47,7 +47,9 @@ from sqlmodel import select
 from JFI.models import PlanEvent, RunbookEntry, get_session
 from JFI.models._util import utcnow
 
-EVIDENCE_DIR = "evidences"
+# Inside .jfi/ (never committed, never edited by Dev's file tools, which refuse
+# .jfi/), one folder per session so a new session never mixes with an old one's.
+EVIDENCE_DIR = ".jfi/evidence"
 SCRATCH_DIR = Path(".jfi") / "compare"
 DEFAULT_VIEWPORT = "1280x800"
 DEFAULT_MAX_DIFF = 0.10
@@ -56,7 +58,7 @@ NAV_TIMEOUT_MS = 15_000
 MATCH_MODES = ("tokens", "exact", "contains")
 LLM_SOURCE = "llm -- not verified; check this file"
 _CASE = re.compile(r"^[a-z][a-z0-9_-]{0,59}$")
-# evidences/<plan number>_<case><suffix>: the number is the task that owns it
+# <evidence folder>/<plan number>_<case><suffix>: the number is the task that owns it
 # (sync_evidence_names keeps it current); a file without one isn't on a node yet.
 _FILE = re.compile(r"^(?:(\d+(?:\.\d+)*)_)?([a-z][a-z0-9_-]{0,59}?)(\.result\.txt|\.new\.png|\.compare\.png|"
                    r"\.txt|\.png|\.json|\.sql)$")
@@ -108,20 +110,28 @@ class Evidence:
         return ((self.spec if self.visual else self.header).get("check") or "") == "reference"
 
 
-def evidence_dir(root: Path) -> Path:
-    return Path(root) / EVIDENCE_DIR
+def evidence_dir(root: Path, session_id: str) -> Path:
+    return Path(root) / EVIDENCE_DIR / session_id
+
+
+def shown(root: Path, path: Path) -> str:
+    """A path as the model and the person see it: relative to the project."""
+    try:
+        return Path(path).relative_to(Path(root)).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def case_problem(case: str) -> Optional[str]:
     if not _CASE.match(case or ""):
         return (f"Error: case name {case!r} must start with a letter and use lowercase letters, digits, _ or - "
-                "(e.g. add, divide_by_zero, watchlist_tab); its files are evidences/<task number>_<case>.*.")
+                "(e.g. add, divide_by_zero, watchlist_tab); its files are <task number>_<case>.* in the evidence folder.")
     return None
 
 
-def _files(root: Path) -> List[Tuple[Path, Optional[str], str, str]]:
+def _files(root: Path, session_id: str) -> List[Tuple[Path, Optional[str], str, str]]:
     """(path, plan number or None, case, suffix) for every evidence file."""
-    folder = evidence_dir(root)
+    folder = evidence_dir(root, session_id)
     if not folder.is_dir():
         return []
     out = []
@@ -132,19 +142,19 @@ def _files(root: Path) -> List[Tuple[Path, Optional[str], str, str]]:
     return out
 
 
-def _find(root: Path, case: str, suffix: str) -> Optional[Path]:
-    return next((path for path, _, c, s in _files(root) if c == case and s == suffix), None)
+def _find(root: Path, session_id: str, case: str, suffix: str) -> Optional[Path]:
+    return next((path for path, _, c, s in _files(root, session_id) if c == case and s == suffix), None)
 
 
-def evidence_path(root: Path, case: str, suffix: str) -> Path:
+def evidence_path(root: Path, session_id: str, case: str, suffix: str) -> Path:
     """The case's file with this suffix: the existing one (whatever its
     number), or a new one without a number until sync_evidence_names gives it
     its task's."""
-    return _find(root, case, suffix) or evidence_dir(root) / f"{case}{suffix}"
+    return _find(root, session_id, case, suffix) or evidence_dir(root, session_id) / f"{case}{suffix}"
 
 
-def list_cases(root: Path) -> List[str]:
-    return sorted({c for _, _, c, s in _files(root) if s in (".txt", ".png")})
+def list_cases(root: Path, session_id: str) -> List[str]:
+    return sorted({c for _, _, c, s in _files(root, session_id) if s in (".txt", ".png")})
 
 
 def sync_evidence_names(engine, session_id: str, root: Path) -> List[str]:
@@ -159,7 +169,7 @@ def sync_evidence_names(engine, session_id: str, root: Path) -> List[str]:
     from JFI.planner.nodes import load_nodes
 
     nodes = load_nodes(engine, session_id)
-    if not nodes or not evidence_dir(root).is_dir():
+    if not nodes or not evidence_dir(root, session_id).is_dir():
         return []
     by_id, siblings = build_indexes(nodes)
     owner, checker = {}, {}
@@ -168,7 +178,7 @@ def sync_evidence_names(engine, session_id: str, root: Path) -> List[str]:
             target = checker if node.kind == "compare" else owner
             target.setdefault(case, display_number(node, by_id, siblings))
     renames = []
-    for path, number, case, suffix in _files(root):
+    for path, number, case, suffix in _files(root, session_id):
         wanted = (checker if suffix in RESULT_SUFFIXES else owner).get(case)
         name = f"{wanted}_{case}{suffix}" if wanted else f"{case}{suffix}"
         if wanted and number != wanted and not (path.parent / name).exists():
@@ -215,13 +225,13 @@ def render_text(header: Dict[str, str], items: Sequence[Item]) -> str:
     return "\n".join(out) + "\n"
 
 
-def read_evidence(root: Path, case: str) -> Optional[Evidence]:
-    text_path, png_path = _find(root, case, ".txt"), _find(root, case, ".png")
+def read_evidence(root: Path, session_id: str, case: str) -> Optional[Evidence]:
+    text_path, png_path = _find(root, session_id, case, ".txt"), _find(root, session_id, case, ".png")
     if text_path is not None:
         header, items = parse_text(text_path.read_text(encoding="utf-8"))
         return Evidence(case, text_path, False, header, items)
     if png_path is not None:
-        spec_path = _find(root, case, ".json")
+        spec_path = _find(root, session_id, case, ".json")
         try:
             spec = json.loads(spec_path.read_text(encoding="utf-8")) if spec_path else {}
         except json.JSONDecodeError:
@@ -230,7 +240,7 @@ def read_evidence(root: Path, case: str) -> Optional[Evidence]:
     return None
 
 
-def evidence_hash(root: Path, cases: Sequence[str]) -> str:
+def evidence_hash(root: Path, session_id: str, cases: Sequence[str]) -> str:
     """A fingerprint of the cases' evidence, ignoring the `reviewed` mark a
     person sets after reading a file -- so accepting evidence doesn't send
     its compare leaf back, but editing or re-capturing it does."""
@@ -238,7 +248,7 @@ def evidence_hash(root: Path, cases: Sequence[str]) -> str:
     for case in sorted(cases):
         digest.update(case.encode())
         for suffix in GROUND_SUFFIXES:
-            path = _find(root, case, suffix)
+            path = _find(root, session_id, case, suffix)
             if path is None:
                 continue
             data = path.read_bytes()
@@ -255,14 +265,14 @@ def evidence_hash(root: Path, cases: Sequence[str]) -> str:
     return digest.hexdigest()[:16]
 
 
-def mark_reviewed(root: Path, case: str) -> str:
+def mark_reviewed(root: Path, session_id: str, case: str) -> str:
     """A person read the evidence and agrees with it (the dashboard's Accept)."""
-    evidence = read_evidence(root, case)
+    evidence = read_evidence(root, session_id, case)
     if evidence is None:
         return f"Error: no evidence for case {case!r}."
     stamp = utcnow().strftime("%Y-%m-%d %H:%M UTC")
     if evidence.visual:
-        spec_path = evidence_path(root, case, ".json")
+        spec_path = evidence_path(root, session_id, case, ".json")
         evidence.spec["reviewed"] = stamp
         spec_path.write_text(json.dumps(evidence.spec, indent=2) + "\n", encoding="utf-8")
     else:
@@ -271,10 +281,10 @@ def mark_reviewed(root: Path, case: str) -> str:
     return f"Marked {case} as reviewed."
 
 
-def save_edited_text(root: Path, case: str, text: str) -> str:
+def save_edited_text(root: Path, session_id: str, case: str, text: str) -> str:
     """A person corrected a behavioural case's evidence (the dashboard's Edit):
     the file says so, and what it was captured from before."""
-    path = _find(root, case, ".txt")
+    path = _find(root, session_id, case, ".txt")
     if path is None:
         return f"Error: no text evidence for case {case!r}."
     header, items = parse_text(text)
@@ -296,12 +306,12 @@ def _runbook(engine, session_id: str, name: str) -> Optional[RunbookEntry]:
                                                   RunbookEntry.name == name)).first()
 
 
-def _input_file(root: Path, value: str, n: int) -> Path:
+def _input_file(root: Path, session_id: str, value: str, n: int) -> Path:
     if value.startswith("@"):
         name = value[1:].strip()
         match = _FILE.match(name)
-        found = _find(root, match.group(2), match.group(3)) if match else None
-        return (found or evidence_dir(root) / name).resolve()
+        found = _find(root, session_id, match.group(2), match.group(3)) if match else None
+        return (found or evidence_dir(root, session_id) / name).resolve()
     scratch = Path(root) / SCRATCH_DIR
     scratch.mkdir(parents=True, exist_ok=True)
     path = scratch / f"input-{n}.txt"
@@ -309,17 +319,17 @@ def _input_file(root: Path, value: str, n: int) -> Path:
     return path.resolve()
 
 
-def fill(template: str, root: Path, value: str = "", n: int = 0, case: str = "", view: str = "") -> str:
+def fill(template: str, root: Path, session_id: str, value: str = "", n: int = 0, case: str = "", view: str = "") -> str:
     """{input} is the input as written; {input_file} a file holding it (an
     `@file` input's own file) -- the safe choice for anything with quotes."""
     text = value
     if value.startswith("@"):
-        path = _input_file(root, value, n)
+        path = _input_file(root, session_id, value, n)
         text = path.read_text(encoding="utf-8") if path.is_file() else ""
     command = template.replace("{project}", str(Path(root).resolve())).replace("{case}", case)
     command = command.replace("{view}", view)
     if "{input_file}" in command:
-        command = command.replace("{input_file}", str(_input_file(root, value, n)))
+        command = command.replace("{input_file}", str(_input_file(root, session_id, value, n)))
     return command.replace("{input}", text.strip())
 
 
@@ -563,7 +573,7 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
     problem = case_problem(case)
     if problem:
         return problem
-    folder = evidence_dir(root)
+    folder = evidence_dir(root, session_id)
     folder.mkdir(parents=True, exist_ok=True)
     if url or image:
         return _capture_visual(engine, session_id, root, role, case, url, image, new_url, steps, viewport,
@@ -574,7 +584,7 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
         return f"Error: match must be one of {', '.join(MATCH_MODES)} (tokens: numbers by value, words exactly)."
     inputs = [str(i) for i in (inputs or [])]
     if sql:
-        evidence_path(root, case, ".sql").write_text(sql.strip() + "\n", encoding="utf-8")
+        evidence_path(root, session_id, case, ".sql").write_text(sql.strip() + "\n", encoding="utf-8")
         inputs = [f"@{case}.sql"]
     if not inputs:
         return ("Error: give the case's inputs (e.g. inputs=['1 + 1', '2.5 + 0.25']), sql='<query>' for a query, "
@@ -584,7 +594,7 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
     if evidence_one is not None:
         items, broken = [], None
         for n, value in enumerate(inputs):
-            code, stdout, stderr = run(fill(evidence_one.command, root, value, n, case), root)
+            code, stdout, stderr = run(fill(evidence_one.command, root, session_id, value, n, case), root)
             output, failed = _outcome(code, stdout, stderr)
             if failed and _command_broken(code, output):
                 broken = broken or output
@@ -619,14 +629,14 @@ def capture_evidence(engine, session_id: str, root: Path, role: str, case: str, 
     header["captured"] = f"{utcnow().strftime('%Y-%m-%d %H:%M UTC')} by {role or 'jfi'}"
     if role == "architect":
         header["check"] = "reference"
-    path = evidence_path(root, case, ".txt")
+    path = evidence_path(root, session_id, case, ".txt")
     path.write_text(render_text(header, items), encoding="utf-8")
     _event(engine, session_id, f"{case}: {header['source']}")
     sync_evidence_names(engine, session_id, root)
-    path = evidence_path(root, case, ".txt")
+    path = evidence_path(root, session_id, case, ".txt")
     warn = "\nNOT VERIFIED: these answers came from you, not a command or file." if header["source"] == LLM_SOURCE \
         else ""
-    return f"Saved {EVIDENCE_DIR}/{path.name} ({len(items)} input(s), source: {header['source']}):\n" \
+    return f"Saved {shown(root, path)} ({len(items)} input(s), source: {header['source']}):\n" \
            f"{_preview(items)}{warn}"
 
 
@@ -643,7 +653,7 @@ def _capture_visual(engine, session_id: str, root: Path, role: str, case: str, u
     if not new_url:
         return ("Error: a visual case needs new_url: where the NEW app shows this state (a route like / or "
                 "/login, a URL, or a file like index.html) -- compare_evidence screenshots it there.")
-    png = evidence_path(root, case, ".png")
+    png = evidence_path(root, session_id, case, ".png")
     spec = {"case": case, "new_url": new_url, "steps": list(steps or []), "viewport": viewport or DEFAULT_VIEWPORT}
     if selector:
         spec["selector"] = selector
@@ -667,17 +677,17 @@ def _capture_visual(engine, session_id: str, root: Path, role: str, case: str, u
     spec["captured"] = f"{utcnow().strftime('%Y-%m-%d %H:%M UTC')} by {role or 'jfi'}"
     if role == "architect":
         spec["check"] = "reference"
-    evidence_path(root, case, ".json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
+    evidence_path(root, session_id, case, ".json").write_text(json.dumps(spec, indent=2) + "\n", encoding="utf-8")
     _event(engine, session_id, f"{case}: {spec['source']}")
     sync_evidence_names(engine, session_id, root)
-    png, spec_file = evidence_path(root, case, ".png"), evidence_path(root, case, ".json")
-    return f"Saved {EVIDENCE_DIR}/{png.name} and {spec_file.name} (source: {spec['source']})."
+    png, spec_file = evidence_path(root, session_id, case, ".png"), evidence_path(root, session_id, case, ".json")
+    return f"Saved {shown(root, png)} and {spec_file.name} (source: {spec['source']})."
 
 
 def recapture(engine, session_id: str, root: Path, case: str) -> str:
     """Re-runs how a case was captured (its header / .json), e.g. after the
     ground truth was fixed. Hand-written evidence can't be re-captured."""
-    evidence = read_evidence(root, case)
+    evidence = read_evidence(root, session_id, case)
     if evidence is None:
         return f"Error: no evidence for case {case!r}."
     if evidence.visual:
@@ -694,7 +704,7 @@ def recapture(engine, session_id: str, root: Path, case: str) -> str:
                 "be re-captured; edit it instead.")
     items = []
     for n, item in enumerate(evidence.items):
-        output, failed = _outcome(*run(fill(how, Path(root), item.input, n, case), Path(root)))
+        output, failed = _outcome(*run(fill(how, Path(root), session_id, item.input, n, case), Path(root)))
         items.append(Item(item.input, output, failed))
     header = dict(evidence.header)
     header.pop("reviewed", None)
@@ -743,13 +753,13 @@ class CaseResult:
 
 def compare_case(engine, session_id: str, root: Path, case: str) -> CaseResult:
     root = Path(root)
-    evidence = read_evidence(root, case)
+    evidence = read_evidence(root, session_id, case)
     if evidence is None:
-        return CaseResult(case, False, f"Error: no evidence for case {case!r} in {EVIDENCE_DIR}/ "
+        return CaseResult(case, False, f"Error: no evidence for case {case!r} in {shown(root, evidence_dir(root, session_id))}/ "
                                        f"(capture it with capture_evidence).")
     if evidence.reference_only:
         return CaseResult(case, True, f"{case}: the Architect's overview of the ground truth -- kept to look at, "
-                                      f"not compared ({EVIDENCE_DIR}/{evidence.path.name}).")
+                                      f"not compared ({shown(root, evidence.path)}).")
     if evidence.visual:
         return _compare_visual(engine, session_id, root, evidence)
     compare_one = _runbook(engine, session_id, "compare_one")
@@ -759,9 +769,9 @@ def compare_case(engine, session_id: str, root: Path, case: str) -> CaseResult:
                                        "\"printf '%s\\nexit\\n' {input} | python3 main.py\".")
     mode = evidence.header.get("match", "tokens")
     view = _view_url(engine, session_id)
-    lines, outputs, bad = [f"compare {case}  ({EVIDENCE_DIR}/{evidence.path.name}, source: {evidence.source})"], [], 0
+    lines, outputs, bad = [f"compare {case}  ({shown(root, evidence.path)}, source: {evidence.source})"], [], 0
     for n, item in enumerate(evidence.items):
-        command = fill(compare_one.command, root, item.input, n, case, view)
+        command = fill(compare_one.command, root, session_id, item.input, n, case, view)
         code, stdout, stderr = run(command, root)
         output, failed = _outcome(code, stdout, stderr)
         outputs.append(stdout + stderr)
@@ -779,9 +789,9 @@ def compare_case(engine, session_id: str, root: Path, case: str) -> CaseResult:
         lines.append(f"(the evidence for {case} came from the LLM, not a command or file: it isn't verified)")
     # Dev's evidence: what the new code gave, kept next to the ground truth
     # and named after the compare task (sync_evidence_names).
-    evidence_path(root, case, ".result.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    evidence_path(root, session_id, case, ".result.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     sync_evidence_names(engine, session_id, root)
-    lines.append(f"  saved: {EVIDENCE_DIR}/{evidence_path(root, case, '.result.txt').name}")
+    lines.append(f"  saved: {shown(root, evidence_path(root, session_id, case, '.result.txt'))}")
     return CaseResult(case, bad == 0 and total > 0, "\n".join(lines), "\n".join(outputs),
                       unverified=evidence.unverified)
 
@@ -790,14 +800,14 @@ def _compare_visual(engine, session_id: str, root: Path, evidence: Evidence) -> 
     spec, case = evidence.spec, evidence.case
     view = _view_url(engine, session_id)
     target = _resolve_url(spec.get("new_url", ""), root, view)
-    new_png = evidence_path(root, case, ".new.png")
+    new_png = evidence_path(root, session_id, case, ".new.png")
     problem, new_text = screenshot(target, new_png, spec.get("viewport", DEFAULT_VIEWPORT), spec.get("steps") or (),
                                    spec.get("new_selector") or spec.get("selector", ""))
     if problem:
         hint = " Is the app running? Start it with the runbook's run (start_background_process)." \
             if target.startswith("http") else ""
         return CaseResult(case, False, problem + hint, visual=True)
-    problem, ratio, composite = diff_images(evidence.path, new_png, evidence_path(root, case, ".compare.png"))
+    problem, ratio, composite = diff_images(evidence.path, new_png, evidence_path(root, session_id, case, ".compare.png"))
     sync_evidence_names(engine, session_id, root)
     if problem:
         return CaseResult(case, False, problem, visual=True)
@@ -807,12 +817,12 @@ def _compare_visual(engine, session_id: str, root: Path, evidence: Evidence) -> 
     # Text as well as pixels: found while building this, a nav link missing
     # from the new page changed 0.03% of the pixels and passed on pixels alone.
     ok = ratio <= max_diff() and not missing
-    lines = [f"compare {case}  ({EVIDENCE_DIR}/{evidence_path(root, case, '.png').name} vs {target}, "
+    lines = [f"compare {case}  ({shown(root, evidence_path(root, session_id, case, '.png'))} vs {target}, "
              f"{spec.get('viewport', DEFAULT_VIEWPORT)})",
              f"  differing pixels: {ratio:.2%} (allowed {max_diff():.0%}, COMPARE_MAX_DIFF)",
              f"  text missing from the new page: {', '.join(missing[:25])}" if missing
              else "  text: everything in the original is on the new page" if old_words else "",
-             f"  saved: {EVIDENCE_DIR}/{evidence_path(root, case, '.compare.png').name} (original | new | "
+             f"  saved: {shown(root, evidence_path(root, session_id, case, '.compare.png'))} (original | new | "
              f"differences in red); attached",
              f"{case}: {'looks the same' if ok else 'DIFFERS'}"]
     return CaseResult(case, ok, "\n".join(line for line in lines if line), image_url=composite, visual=True,
@@ -827,9 +837,9 @@ def compare_cases(engine, session_id: str, root: Path, cases: Sequence[str]) -> 
 
 def make_evidence_tools(engine, session_id: str, root: Path, role: str = "") -> Dict[str, Callable]:
     def compare_evidence(case: str = ""):
-        cases = [case.strip().lower()] if case and case.strip() else list_cases(root)
+        cases = [case.strip().lower()] if case and case.strip() else list_cases(root, session_id)
         if not cases:
-            return f"No evidence yet: {EVIDENCE_DIR}/ is empty."
+            return f"No evidence yet: {shown(root, evidence_dir(root, session_id))}/ is empty."
         results = compare_cases(engine, session_id, root, cases)
         text = "\n\n".join(r.report for r in results)
         if len(results) > 1:
@@ -840,12 +850,12 @@ def make_evidence_tools(engine, session_id: str, root: Path, role: str = "") -> 
         return (text, image) if image else text
 
     def list_evidence():
-        cases = list_cases(root)
+        cases = list_cases(root, session_id)
         if not cases:
-            return f"No evidence yet: {EVIDENCE_DIR}/ is empty."
+            return f"No evidence yet: {shown(root, evidence_dir(root, session_id))}/ is empty."
         lines = []
         for case in cases:
-            evidence = read_evidence(root, case)
+            evidence = read_evidence(root, session_id, case)
             what = "screenshot" if evidence.visual else f"{len(evidence.items)} input(s)"
             lines.append(f"{case}: {what}, source: {evidence.source}")
         return "\n".join(lines)
@@ -863,7 +873,7 @@ def make_evidence_tools(engine, session_id: str, root: Path, role: str = "") -> 
 EVIDENCE_TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "capture_evidence",
-        "description": ("Save one case's ground truth in evidences/: runs the runbook's evidence_one on each input "
+        "description": ("Save one case's ground truth in the evidence folder: runs the runbook's evidence_one on each input "
                         "(a CLI, curl/wget, a DB client for sql), or screenshots url, or copies image. You pick the "
                         "inputs, never the answers (answers= is the flagged last resort)."),
         "parameters": {"type": "object", "properties": {
@@ -887,13 +897,13 @@ EVIDENCE_TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "compare_evidence",
         "description": ("Run the new code on a case's inputs (the runbook's compare_one) or screenshot the new app "
-                        "in the case's state, and compare it with evidences/<case>.*: prints new vs evidence per "
+                        "in the case's state, and compare it with its evidence: prints new vs evidence per "
                         "input, or attaches original | new | differences. No case: every case."),
         "parameters": {"type": "object", "properties": {"case": {"type": "string"}}},
     }},
     {"type": "function", "function": {
         "name": "list_evidence",
-        "description": "The cases in evidences/, with how each was captured.",
+        "description": "The cases in this session's evidence folder, with how each was captured.",
         "parameters": {"type": "object", "properties": {}},
     }},
 ]

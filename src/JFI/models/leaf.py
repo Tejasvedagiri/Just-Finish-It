@@ -112,7 +112,7 @@ class Leaf(SQLModel, table=True):
     checkpoint: Optional[str] = None
     # Ground-truth cases (docs/old_new.md): on a Lead file node, the cases its
     # file must match; on a compare leaf, the cases it checks. Each case has
-    # its evidence in evidences/<case>.*.
+    # its evidence in .jfi/evidence/<session_id>/<task number>_<case>.*.
     cases: Optional[list[str]] = Field(default=None, sa_column=Column(JSON))
     # A compare leaf's evidence fingerprint when it passed: if the evidence is
     # edited or re-captured afterwards, the leaf is compared again.

@@ -215,7 +215,7 @@ MODEL=qwen3:8b
 
 # When a goal comes with something to match (bc, a page, a mockup, an expected
 # output, API docs, an old program), each Lead saves its evidence in
-# evidences/ and every case gets a compare task in imp. EVIDENCE_REVIEW=1 makes
+# .jfi/evidence/<session>/ and every case gets a compare task in imp. EVIDENCE_REVIEW=1 makes
 # the run wait before building until you accept that evidence (in the terminal
 # or the dashboard); off by default, so nothing waits for a person.
 # EVIDENCE_REVIEW=0

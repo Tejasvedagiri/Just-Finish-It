@@ -560,7 +560,7 @@ _FLAGS = [
     ("REVIEW_LOOP_APPROVAL", "Ask before each fix iteration after a failed review (REVIEW_LOOP_APPROVAL)?"),
     ("LOG_LLM_CALL_DEBUG", "Log every LLM request/response to .jfi/llm_debug.jsonl (LOG_LLM_CALL_DEBUG)?"),
     ("SHOW_STREAM_PROMPTS", "Print every prompt sent to the LLM (SHOW_STREAM_PROMPTS)?"),
-    ("EVIDENCE_REVIEW", "Wait for you to accept the ground-truth evidence in evidences/ before building "
+    ("EVIDENCE_REVIEW", "Wait for you to accept the ground-truth evidence (.jfi/evidence/<session>/) before building "
                         "(EVIDENCE_REVIEW)?"),
 ]
 

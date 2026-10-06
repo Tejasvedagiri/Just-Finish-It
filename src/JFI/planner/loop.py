@@ -468,7 +468,7 @@ class Planner:
                 return (f"Error: not finished yet. This component rebuilds part of {refs}: name the cases its files "
                         f"must match (cases=[...] on each file node, update_node for ones you added) and "
                         f"capture_evidence each one.")
-            missing = [c for c in cases if read_evidence(self.root, c) is None]
+            missing = [c for c in cases if read_evidence(self.root, self.session_id, c) is None]
             if missing:
                 return (f"Error: not finished yet. No evidence for {', '.join(missing)}: capture_evidence each "
                         f"one (it runs the ground truth for you).")

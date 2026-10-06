@@ -38,10 +38,23 @@ def _get_safe_path(file_path: str) -> Path:
     return target_path
 
 
+def _writable(path: Path) -> Path:
+    """The ground-truth evidence (.jfi/evidence/, JFI.tool.evidence_tools) is
+    written by JFI's own capture, never by a model's file edit: a Dev whose
+    code doesn't match could otherwise "fix" the evidence instead. Reading it
+    is fine; .jfi/scratch/ stays writable for scratch scripts."""
+    parts = path.relative_to(Path.cwd().resolve()).parts
+    if parts[:2] == (".jfi", "evidence"):
+        raise PermissionError("the evidence in .jfi/evidence/ is the ground truth and can't be edited with a file "
+                              "tool. Change the code instead; if the evidence itself is wrong, say so with "
+                              "add_reviewer_note")
+    return path
+
+
 def write_file(file_path: str, content: str) -> str:
     """Writes content to a file, restricted to the current working directory."""
     try:
-        path = _get_safe_path(file_path)
+        path = _writable(_get_safe_path(file_path))
         # Create directories if they don't exist (e.g., output/ subfolders)
         path.parent.mkdir(parents=True, exist_ok=True)
         # Unlike a malformed file_path (rejected outright, above), a leaked
@@ -74,7 +87,7 @@ def read_file(file_path: str) -> str:
 def append_to_file(file_path: str, content: str) -> str:
     """Appends content to the end of a file, restricted to the current working directory."""
     try:
-        path = _get_safe_path(file_path)
+        path = _writable(_get_safe_path(file_path))
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # Only add a separator when the file doesn't already end with one,
@@ -126,7 +139,7 @@ def replace_in_file(file_path: str, old_string: str, new_string: str) -> str:
     tool argument is what truncates on long documents.
     """
     try:
-        path = _get_safe_path(file_path)
+        path = _writable(_get_safe_path(file_path))
         if not path.exists():
             return f"Error: File {file_path} does not exist."
 

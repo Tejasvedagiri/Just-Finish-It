@@ -45,7 +45,7 @@ one verdict:
 A check that can't run in this environment is reported with
 `write_review_report` as not checked, never passed.
 
-When `evidences/` holds ground-truth cases ([`old_new.md`](old_new.md)), the
+When the session has ground-truth evidence (`.jfi/evidence/<session>/`) ([`old_new.md`](old_new.md)), the
 reviewer has `compare_evidence` / `list_evidence`, and `finish` compares every
 case again over the finished build before it confirms a pass
 (`Reviewer._evidence_check`): a case that differs refuses the pass and names

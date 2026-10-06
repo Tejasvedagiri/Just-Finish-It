@@ -1,5 +1,5 @@
 """Ground-truth evidence (docs/old_new.md): the Lead captures what the build
-must match into evidences/, Task adds a compare leaf per case, and Dev's
+must match into .jfi/evidence/<session>/, Task adds a compare leaf per case, and Dev's
 compare leaf is done only when the new code's output matches the evidence.
 Real SQLite, real files and real commands throughout -- the ground truth is
 always run, never typed, which is the point of the feature."""
@@ -86,12 +86,12 @@ def test_the_ground_truth_is_run_never_typed(project):
     engine, root = project
     result = capture_evidence(engine, "s", root, "lead", "add", ["1 + 1", "2.5 + 0.25", "-3 + 10"])
 
-    assert result.startswith("Saved evidences/add.txt")
-    evidence = read_evidence(root, "add")
+    assert result.startswith("Saved .jfi/evidence/s/add.txt")
+    evidence = read_evidence(root, "s", "add")
     assert [(i.input, i.output, i.error) for i in evidence.items] == [
         ("1 + 1", "2", False), ("2.5 + 0.25", "2.75", False), ("-3 + 10", "7", False)]
     assert evidence.source.startswith("command ") and not evidence.unverified
-    text = (root / "evidences" / "add.txt").read_text()
+    text = (root / ".jfi" / "evidence" / "s" / "add.txt").read_text()
     assert ">>> 1 + 1\n2\n" in text and "# how: " in text
 
 
@@ -100,7 +100,7 @@ def test_the_ground_truth_failing_on_an_input_is_evidence_too(project):
     code must also treat as an error, in its own words."""
     engine, root = project
     capture_evidence(engine, "s", root, "lead", "divide_by_zero", ["1 / 0"])
-    [item] = read_evidence(root, "divide_by_zero").items
+    [item] = read_evidence(root, "s", "divide_by_zero").items
     assert item.error and "Divide by zero" in item.output
     assert compare_case(engine, "s", root, "divide_by_zero").ok  # "Error: division by zero" counts
 
@@ -116,17 +116,17 @@ def test_bc_itself_and_the_dash_trap(project):
     if Path("/bin/sh").resolve().name in ("dash", "busybox"):
         refused = capture_evidence(engine, "s", root, "lead", "add", ["1 + 1"])
         assert refused.startswith("Error: evidence_one didn't run") and "<<<" in refused
-        assert read_evidence(root, "add") is None
+        assert read_evidence(root, "s", "add") is None
     runbook_set(engine, "s", "evidence_one", "{ echo scale=10; cat {input_file}; } | bc -l")
     capture_evidence(engine, "s", root, "lead", "add", ["1 + 1", "2.5 + 0.25"])
-    assert [i.output for i in read_evidence(root, "add").items] == ["2", "2.75"]
+    assert [i.output for i in read_evidence(root, "s", "add").items] == ["2", "2.75"]
 
 
 def test_a_command_that_isnt_there_is_refused(project):
     engine, root = project
     runbook_set(engine, "s", "evidence_one", "./no-such-oracle {input_file}")
     assert capture_evidence(engine, "s", root, "lead", "add", ["1 + 1"]).startswith("Error: evidence_one didn't run")
-    assert read_evidence(root, "add") is None
+    assert read_evidence(root, "s", "add") is None
 
 
 def test_answers_from_the_model_are_the_last_resort_and_flagged(project):
@@ -139,12 +139,12 @@ def test_answers_from_the_model_are_the_last_resort_and_flagged(project):
 
     saved = capture_evidence(engine, "s", root, "lead", "add", ["1 + 1"], answers=["2"])
     assert "NOT VERIFIED" in saved
-    assert read_evidence(root, "add").source == LLM_SOURCE and read_evidence(root, "add").unverified
+    assert read_evidence(root, "s", "add").source == LLM_SOURCE and read_evidence(root, "s", "add").unverified
 
     (root / "docs").mkdir()
     (root / "docs" / "api.md").write_text("1 + 1 is 2\n")
     capture_evidence(engine, "s", root, "lead", "add", ["1 + 1"], answers=["2"], from_file="docs/api.md L1-1")
-    assert read_evidence(root, "add").source == "file docs/api.md L1-1"
+    assert read_evidence(root, "s", "add").source == "file docs/api.md L1-1"
 
 
 def runner_select_runbook(name):
@@ -177,7 +177,7 @@ def test_a_wrong_answer_is_a_mismatch_with_both_sides_shown(project):
 
 def test_a_data_migration_is_checked_with_a_saved_query(project):
     """The old database is the ground truth: the query is saved in
-    evidences/, its result on the old database captured, and the same query
+    the evidence folder, its result on the old database captured, and the same query
     run on the new one must give the same result."""
     engine, root = project
     for name in ("old.db", "new.db"):
@@ -192,7 +192,7 @@ def test_a_data_migration_is_checked_with_a_saved_query(project):
     sql = "SELECT status, COUNT(*) FROM customers GROUP BY status ORDER BY status;"
     capture_evidence(engine, "s", root, "lead", "customers_by_status", sql=sql)
 
-    assert (root / "evidences" / "customers_by_status.sql").read_text().strip() == sql
+    assert (root / ".jfi" / "evidence" / "s" / "customers_by_status.sql").read_text().strip() == sql
     assert compare_case(engine, "s", root, "customers_by_status").ok
     with sqlite3.connect(root / "new.db") as db:
         db.execute("DELETE FROM customers WHERE id = 2")  # a row lost in the migration
@@ -203,19 +203,19 @@ def test_a_data_migration_is_checked_with_a_saved_query(project):
 def test_reviewing_doesnt_count_as_a_change_but_editing_and_recapturing_do(project):
     engine, root = project
     capture_evidence(engine, "s", root, "lead", "add", ["1 + 1"])
-    before = evidence_hash(root, ["add"])
-    mark_reviewed(root, "add")
-    assert evidence_hash(root, ["add"]) == before and read_evidence(root, "add").header["reviewed"]
+    before = evidence_hash(root, "s", ["add"])
+    mark_reviewed(root, "s", "add")
+    assert evidence_hash(root, "s", ["add"]) == before and read_evidence(root, "s", "add").header["reviewed"]
 
-    text = (root / "evidences" / "add.txt").read_text().replace(">>> 1 + 1\n2", ">>> 1 + 1\n2\n>>> 2 + 2\n4")
-    assert save_edited_text(root, "add", text) == "Saved add.txt."
-    edited = read_evidence(root, "add")
+    text = (root / ".jfi" / "evidence" / "s" / "add.txt").read_text().replace(">>> 1 + 1\n2", ">>> 1 + 1\n2\n>>> 2 + 2\n4")
+    assert save_edited_text(root, "s", "add", text) == "Saved add.txt."
+    edited = read_evidence(root, "s", "add")
     assert edited.source == "user" and edited.header["was"].startswith("command") and len(edited.items) == 2
-    assert evidence_hash(root, ["add"]) != before
+    assert evidence_hash(root, "s", ["add"]) != before
 
-    (root / "evidences" / "add.txt").write_text(text)  # a hand edit that kept the command header
+    (root / ".jfi" / "evidence" / "s" / "add.txt").write_text(text)  # a hand edit that kept the command header
     assert recapture(engine, "s", root, "add").startswith("Re-captured add")
-    assert [i.output for i in read_evidence(root, "add").items] == ["2", "4"]
+    assert [i.output for i in read_evidence(root, "s", "add").items] == ["2", "4"]
 
 
 # ------------------------------------------------------------------ the planner
@@ -272,11 +272,11 @@ def test_cases_go_down_the_plan_and_none_is_dropped(project):
     foreign = add_node(engine, "s", "task", file_node, "compare power", done_when="matches", kind="compare",
                        cases=["power"], depends_on=[impl_id])
     assert foreign.startswith("Error: power isn't one of this file's cases (add, divide_by_zero)")
-    add_file = read_evidence(root, "add").path
+    add_file = read_evidence(root, "s", "add").path
     add_file.rename(root / "add.txt.bak")
     unseen = add_node(engine, "s", "task", file_node, "compare +", done_when="matches", kind="compare",
                       cases=["add"], depends_on=[impl_id], root=root)
-    assert unseen.startswith("Error: no evidence for add in evidences/")
+    assert unseen.startswith("Error: no evidence for add in the evidence folder")
     (root / "add.txt.bak").rename(add_file)
     for case in ("add", "divide_by_zero"):
         assert add_node(engine, "s", "task", file_node, f"compare {case} with evidences/{case}", done_when="matches",
@@ -322,7 +322,7 @@ def test_a_compare_leaf_is_done_only_when_the_code_matches_the_evidence(project)
     with get_session(engine) as db:
         row = db.get(Leaf, leaf)
         results = [m.content for m in db.exec(HistoryMessage.__table__.select()).all() if m.role == "tool"]
-    assert row.status == LeafStatus.DONE and row.evidence_hash == evidence_hash(root, ["add"])
+    assert row.status == LeafStatus.DONE and row.evidence_hash == evidence_hash(root, "s", ["add"])
     assert any(r.startswith("Error: the new code doesn't match the evidence") and "new: 2.5" in r for r in results)
     assert any(r.startswith("Done: leaf") for r in results)
 
@@ -335,8 +335,8 @@ def test_changed_evidence_sends_a_passed_compare_leaf_back(project):
               dict(runner.TOOL_MAP), lambda: None)
     assert imp.run().complete
 
-    text = read_evidence(root, "add").path.read_text().replace(">>> -3 + 10\n7", ">>> -3 + 10\n8")
-    save_edited_text(root, "add", text)
+    text = read_evidence(root, "s", "add").path.read_text().replace(">>> -3 + 10\n7", ">>> -3 + 10\n8")
+    save_edited_text(root, "s", "add", text)
     imp._requeue_changed_evidence()
     with get_session(engine) as db:
         row = db.get(Leaf, leaf)
@@ -346,15 +346,19 @@ def test_changed_evidence_sends_a_passed_compare_leaf_back(project):
 def test_dev_editing_the_evidence_is_refused(project):
     engine, root = project
     leaf = _compare_leaf(engine, root)
-    add_file = read_evidence(root, "add").path
+    add_file = read_evidence(root, "s", "add").path
     content = add_file.read_text().replace(">>> 1 + 1\n2", ">>> 1 + 1\n2.5")
-    turns = [turn(call("write_file", file_path=f"evidences/{add_file.name}", content=content),
+    turns = [turn(call("write_file", file_path=f".jfi/evidence/s/{add_file.name}", content=content),
                   call("mark_leaf_done", leaf_id=leaf, summary="made it match"))]
     imp = Imp(Console(turns), engine, "s", root, LLM(), dict(runner.TOOL_MAP), lambda: None)
     imp.run()
     with get_session(engine) as db:
         results = [m.content for m in db.exec(HistoryMessage.__table__.select()).all() if m.role == "tool"]
-    assert any(r.startswith("Error: evidences/ changed while you worked") for r in results)
+    # The file tool refuses outright; the gate's own check (the evidence
+    # unchanged since the episode began) is the second line, for
+    # execute_command and the like.
+    assert any("is the ground truth and can't be edited with a file tool" in r for r in results)
+    assert read_evidence(root, "s", "add").items[0].output == "2"
 
 
 # ------------------------------------------------------------------ review and EVIDENCE_REVIEW
@@ -422,8 +426,8 @@ def test_a_page_state_is_compared_as_screenshots_and_text(project):
     (root / "new.html").write_text(page.replace(" · News", ""))
     saved = capture_evidence(engine, "s", root, "lead", "watch_tab", url="old.html", new_url="new.html",
                              steps=["click Watchlist"])
-    assert saved.startswith("Saved evidences/watch_tab.png")
-    assert "Watchlist table" in read_evidence(root, "watch_tab").spec["text"]
+    assert saved.startswith("Saved .jfi/evidence/s/watch_tab.png")
+    assert "Watchlist table" in read_evidence(root, "s", "watch_tab").spec["text"]
 
     result = compare_case(engine, "s", root, "watch_tab")
     assert not result.ok and "text missing from the new page: news" in result.report
@@ -469,11 +473,11 @@ def test_one_part_of_a_page_is_shot_with_a_selector_not_as_an_image(project):
     refused = capture_evidence(engine, "s", root, "lead", "allocation_donut", image="dashboard.html",
                                new_url="new.html")
     assert refused.startswith("Error: image= takes an image file") and "selector=" in refused
-    assert read_evidence(root, "allocation_donut") is None
+    assert read_evidence(root, "s", "allocation_donut") is None
 
     capture_evidence(engine, "s", root, "lead", "allocation_donut", url="dashboard.html", new_url="new.html",
                      selector="#donut")
-    evidence = read_evidence(root, "allocation_donut")
+    evidence = read_evidence(root, "s", "allocation_donut")
     assert evidence.spec["selector"] == "#donut" and evidence.spec["text"] == "Allocation 40% stocks"
     assert evidence.path.read_bytes()[16:24] == (300).to_bytes(4, "big") + (200).to_bytes(4, "big")  # PNG size
 
@@ -504,7 +508,7 @@ def test_evidence_files_are_named_by_the_task_that_owns_them(project):
     _good(engine, add_node(engine, "s", "task", file_node, "compare + with evidences/add", kind="compare",
                            done_when="matches", cases=["add"], depends_on=[impl], files=["main.py"]))
     compare_case(engine, "s", root, "add")
-    names = sorted(p.name for p in (root / "evidences").iterdir())
+    names = sorted(p.name for p in (root / ".jfi" / "evidence" / "s").iterdir())
     assert names == ["1.1.2_add.result.txt", "1.1_add.txt", "1_calc_overview.txt"]
     overview = compare_case(engine, "s", root, "calc_overview")
     assert overview.ok and "not compared" in overview.report  # the Architect's overview is for looking at
@@ -520,6 +524,6 @@ def test_evidence_files_are_named_by_the_task_that_owns_them(project):
         db.add(first)
         db.commit()
     sync_evidence_names(engine, "s", root)
-    assert sorted(p.name for p in (root / "evidences").iterdir()) == [
+    assert sorted(p.name for p in (root / ".jfi" / "evidence" / "s").iterdir()) == [
         "2.1.2_add.result.txt", "2.1_add.txt", "2_calc_overview.txt"]
     assert compare_case(engine, "s", root, "add").ok is False  # still found under its new name (main.py adds 0.5)

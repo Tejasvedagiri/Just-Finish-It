@@ -479,16 +479,17 @@ def _evidence_review(console: AbstractManager, ssm: SessionManager) -> bool:
     from sqlmodel import select
 
     from JFI.models import PlanEvent, get_session
-    from JFI.tool.evidence_tools import EVIDENCE_DIR, evidence_hash, list_cases, read_evidence
+    from JFI.tool.evidence_tools import evidence_dir, evidence_hash, list_cases, read_evidence, shown
 
     if not _env_flag("EVIDENCE_REVIEW"):
         return True
     root = Path(ssm.session_path).parent
+    folder = shown(root, evidence_dir(root, ssm.session_id))
     while True:
-        cases = list_cases(root)
+        cases = list_cases(root, ssm.session_id)
         if not cases:
             return True
-        fingerprint = evidence_hash(root, cases)
+        fingerprint = evidence_hash(root, ssm.session_id, cases)
         with get_session(ssm.db_engine) as db:
             accepted = db.exec(select(PlanEvent).where(PlanEvent.session_id == ssm.session_id,
                                                        PlanEvent.type == "evidence_accepted")
@@ -497,20 +498,20 @@ def _evidence_review(console: AbstractManager, ssm: SessionManager) -> bool:
             return True
         lines = []
         for case in cases:
-            evidence = read_evidence(root, case)
+            evidence = read_evidence(root, ssm.session_id, case)
             flag = "  ⚠ not verified" if evidence.unverified else ""
             lines.append(f"  {case}: {evidence.source}{flag}")
-        console.display_system(f"Ground-truth evidence in {EVIDENCE_DIR}/ (EVIDENCE_REVIEW=1):\n" + "\n".join(lines))
+        console.display_system(f"Ground-truth evidence in {folder}/ (EVIDENCE_REVIEW=1):\n" + "\n".join(lines))
         console.set_status(state="awaiting evidence review")
         choice = console.get_user_choice(
-            f"Check {EVIDENCE_DIR}/ (or the dashboard's Evidence list): accept it and start building?",
+            f"Check {folder}/ (or the dashboard's Evidence list): accept it and start building?",
             [("a", "Accept -- start building"), ("r", "I changed it -- show it again"), ("s", "Stop the run")])
         if choice == "s":
             return False
         if choice == "a":
             with get_session(ssm.db_engine) as db:
                 db.add(PlanEvent(session_id=ssm.session_id, node_id=None, type="evidence_accepted",
-                                 detail=evidence_hash(root, list_cases(root))))
+                                 detail=evidence_hash(root, ssm.session_id, list_cases(root, ssm.session_id))))
                 db.commit()
             return True
 

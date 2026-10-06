@@ -156,12 +156,12 @@ class Reviewer:
         is compared again over the finished build: a later leaf can break
         what an earlier compare leaf checked."""
         sync_evidence_names(self.engine, self.session_id, self.root)
-        cases = list_cases(self.root)
+        cases = list_cases(self.root, self.session_id)
         if not cases:
             return None, ""
         results = compare_cases(self.engine, self.session_id, self.root, cases)
         bad = [r for r in results if not r.ok]
-        unverified = [c for c in cases if getattr(read_evidence(self.root, c), "unverified", False)]
+        unverified = [c for c in cases if getattr(read_evidence(self.root, self.session_id, c), "unverified", False)]
         note = (f" Checked against generated (LLM, not verified) evidence only: {', '.join(unverified)}."
                 if unverified else "")
         if not bad:

@@ -37,9 +37,9 @@ ROLE_MUST_NOT = {
     "architect": "write code or files; add operational steps (run/stop/test commands) as plan items",
     "lead": "write function bodies; touch other components or other nodes; change the design",
     "task": "write function bodies; touch other files or other nodes; change the design",
-    "dev": "change other files' behaviour, other plan nodes, the design or the plan, or anything in evidences/",
+    "dev": "change other files' behaviour, other plan nodes, the design or the plan, or the evidence",
     "reviewer": "fix code yourself; change the plan",
-    "cleanup": "touch .git, .jfi/, evidences/, the deliverable's source/tests/docs, or anything you're unsure about",
+    "cleanup": "touch .git, .jfi/, the deliverable's source/tests/docs, or anything you're unsure about",
 }
 
 
@@ -55,7 +55,7 @@ class ScopeAnchor:
     reason: str = ""  # a redo's Laya reason, or the node an escalation came from
     notes: str = ""
     references: Sequence[str] = field(default_factory=tuple)  # already resolved (design entries inlined)
-    cases: Sequence[str] = field(default_factory=tuple)  # ground-truth cases, evidence in evidences/
+    cases: Sequence[str] = field(default_factory=tuple)  # ground-truth cases (evidence in .jfi/evidence/<session>/)
 
     def render(self) -> str:
         lines = ["SCOPE (fixed for this whole conversation)",
@@ -69,7 +69,7 @@ class ScopeAnchor:
         if self.notes:
             lines.append(f"  notes:     {self.notes}")
         if self.cases:
-            lines.append(f"  cases:     {', '.join(self.cases)} (evidence in evidences/<case>.txt or .png)")
+            lines.append(f"  cases:     {', '.join(self.cases)} (compare_evidence <case> shows its evidence)")
         if self.references:
             lines.append("  read first:")
             lines.extend(f"    - {ref}" for ref in self.references)
