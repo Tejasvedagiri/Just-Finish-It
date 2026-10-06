@@ -328,6 +328,7 @@ uv run build --laya --anthropic            # add extras by flag; --all for every
 | Flag | Bundles | For |
 |---|---|---|
 | *(always)* | Streamlit, websockets | the `jfi-web` dashboard, the fleet |
+| *(always, unless `--no-browser`)* | Playwright's headless Chromium (~120 MB; downloaded once into `build/ms-playwright/`) | `check_page`, the `browser` tool, screenshot evidence -- no `playwright install` where the binary runs. `jfi --check-browser` tests it. Costs ~3 s of start-up (the one-file binary unpacks it each launch). |
 | `--laya` | Laya, torch, transformers (several GB) | `LAYA=1` |
 | `--anthropic` | `anthropic` | `LLM_BACKEND=anthropic` |
 | `--mysql` / `--postgres` | `pymysql` / `psycopg` | `DB_BACKEND` |

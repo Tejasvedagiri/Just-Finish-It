@@ -458,6 +458,11 @@ evidence. A case that can't run here (no browser) goes in the review report as
 | Captured by | `capture_evidence` running `evidence_one` per input | `capture_evidence` screenshotting the original after its steps (or converting a mockup to PNG) |
 | Compared by | `compare_one` per input; JFI compares the outputs: `tokens` (default: numbers by value, words exactly, separators ignored), `exact` or `contains`; an `!error` input passes when the new code also fails | The new app screenshotted the same way; fails when more than `COMPARE_MAX_DIFF` (10%) of the pixels differ **or** text on the original is missing from the new page |
 
+The browser ships inside the binary (`uv run build` downloads Playwright's
+headless Chromium and packs it in; `jfi --check-browser` tests it), so
+screenshot evidence needs nothing installed where JFI runs. From source, run
+`uv run playwright install chromium` once.
+
 Both visual passes are needed: building this, a nav link missing from the new
 page changed 0.03% of the pixels. The screenshots are compared in the same
 headless browser `check_page` uses (a canvas diff), so there's no image

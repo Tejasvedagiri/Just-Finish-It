@@ -800,6 +800,8 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         description="Just Finish It -- a multi-phase, plan-driven coding agent for local LLMs.",
     )
     parser.add_argument("--version", action="store_true", help="Print the installed version and exit.")
+    parser.add_argument("--check-browser", action="store_true",
+                        help="Open the headless browser JFI uses (check_page, screenshots) on a test page and exit.")
     # Internal only -- not meant to be typed by a person. This is how
     # _launch_web_dashboard re-invokes a frozen standalone binary to serve
     # the dashboard itself when no separate `jfi-web` is on PATH (see
@@ -813,6 +815,12 @@ def main():
     if args.version:
         print(f"JFI {_version()}")
         return
+
+    if args.check_browser:
+        from JFI.tool.browser_tools import browser_check
+        message = browser_check()
+        print(message)
+        raise SystemExit(1 if message.startswith("Error") else 0)
 
     if args.internal_web_dashboard:
         from JFI.web.launcher import main as run_web_dashboard

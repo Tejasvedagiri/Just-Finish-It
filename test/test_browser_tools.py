@@ -390,3 +390,28 @@ def test_check_page_reports_console_errors_and_failed_requests(tmp_path):
     assert out.splitlines()[1].startswith("PROBLEMS:")
     assert "console error: boom" in out and "/missing -> 404" in out and "Hello" in out
     assert (tmp_path / "check-1.png").exists()
+
+
+def test_the_binary_uses_the_browser_bundled_in_it(tmp_path, monkeypatch):
+    """`uv run build` packs Playwright's headless Chromium into the binary
+    (under ms-playwright/ in its unpack folder); there it wins over any
+    PLAYWRIGHT_BROWSERS_PATH, whose browser may not match the bundled
+    playwright's version."""
+    import importlib
+    import sys
+
+    import JFI.tool.browser_tools as bt
+
+    (tmp_path / "ms-playwright").mkdir()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/somewhere/else")
+    importlib.reload(bt)
+    assert bt._bundled_browsers() == str(tmp_path / "ms-playwright")
+    assert bt.os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(tmp_path / "ms-playwright")
+
+    monkeypatch.delattr(sys, "frozen")
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/somewhere/else")
+    importlib.reload(bt)
+    assert bt._bundled_browsers() is None
+    assert bt.os.environ["PLAYWRIGHT_BROWSERS_PATH"] == "/somewhere/else"  # from source, the env still wins
