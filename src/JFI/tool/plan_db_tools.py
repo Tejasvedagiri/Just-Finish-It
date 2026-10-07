@@ -34,23 +34,13 @@ def _render_plan(engine, session_id: str) -> str:
 
     lines = []
 
-    # A leaf's checkbox depends on whether it HAS children, never on its
-    # depth -- root-level leaves are exactly as likely to be genuine (no
-    # children yet) as any other, so this must run at depth 0 too, not
-    # just recursively below it (an earlier version had a separate,
-    # unconditional root-printing loop here that always omitted the
-    # checkbox, which is wrong the moment a root-level item has no
-    # children of its own -- caught by test_plan_db_tools_wiring.py).
+    # Every node has a checkbox, parents too: Dev finishes a parent after
+    # everything under it (JFI.imp.queue), so it has a status of its own.
     def render_subtree(parent_id, phase, depth: int) -> None:
         for leaf in siblings_by_parent.get((parent_id, phase), []):
-            children = siblings_by_parent.get((leaf.id, phase), [])
             number = display_number(leaf, by_id, siblings_by_parent)
-            indent = "  " * depth
-            if children:
-                lines.append(f"{indent}[id={leaf.id}] {number}. {leaf.description}")
-            else:
-                mark = {"done": "x", "skipped": "o"}.get(leaf.status.value, " ")
-                lines.append(f"{indent}[id={leaf.id}] [{mark}] {number} {leaf.description}")
+            mark = {"done": "x", "skipped": "o"}.get(leaf.status.value, " ")
+            lines.append("  " * depth + f"[id={leaf.id}] [{mark}] {number} {leaf.description}")
             render_subtree(leaf.id, phase, depth + 1)
 
     phases_in_order = []
@@ -86,7 +76,8 @@ def render_plan_markdown(engine, session_id: str) -> str:
 
     No judge or review status here: the dashboard's Task | Judge table
     (plan_judge_rows) shows those, and the user asked to keep the plan itself
-    plain.
+    plain. Every node is a checkbox, parents too (Dev finishes a parent
+    after its children); the fleet nests them by their dot numbers.
     """
     leaves = _load_leaves(engine, session_id)
     if not leaves:
@@ -97,14 +88,9 @@ def render_plan_markdown(engine, session_id: str) -> str:
 
     def render_subtree(parent_id, phase, depth: int) -> None:
         for leaf in siblings_by_parent.get((parent_id, phase), []):
-            children = siblings_by_parent.get((leaf.id, phase), [])
             number = display_number(leaf, by_id, siblings_by_parent)
-            indent = "  " * depth
-            if children:
-                lines.append(f"{indent}- {number}. {leaf.description}")
-            else:
-                mark = {"done": "x", "skipped": "○"}.get(leaf.status.value, " ")
-                lines.append(f"{indent}- [{mark}] {number} {leaf.description}")
+            mark = {"done": "x", "skipped": "○"}.get(leaf.status.value, " ")
+            lines.append("  " * depth + f"- [{mark}] {number} {leaf.description}")
             render_subtree(leaf.id, phase, depth + 1)
 
     rendered_any = False
@@ -139,23 +125,20 @@ def _iter_leaves_in_document_order(leaves: list[Leaf], phase) -> list[Leaf]:
 
 
 def plan_progress_db(engine, session_id: str) -> tuple[int, int]:
-    """(resolved, total) leaves across every phase. A DONE or SKIPPED leaf
-    counts as resolved: a skipped one is no longer pending, just not done
-    by the model."""
+    """(resolved, total) nodes across every phase -- parents too, since Dev
+    finishes each one after its children. A DONE or SKIPPED node counts as
+    resolved: a skipped one is no longer pending, just not done by the model."""
     leaves = _load_leaves(engine, session_id)
-    phases_present = {leaf.phase for leaf in leaves}
-    genuine = [leaf for phase in phases_present for leaf in _iter_leaves_in_document_order(leaves, phase)]
-    resolved = sum(1 for leaf in genuine if leaf.status in (LeafStatus.DONE, LeafStatus.SKIPPED))
-    return resolved, len(genuine)
+    resolved = sum(1 for leaf in leaves if leaf.status in (LeafStatus.DONE, LeafStatus.SKIPPED))
+    return resolved, len(leaves)
 
 
 def phase_progress_db(engine, session_id: str, phase: str) -> tuple[int, int]:
-    """(resolved, total) leaves within one phase, same rule as
+    """(resolved, total) nodes within one phase, same rule as
     plan_progress_db."""
-    leaves = _load_leaves(engine, session_id)
-    genuine = _iter_leaves_in_document_order(leaves, Phase(phase))
-    resolved = sum(1 for leaf in genuine if leaf.status in (LeafStatus.DONE, LeafStatus.SKIPPED))
-    return resolved, len(genuine)
+    nodes = [leaf for leaf in _load_leaves(engine, session_id) if leaf.phase == Phase(phase)]
+    resolved = sum(1 for leaf in nodes if leaf.status in (LeafStatus.DONE, LeafStatus.SKIPPED))
+    return resolved, len(nodes)
 
 
 def built_files(engine, session_id: str) -> list[str]:
@@ -189,11 +172,8 @@ def get_leaf(engine, session_id: str, leaf_id: int) -> str:
     children = siblings_by_parent.get((leaf.id, leaf.phase), [])
 
     lines = [f"[id={leaf.id}] {number} {leaf.description}", f"phase: {leaf.phase.value}"]
-    if children:
-        lines.append(f"status: (parent -- {len(children)} children, no status/timing of its own)")
-    else:
-        mark = {"done": "[x] done", "skipped": "[o] skipped"}.get(leaf.status.value, "[ ] todo")
-        lines.append(f"status: {mark}")
+    mark = {"done": "[x] done", "skipped": "[o] skipped"}.get(leaf.status.value, "[ ] todo")
+    lines.append(f"status: {mark}" + (f" (parent -- done after its {len(children)} children)" if children else ""))
 
     if leaf.parent_id is None:
         lines.append("parent: none (top-level)")
@@ -215,7 +195,7 @@ def get_leaf(engine, session_id: str, leaf_id: int) -> str:
 
     for label, value in (("done when", leaf.done_when), ("files", ", ".join(leaf.files or [])),
                          ("notes", leaf.notes), ("references", ", ".join(leaf.references or [])),
-                         ("fix note", leaf.fix_note)):
+                         ("cases", ", ".join(leaf.cases or [])), ("fix note", leaf.fix_note)):
         if value:
             lines.append(f"{label}: {value}")
     lines.append(f"started_at: {leaf.started_at or '-'}")
@@ -301,7 +281,7 @@ def plan_judge_rows(engine, session_id: str) -> list[dict]:
                                         bool(siblings_by_parent.get((leaf.id, phase)))),
                 "Decided by": decided,
                 "Review": leaf.review_status or "",
-                "Status": leaf.status.value if not siblings_by_parent.get((leaf.id, phase)) else "",
+                "Status": leaf.status.value,
             })
             walk(leaf.id, phase, depth + 1)
 

@@ -25,13 +25,14 @@ from JFI.episode.engine import run_episode
 from JFI.episode.roles import ROLE_ENV_PREFIXES
 from JFI.episode.tools import EpisodeTools
 from JFI.imp.dev import run_command
-from JFI.imp.queue import dev_leaves
+from JFI.imp.queue import dev_nodes
 from JFI.models import DesignEntry, Leaf, PlanEvent, RunbookEntry, get_session
 from JFI.models.enums import LeafStatus
-from JFI.planner.nodes import load_nodes
+from JFI.planner.nodes import load_nodes, reopen_with_ancestors
 from JFI.review.prompts import CLEANUP, REVIEW_CONTINUE, REVIEWER
 from JFI.tool.checkpoint_tools import make_checkpoint_tools, revert_leaf
 from JFI.tool.code_tools import list_dir, read_file_range, scan_markers, search_code
+from JFI.tool.evidence_tools import compare_cases, list_cases, make_evidence_tools, read_evidence, sync_evidence_names
 from JFI.tool.note_tools import REVIEW_REPORT, get_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.result_cap import cap_result
@@ -104,6 +105,7 @@ class Reviewer:
                 "search_code": lambda pattern, path=".", regex=False: search_code(self.root, pattern, path, regex),
                 "list_dir": lambda path=".": list_dir(self.root, path),
                 **make_checkpoint_tools(self.engine, self.session_id, self.root),
+                **make_evidence_tools(self.engine, self.session_id, self.root, "reviewer"),
                 "reopen_leaf": self._reopen_leaf(reopened),
                 "finish": self._finish(reopened, report_before)}
         system = build_system_message(anchor, REVIEWER, [runbook_index(self.engine, self.session_id)])
@@ -125,9 +127,9 @@ class Reviewer:
             fix_note = (fix_note or "").strip()
             if not fix_note:
                 return "Error: reopen_leaf needs a fix_note: the failing step, expected vs actual, and where."
-            leaf = next((n for n in dev_leaves(load_nodes(self.engine, self.session_id)) if n.id == int(leaf_id)), None)
+            leaf = next((n for n in dev_nodes(load_nodes(self.engine, self.session_id)) if n.id == int(leaf_id)), None)
             if leaf is None:
-                return f"Error: {leaf_id} isn't a leaf Dev builds. get_plan() lists the leaves and their files."
+                return f"Error: {leaf_id} isn't a node Dev builds. get_plan() lists the nodes and their files."
             reverted = ""
             if revert:
                 if not leaf.checkpoint:
@@ -145,14 +147,44 @@ class Reviewer:
                 db.add(row)
                 db.add(PlanEvent(session_id=self.session_id, node_id=leaf.id, type="reopen", detail=fix_note[:500]))
                 db.commit()
+            parents = reopen_with_ancestors(self.engine, self.session_id, leaf.id)
             reopened.append(leaf.id)
-            return f"Reopened leaf {leaf.id} ({leaf.description}) for Dev with your fix note.{reverted}"
+            above = f" The part(s) above it ({', '.join(map(str, parents))}) are checked again after it." \
+                if parents else ""
+            return f"Reopened node {leaf.id} ({leaf.description}) for Dev with your fix note.{reverted}{above}"
         return reopen_leaf
+
+    def _evidence_check(self) -> tuple[Optional[str], str]:
+        """(a refusal, or None; a note for the pass). Every ground-truth case
+        is compared again over the finished build: a later node can break
+        what an earlier one matched, and Dev may have accepted a difference."""
+        sync_evidence_names(self.engine, self.session_id, self.root)
+        cases = list_cases(self.root, self.session_id)
+        if not cases:
+            return None, ""
+        results = compare_cases(self.engine, self.session_id, self.root, cases)
+        bad = [r for r in results if not r.ok]
+        unverified = [c for c in cases if getattr(read_evidence(self.root, self.session_id, c), "unverified", False)]
+        note = (f" Checked against generated (LLM, not verified) evidence only: {', '.join(unverified)}."
+                if unverified else "")
+        if not bad:
+            return None, f" All {len(results)} ground-truth case(s) match their evidence.{note}"
+        owners: dict = {}
+        for n in dev_nodes(load_nodes(self.engine, self.session_id)):
+            for c in n.cases or []:
+                owners.setdefault(c, n.id)
+        lines = [f"- {r.case} (node {owners.get(r.case, '?')}):\n{r.report}" for r in bad]
+        return (cap_result("Error: not a pass -- the build doesn't match its ground truth. reopen_leaf the node "
+                           "of each failing case (or the node whose code is wrong) with what differs:\n"
+                           + "\n".join(lines), "Only the end of the output is shown."), note)
 
     def _finish(self, reopened: List[int], report_before: Optional[str]):
         def finish(node_id: int = 0, summary: str = "") -> str:
             if reopened or get_note(self.engine, self.session_id, REVIEW_REPORT) not in (None, report_before):
                 return "Review finished: the problems are routed."
+            refusal, evidence_note = self._evidence_check()
+            if refusal:
+                return refusal
             e2e = self._runbook("e2e")
             if e2e is None and self._is_document():
                 # A document goal (G4) has no command to run: the mechanical
@@ -162,7 +194,7 @@ class Reviewer:
                     return ("Error: not a pass -- placeholders are left: "
                             + "; ".join(f"{p}:{no} {m}" for p, no, m in left[:20])
                             + ". reopen_leaf the passages they belong to.")
-                return "PASS confirmed: no placeholder is left in the document."
+                return "PASS confirmed: no placeholder is left in the document." + evidence_note
             if e2e is None:
                 return ("Error: the runbook has no e2e entry, so a pass can't be confirmed. Report it with "
                         "write_review_report as not checked, then finish.")
@@ -172,12 +204,12 @@ class Reviewer:
                                   f"reopen_leaf for a bug in built code, write_review_report for missing work.\n"
                                   f"{output}", "Only the end of the output is shown.")
             runbook_set(self.engine, self.session_id, "e2e", e2e.command, e2e.notes, True, "reviewer")
-            return f"PASS confirmed: `{e2e.command}` passed."
+            return f"PASS confirmed: `{e2e.command}` passed." + evidence_note
         return finish
 
     def _mark_passed(self) -> None:
         with get_session(self.engine) as db:
-            for leaf in dev_leaves(load_nodes(self.engine, self.session_id)):
+            for leaf in dev_nodes(load_nodes(self.engine, self.session_id)):
                 if leaf.status == LeafStatus.DONE:
                     row = db.get(Leaf, leaf.id)
                     row.review_status = PASSED

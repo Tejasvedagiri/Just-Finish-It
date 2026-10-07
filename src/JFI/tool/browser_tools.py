@@ -63,7 +63,49 @@ elif sys.platform == "win32":
                                           "ms-playwright")
 else:
     _DEFAULT_BROWSERS_PATH = os.path.expanduser("~/.cache/ms-playwright")
-os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", _DEFAULT_BROWSERS_PATH)
+
+
+def _bundled_browsers() -> Optional[str]:
+    """The headless Chromium `uv run build` packs into the binary
+    (build_binary.BUNDLED_BROWSERS), so the binary needs no `playwright
+    install` where it runs."""
+    base = getattr(sys, "_MEIPASS", None)
+    if getattr(sys, "frozen", False) and base and os.path.isdir(os.path.join(base, "ms-playwright")):
+        return os.path.join(base, "ms-playwright")
+    return None
+
+
+# In the binary its own browser wins over a PLAYWRIGHT_BROWSERS_PATH from the
+# environment: it's the build the bundled playwright drives, and another
+# install's version may not be.
+if _bundled_browsers():
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _bundled_browsers()
+else:
+    os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", _DEFAULT_BROWSERS_PATH)
+
+
+def browser_check() -> str:
+    """`jfi --check-browser`: launch the headless browser on a page of its
+    own and say where it came from -- the first thing to try when a page
+    check or a screenshot fails."""
+    where = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    origin = "bundled in this binary" if _bundled_browsers() else "installed"
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return "Error: the 'playwright' package is not installed here."
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            try:
+                page = browser.new_page()
+                page.set_content("<h1>JFI browser check</h1>")
+                text = page.inner_text("h1")
+            finally:
+                browser.close()
+    except Exception as e:  # noqa: BLE001 -- the browser missing or failing to start
+        return f"Error: the headless browser didn't start ({origin}, {where}): {e}"
+    return f"OK: the headless browser works ({origin}, {where}); it rendered {text!r}."
 
 
 def browse_webpage(

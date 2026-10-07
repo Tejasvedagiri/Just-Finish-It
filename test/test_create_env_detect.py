@@ -9,6 +9,8 @@ Linux or macOS path can't break unseen on a Windows dev machine (the user:
 
 import json
 
+import pytest
+
 from JFI import create_env_detect as detect
 
 GB = 1024 ** 3
@@ -281,3 +283,64 @@ def test_a_parallel_setting_the_server_cant_serve_is_noted():
     assert detect.parallel_shortfall("1", "40960", "lmstudio", loaded) is None
     # Nothing reported (a vLLM box, LM Studio without `lms`): the runtime explains it, not create-env.
     assert detect.parallel_shortfall("4", "20480", "custom", detect.ServerModel("m", True, 40960)) is None
+
+
+# ------------------------------------------------------------------ reply caps
+
+def test_reply_lengths_are_measured_on_jfi_like_tasks():
+    """The user: "check CAP values, it should be adjusted ... run a few prompts
+    to get the right values". STREAM_OUTPUT_CAP / REASONING_OUTPUT_CAP were
+    10,000 / 8,000 for every reasoning model; now three short JFI-like
+    requests are sent and their thinking and answers measured, with the
+    server's own token count when it reports one."""
+    sent = []
+
+    def post(url, headers=None, body=None, timeout=0):
+        sent.append(body)
+        name = ["plan", "implement", "fix"][len(sent) - 1]
+        thinking = {"plan": 3000, "implement": 1200, "fix": 400}[name]
+        return {"choices": [{"finish_reason": "tool_calls",
+                             "message": {"reasoning_content": "x" * thinking * 4,
+                                         "tool_calls": [{"function": {"name": "t", "arguments": "y" * 1600}}]}}],
+                "usage": {"completion_tokens": thinking + 410}}
+
+    replies = detect.measure_replies("http://127.0.0.1:1234/v1", "", "m", 16000, post_json=post)
+    assert [b["max_tokens"] for b in sent] == [16000] * 3 and all(b["tools"] for b in sent)
+    assert [(r.name, r.finished) for r in replies] == [("plan", True), ("implement", True), ("fix", True)]
+    assert replies[0].reasoning_tokens == pytest.approx(3000, abs=10) and replies[0].answer_tokens < 450
+
+    found = detect.Detected(model=detect.ServerModel("qwen3.8-27b", True, 40192, 262144),
+                            replies=replies, probe_limit=16000)
+    values = _values(detect.compute("qwen3.8-27b", found, lambda m: 32768))
+    # longest reply ~3,410 x2 = 7,000, under the 8,500 floor for a model that
+    # thinks (real calc runs saw 8,023-token replies); thinking gets the cap
+    # minus room for the answer after it.
+    assert (values["STREAM_OUTPUT_CAP"], values["REASONING_OUTPUT_CAP"]) == ("8500", "7500")
+    assert values["CONTEXT_COMPRESSION_RATIO"] == "0.78"  # 40,192 - 8,500 kept for the reply
+
+    longer = detect.Detected(model=found.model, replies=[detect.Reply("plan", 5200, 600, True)], probe_limit=16000)
+    values = _values(detect.compute("qwen3.8-27b", longer, lambda m: 32768))
+    assert values["STREAM_OUTPUT_CAP"] == "12000"  # 5,800 x2, rounded up: a model that measures longer gets more
+
+
+def test_a_reply_still_going_at_the_limit_is_warned_about_and_capped_there():
+    found = detect.Detected(model=detect.ServerModel("m", True, 40192),
+                            replies=[detect.Reply("plan", 8000, 0, False), detect.Reply("fix", 900, 300, True)],
+                            probe_limit=8000)
+    values = _values(detect.compute("m", found, lambda m: 32768))
+    assert values["STREAM_OUTPUT_CAP"] == "16000"  # 8,000 x2
+    assert any("still going at the 8,000-token test limit" in w for w in found.warnings)
+
+
+def test_a_model_that_doesnt_think_gets_a_small_reasoning_cap():
+    found = detect.Detected(model=detect.ServerModel("m", True, 32768),
+                            replies=[detect.Reply("plan", 0, 600, True), detect.Reply("implement", 0, 900, True)])
+    values = _values(detect.compute("m", found, lambda m: 32768))
+    assert (values["STREAM_OUTPUT_CAP"], values["REASONING_OUTPUT_CAP"]) == ("2000", "2000")
+
+
+def test_a_server_that_reports_no_usage_is_measured_by_text_length():
+    post = lambda url, headers=None, body=None, timeout=0: {  # noqa: E731
+        "choices": [{"finish_reason": "stop", "message": {"reasoning": "x" * 4000, "content": "y" * 400}}]}
+    [plan, *_] = detect.measure_replies("http://h/v1", "", "m", 4000, post_json=post)
+    assert (plan.reasoning_tokens, plan.answer_tokens) == (1000, 100)

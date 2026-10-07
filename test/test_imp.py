@@ -68,6 +68,14 @@ def _calc(engine, root):
     return file_node
 
 
+CHECK = f'"{sys.executable}" -c "print(1)"'
+
+
+def _parents_check(*parents):
+    """The turn each parent gets once everything under it is done (bottom-up)."""
+    return [turn(call("mark_leaf_done", leaf_id=node, summary="part works", check=CHECK)) for node in parents]
+
+
 ADD_IMPL = "def add(a: int, b: int) -> int:\n    return a + b\n"
 TOTAL_IMPL = "def total(xs: list) -> int:\n    out = 0\n    for x in xs:\n        out = add(out, x)\n    return out\n"
 TESTS = "from calc.ops import add, total\n\n\ndef test_add():\n    assert add(2, 3) == 5\n\n\n" \
@@ -100,13 +108,16 @@ def test_a_leaf_is_done_only_when_its_own_test_passes(engine, tmp_path):
              turn(call("mark_leaf_done", leaf_id=leaf, summary="add", test_id="tests/test_ops.py::test_add")),
              turn(call("replace_symbol", path="calc/ops.py", name="add", new_source=ADD_IMPL),
                   call("mark_leaf_done", leaf_id=leaf, summary="add", test_id="tests/test_ops.py::test_add"))]
+    turns += _parents_check(file_node, file_node - 1)
     imp, console = _imp(engine, tmp_path, turns)
     result = imp.run()
 
     assert result.complete
     with get_session(engine) as db:
         modes = [e.mode for e in db.exec(Episode.__table__.select()).all()]
-    assert modes == ["leaf", "finish-up"]  # one episode for the leaf; total()'s stub is left for the finish-up
+    # One episode for the leaf, then its file and its component are checked
+    # (bottom-up); total()'s stub is left for the finish-up.
+    assert modes == ["leaf", "check", "check", "finish-up"]
     assert _status(engine, leaf).status == LeafStatus.DONE
     assert "return a + b" in (tmp_path / "calc/ops.py").read_text()
     if shutil.which("git"):  # the passing leaf is checkpointed, so the reviewer can see its own diff
@@ -191,13 +202,16 @@ def test_queue_waits_for_leaves_under_nodes_an_ancestor_depends_on(engine):
     api_leaf = _node(engine, "task", api_file, "implement list_todos()")
     db_leaf = _node(engine, "task", db_file, "implement get_session()")
 
-    assert next_leaf(load_nodes(engine, "s"), {}).id == db_leaf
-    with get_session(engine) as db:
-        row = db.get(Leaf, db_leaf)
-        row.status = LeafStatus.DONE
-        db.add(row)
-        db.commit()
-    assert next_leaf(load_nodes(engine, "s"), {}).id == api_leaf
+    # Bottom-up: db's leaf, then its file, then the db component, then api.
+    for expected in (db_leaf, db_file, db_comp, api_leaf, api_file, api_comp):
+        node = next_leaf(load_nodes(engine, "s"), {})
+        assert node.id == expected
+        with get_session(engine) as db:
+            row = db.get(Leaf, node.id)
+            row.status = LeafStatus.DONE
+            db.add(row)
+            db.commit()
+    assert next_leaf(load_nodes(engine, "s"), {}) is None
 
 
 def _started(engine, leaf, attempts):
@@ -247,10 +261,15 @@ def test_overflow_sends_the_leaf_to_task_and_dev_continues_with_the_pieces(engin
 
     def replan():
         _node(engine, "task", big, "implement add(a, b) in calc/ops.py: the actual sum", kind="implement")
+        with get_session(engine) as db:  # what the planner does once the split has its pieces
+            db.get(Leaf, big).plan_status = GOOD
+            db.commit()
 
     turns = [turn(call("read_symbol", path="calc/ops.py", name="add"))] * 6 + [  # 3 for the leaf, 3 for its wrap-up
         turn(call("replace_symbol", path="calc/ops.py", name="add", new_source=ADD_IMPL),
-             call("mark_leaf_done", leaf_id=big + 1, summary="a", check=f'"{sys.executable}" -c "print(1)"'))]
+             call("mark_leaf_done", leaf_id=big + 1, summary="a", check=CHECK))]
+    # Split, the leaf is a parent: its own check comes after its piece.
+    turns += _parents_check(big, file_node, file_node - 1)
     monkeypatch.setenv("MAX_EPISODE_TURNS", "3")
     imp, _ = _imp(engine, tmp_path, turns, replan=replan)
     result = imp.run()
@@ -261,6 +280,8 @@ def test_overflow_sends_the_leaf_to_task_and_dev_continues_with_the_pieces(engin
     assert [(e.mode, e.end_reason) for e in episodes] == [("leaf", "turn_cap"), ("wrap-up", "turn_cap"),
                                                           ("leaf", "finish")]
     assert _status(engine, big + 1).status == LeafStatus.DONE
+    assert _status(engine, big).status == LeafStatus.DONE and _status(engine, big).ended_at >= \
+        _status(engine, big + 1).ended_at
 
 
 def test_a_command_or_path_as_test_id_is_refused_with_the_right_id(engine, tmp_path):
@@ -355,3 +376,32 @@ def test_setup_fix_is_checked_against_the_corrected_command(engine, tmp_path):
     with get_session(engine) as db:
         episodes = db.exec(Episode.__table__.select()).all()
     assert [(e.mode, e.end_reason, e.turns) for e in episodes] == [("setup", "finish", 1)]
+
+
+def test_dev_works_bottom_up_and_a_reopened_node_reopens_the_parts_above_it(engine):
+    """The user, after the first real run: "If we have 1, 1.1, 1.1.1, 1.1.2,
+    1.1.3: first impl 1.1.1, 1.1.2, 1.1.3, then 1.1, then 1." Every node is
+    Dev's, parents last; reopening a leaf (review, changed evidence) or adding
+    a part under a finished parent sends the parents above it back too."""
+    from JFI.planner.nodes import reopen_with_ancestors
+
+    comp = _node(engine, "architect", None, "1")
+    file_node = _node(engine, "lead", comp, "1.1")
+    leaves = [_node(engine, "task", file_node, f"1.1.{n}") for n in (1, 2, 3)]
+    order = []
+    while (node := next_leaf(load_nodes(engine, "s"), {})) is not None:
+        order.append(node.id)
+        with get_session(engine) as db:
+            db.get(Leaf, node.id).status = LeafStatus.DONE
+            db.commit()
+    assert order == leaves + [file_node, comp]
+
+    assert reopen_with_ancestors(engine, "s", leaves[1]) == [file_node, comp]
+    assert next_leaf(load_nodes(engine, "s"), {}).id == file_node  # the leaf itself is the reviewer's to reopen
+
+    with get_session(engine) as db:
+        for node_id in (file_node, comp):
+            db.get(Leaf, node_id).status = LeafStatus.DONE
+        db.commit()
+    new = _node(engine, "task", file_node, "1.1.4")
+    assert [_status(engine, n).status for n in (new, file_node, comp)] == [LeafStatus.TODO] * 3

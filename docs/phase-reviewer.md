@@ -45,6 +45,14 @@ one verdict:
 A check that can't run in this environment is reported with
 `write_review_report` as not checked, never passed.
 
+When the session has ground-truth evidence (`.jfi/evidence/<session>/`) ([`old_new.md`](old_new.md)), the
+reviewer has `compare_evidence` / `list_evidence`, and `finish` compares every
+case again over the finished build before it confirms a pass
+(`Reviewer._evidence_check`): a case that differs refuses the pass and names
+the node that owns it to reopen. `reopen_leaf` takes any node Dev finished,
+and sends the finished parents above it back too. The pass message lists any case checked only
+against LLM-generated (not verified) evidence.
+
 ## The fix loop (`_run_reviewer`)
 
 ```

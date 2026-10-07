@@ -34,6 +34,8 @@ Every JFI session runs four phases in order:
 4. The **reviewer** checks the whole result. A failed review (or anything you queued meanwhile) becomes feedback for the next iteration: the planner adds nodes for it, leaving finished leaves alone, and the loop runs again (the header shows `loop #2`, etc.).
 5. **cleanup** tidies up, then JFI idles with a live input line waiting for your next request, or exits.
 
+**Give it a ground truth** and every piece is checked against it as it's built ([`docs/old_new.md`](docs/old_new.md)): "compare it with `bc`", "turn `portfolio-dashboard.html` into a Vite app", "make it match `docs/mockups/login.png`", an input file with its expected output, API docs, an old script, an old database. The Lead captures the evidence into `.jfi/evidence/<session>/` (one folder per session, each file named by its task number, e.g. `1.2_add.txt`) by running the ground truth (a command, `curl`, a SQL query, a screenshot; text the model writes itself is the flagged last resort), and after each task that builds a case a compare task checks the new code against it; the reviewer checks them all again. You can read it there, or accept, edit or re-capture it in `jfi-web`; a change re-queues the case's compare task. `EVIDENCE_REVIEW=1` makes the run wait for you to accept it before building (off by default).
+
 A new session in the same project starts from the last session's runbook and its lasting design (stack, components, contracts, conventions), so it doesn't re-discover how to set up, run and test the project; the Architect keeps what still fits the new goal.
 
 Every console line is also logged to the database as it happens (`uv run export-db` dumps it, and `jfi-web` shows it live).
@@ -326,6 +328,7 @@ uv run build --laya --anthropic            # add extras by flag; --all for every
 | Flag | Bundles | For |
 |---|---|---|
 | *(always)* | Streamlit, websockets | the `jfi-web` dashboard, the fleet |
+| *(always, unless `--no-browser`)* | Playwright's headless Chromium (~120 MB; downloaded once into `build/ms-playwright/`) | `check_page`, the `browser` tool, screenshot evidence -- no `playwright install` where the binary runs. `jfi --check-browser` tests it. Costs ~3 s of start-up (the one-file binary unpacks it each launch). |
 | `--laya` | Laya, torch, transformers (several GB) | `LAYA=1` |
 | `--anthropic` | `anthropic` | `LLM_BACKEND=anthropic` |
 | `--mysql` / `--postgres` | `pymysql` / `psycopg` | `DB_BACKEND` |
@@ -356,7 +359,7 @@ Just-Finish-It/
 │   ├── session/                  # session persistence (history, metadata, queue) and the project-wide .jfi/.lock
 │   ├── llm/                      # OpenAI-compatible and Anthropic backends, retries, LM Studio control
 │   ├── manager/                  # the prompt_toolkit terminal UI, and the bridges to jfi-web (files) and the fleet (WebSocket)
-│   ├── tool/                     # everything the model can call: code, commands, runbook/design, plan reads, context cache, images, browser, ...
+│   ├── tool/                     # everything the model can call: code, commands, runbook/design, plan reads, context cache, images, browser, ground-truth evidence, ...
 │   ├── web/                      # jfi-web: the Streamlit dashboard and its launcher
 │   └── utils/                    # small shared helpers (text_sanitize.py)
 │
@@ -410,7 +413,9 @@ Each episode gets only its role's tools (`ROLE_CORE_TOOLS` in `src/JFI/episode/r
 | `runbook_set` / `runbook_get` | How to set up, run, stop, test (`test`, `test_one`), build, check (`e2e`) and run a scratch script (`script`), the file the app starts from (`entry`), plus the layout: `src_dir`, `test_dir`, `test_naming`. Operating the app is never a plan node. |
 | `scaffold_file` / `unscaffold_file` | Create a file of stubs (a declaration and what it does; the body is generated), or remove one. |
 | `mark_change` | Mark an existing function for Dev to change or delete. |
-| `finish` | End the episode. The Architect's also requires the runbook, design and test setup (or the outline, for a document). |
+| `capture_evidence` / `list_evidence` | Lead: save a case's ground-truth evidence into `.jfi/evidence/<session>/` by running the runbook's `evidence_one` (or screenshotting a page, copying a mockup, running a saved SQL query). Answers the model types itself are the last resort, saved as not verified. |
+| `compare_evidence` | Dev (every node with cases) and the reviewer: the new code on a case's inputs via `compare_one`, or the new app screenshotted in the case's state, against its evidence (numbers by value; screenshots as original \| new \| differences, plus missing text). |
+| `finish` | End the episode. The Architect's also requires the runbook, design and test setup (or the outline, for a document), and the ground truth when the goal names one; under a ground truth, the Lead's and Task's require every new node to have its own case with evidence. |
 
 **Reading and editing code** (all roles, by need)
 

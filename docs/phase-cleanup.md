@@ -8,7 +8,8 @@ One scoped episode (`role="cleanup"`, model `CLEANUP_*` → shared) with
 `execute_command`, `list_dir` and `finish`. It:
 
 - **never** deletes, moves or overwrites anything under `.jfi/` (the project's
-  database, shared by every session);
+  database, shared by every session, and the ground-truth evidence in
+  `.jfi/evidence/`);
 - keeps every file a plan node created: scaffolded source, tests, configs and docs
   are the deliverable;
 - moves anything worth keeping for reference (a screenshot, a debug script) into

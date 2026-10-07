@@ -143,7 +143,8 @@ MODEL=qwen3:8b
 # accepts approval answers from .jfi/web_answer.json, so the
 # `jfi-web` dashboard (pip install "just-finish-it[web]") can show live
 # progress and answer approval prompts from a browser instead of (or
-# alongside) the terminal. Off by default. Accepts 1/true/yes/on.
+# alongside) the terminal. Off when unset; `uv run create-env` asks, with
+# yes as its default, and writes 0 when you decline. Accepts 1/true/yes/on.
 # JFI_WEB_BRIDGE=1
 
 # Pauses at a failed-review boundary for an explicit Approve/Reject (from the
@@ -166,7 +167,9 @@ MODEL=qwen3:8b
 # local-dashboard-only), the master can run on a completely different
 # machine from this session: the two only ever talk over this one socket,
 # never a shared filesystem. Independent of JFI_WEB_BRIDGE -- both can be
-# on at once. Off by default. See src/JFI/manager/socket_reporter.py.
+# on at once. Off when unset or blank; `uv run create-env` asks, with yes
+# (ws://127.0.0.1:8765/report) as its default, and writes it blank when you
+# decline. See src/JFI/manager/socket_reporter.py.
 #
 # SECURITY: the fleet master ships with no authentication -- anyone who can reach
 # its port can see every reporting session's live status. Only point this
@@ -210,6 +213,19 @@ MODEL=qwen3:8b
 # v2 Dev: how many fresh episodes one leaf gets before it's sent back to Task
 # to be split into smaller pieces (default 3).
 # MAX_DEV_ATTEMPTS=3
+
+# --- Ground truth (docs/old_new.md) ------------------------------------------
+
+# When a goal comes with something to match (bc, a page, a mockup, an expected
+# output, API docs, an old program), each Lead saves its evidence in
+# .jfi/evidence/<session>/ and every case gets a compare task in imp. EVIDENCE_REVIEW=1 makes
+# the run wait before building until you accept that evidence (in the terminal
+# or the dashboard); off by default, so nothing waits for a person.
+# EVIDENCE_REVIEW=0
+
+# How much of a screenshot may differ from the original before a visual case
+# fails (0.10 = 10% of the pixels). Text missing from the new page always fails.
+# COMPARE_MAX_DIFF=0.10
 
 # --- Planner judge (`uv sync --extra laya` for Laya) --------------------------
 

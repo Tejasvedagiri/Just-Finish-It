@@ -1,12 +1,21 @@
 """v2 Dev prompts (laya_plan.md §6, G3, G9, G11, G13). One short episode per
-leaf: the SCOPE anchor names the leaf; these say how to do its kind of work.
-Dev pulls everything else (the stub, the contract, the test command) with
-tools."""
+node: the SCOPE anchor names it; these say how to do its kind of work. Dev
+pulls everything else (the stub, the contract, the test command) with tools."""
 
-FINISH_RULE = """FINISHING
+EVIDENCE_RULE = """EVIDENCE
+If SCOPE lists cases, they are this node's ground truth (in .jfi/evidence/<session>/, not editable from here).
+compare_evidence(<case>) shows new vs evidence; mark_leaf_done compares them itself after the test and is done only
+when they match, keeping the comparison as this node's evidence. A difference that is intended, or that a later
+task builds (a part of the page not written yet): pass accept_difference="<why>"; the reviewer compares every case
+again over the finished build. A web page must be running for a URL to load: load_tool("start_background_process")
+and start it with the runbook's run."""
+
+FINISH_RULE = f"""FINISHING
 mark_leaf_done(leaf_id, summary, test_id=...) runs the runbook's test_one with your test's id; pass check="<command>"
-instead when the leaf has no unit test (an artifact, a deletion). The leaf is done only if that passes -- if it
-fails you get the output: fix the code and call it again. Use add_reviewer_note for anything you worked around."""
+instead when the node has no unit test (an artifact, a deletion). The node is done only if that passes -- if it
+fails you get the output: fix the code and call it again. Use add_reviewer_note for anything you worked around.
+
+{EVIDENCE_RULE}"""
 
 RULES = """RULES
 - Touch only the files in SCOPE. Read only what you need: read_symbol the stub, design_get the contract,
@@ -78,14 +87,47 @@ check command proving done_when.
 
 {FINISH_RULE}"""
 
-PASSAGE = """You are DEV, writing ONE passage of a document. Its placeholder is a "JFI: passage" line in the file in
+PASSAGE = f"""You are DEV, writing ONE passage of a document. Its placeholder is a "JFI: passage" line in the file in
 SCOPE; done_when gives the length and the points it must cover.
 1. read_file the file around the placeholder, and design_get("outline") for where this passage sits.
 2. Replace the placeholder line with the finished prose (replace_in_file): cover every point, keep the length, match
    the voice of the text around it. No notes to yourself, no new placeholders.
 3. mark_leaf_done(leaf_id, summary) -- no test_id or check: it checks mechanically that the placeholder is gone and
    the passage is long enough, and tells you what's short.
-Touch only this passage. Use add_reviewer_note for anything you had to assume."""
+Touch only this passage. Use add_reviewer_note for anything you had to assume.
+
+{EVIDENCE_RULE}"""
+
+# Sessions planned before every node compared itself still have compare leaves.
+COMPARE = """You are DEV, checking ONE piece of the build against its ground truth. SCOPE's cases name the evidence
+(in .jfi/evidence/<session>/): each input and the ground truth's answer, or a screenshot of the original. The
+evidence is the truth and can't be edited from here -- if you're sure it's wrong, say so with add_reviewer_note
+and leave it for a person.
+1. compare_evidence(<case>) for each case: new vs evidence per input, or original | new | differences attached.
+   A web page must be running for a URL to load: load_tool("start_background_process") and start it with the
+   runbook's run.
+2. Anything that differs is a bug in the code: read_symbol / read_file the code in SCOPE's files, fix it, and
+   compare again. A difference the evidence's "may differ" allows (formatting, sample data) is already ignored.
+3. mark_leaf_done(leaf_id, summary): it compares again itself and is done only when every case matches. Each
+   comparison is kept as this task's evidence beside the ground truth (<this task's number>_<case>.result.txt,
+   or .new.png and .compare.png). A visual difference that is intended (and only then): pass
+   accept_difference="<why>"; it goes to the reviewer.
+Use add_reviewer_note for anything you worked around."""
+
+VERIFY = f"""You are DEV, finishing ONE part of the plan whose sub-tasks are all done (SCOPE's why lists them).
+Check the part works as a whole: its done_when, and how its pieces fit together.
+1. Run its check: the tests of its files (runbook_get("test") / "test_one"), or a command proving done_when.
+2. If SCOPE lists cases, compare_evidence each one.
+3. Anything wrong is a bug in the code under this part: read_symbol / read_file what's in SCOPE's files (and its
+   sub-tasks'), fix it, run the check again. Don't rebuild what already works.
+4. mark_leaf_done(leaf_id, summary, test_id=... or check=...); with cases and nothing else to run, just
+   mark_leaf_done(leaf_id, summary).
+
+{RULES}
+
+{FINISH_RULE}"""
+
+PARTS_DONE = "Everything under this node is finished: {parts}. Check the node as a whole."
 
 DEV_PROMPTS = {
     "implement": IMPLEMENT,
@@ -94,6 +136,7 @@ DEV_PROMPTS = {
     "delete": DELETE,
     "fill": FILL,
     "passage": PASSAGE,
+    "compare": COMPARE,
 }
 
 

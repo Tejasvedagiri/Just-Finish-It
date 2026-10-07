@@ -422,6 +422,9 @@ def _pool_tools(llm_for_role):
 
     def tools(role: str) -> Dict[str, Callable]:
         pool = {name: TOOL_MAP[name] for name in OPTIONAL_POOL if name in TOOL_MAP and name != "ask_llm"}
+        # Only roles with it in their core set get it (the Architect probes the
+        # ground truth with it); EpisodeTools drops it for the rest.
+        pool["execute_command"] = TOOL_MAP["execute_command"]
         pool["ask_llm"] = make_ask_llm(llm_for_role(role))
         return pool
     return tools
@@ -467,12 +470,62 @@ def _imp(console: AbstractManager, ssm: SessionManager, llm_for_role):
                replan=lambda: _v2_planner(console, ssm, llm_for_role).run()).run()
 
 
+def _evidence_review(console: AbstractManager, ssm: SessionManager) -> bool:
+    """EVIDENCE_REVIEW=1 (off by default): before building, wait for a person
+    to accept the ground-truth evidence the planner captured (docs/old_new.md),
+    since a wrong ground truth costs every task compared with it. Asked
+    again only when the evidence changed since it was last accepted. False:
+    the person stopped the run."""
+    from sqlmodel import select
+
+    from JFI.models import PlanEvent, get_session
+    from JFI.tool.evidence_tools import evidence_dir, evidence_hash, list_cases, read_evidence, shown
+
+    if not _env_flag("EVIDENCE_REVIEW"):
+        return True
+    root = Path(ssm.session_path).parent
+    folder = shown(root, evidence_dir(root, ssm.session_id))
+    while True:
+        cases = list_cases(root, ssm.session_id)
+        if not cases:
+            return True
+        fingerprint = evidence_hash(root, ssm.session_id, cases)
+        with get_session(ssm.db_engine) as db:
+            accepted = db.exec(select(PlanEvent).where(PlanEvent.session_id == ssm.session_id,
+                                                       PlanEvent.type == "evidence_accepted")
+                               .order_by(PlanEvent.id.desc())).first()
+        if accepted is not None and accepted.detail == fingerprint:
+            return True
+        lines = []
+        for case in cases:
+            evidence = read_evidence(root, ssm.session_id, case)
+            flag = "  ⚠ not verified" if evidence.unverified else ""
+            lines.append(f"  {case}: {evidence.source}{flag}")
+        console.display_system(f"Ground-truth evidence in {folder}/ (EVIDENCE_REVIEW=1):\n" + "\n".join(lines))
+        console.set_status(state="awaiting evidence review")
+        choice = console.get_user_choice(
+            f"Check {folder}/ (or the dashboard's Evidence list): accept it and start building?",
+            [("a", "Accept -- start building"), ("r", "I changed it -- show it again"), ("s", "Stop the run")])
+        if choice == "s":
+            return False
+        if choice == "a":
+            with get_session(ssm.db_engine) as db:
+                db.add(PlanEvent(session_id=ssm.session_id, node_id=None, type="evidence_accepted",
+                                 detail=evidence_hash(root, ssm.session_id, list_cases(root, ssm.session_id))))
+                db.commit()
+            return True
+
+
 def _run_imp(console: AbstractManager, llms: Dict[str, BaseLLMStream], ssm: SessionManager) -> bool:
     """Implementation (laya_plan.md §6): one short Dev episode per leaf.
     IMP_COMPLETE is written from DB state -- every leaf finished (D27) --
     never from model text."""
     console.set_status(phase="imp", state="thinking")
     console.display_rule("PHASE: IMPLEMENTATION")
+    if not _evidence_review(console, ssm):
+        console.display_error("Stopped at the evidence review.")
+        return False
+    console.set_status(state="thinking")
     result = _imp(console, ssm, _role_llms())
     if not result.complete:
         console.display_error(f"Implementation did not finish: {result.reason or 'stopped'}.")
@@ -748,6 +801,8 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         description="Just Finish It -- a multi-phase, plan-driven coding agent for local LLMs.",
     )
     parser.add_argument("--version", action="store_true", help="Print the installed version and exit.")
+    parser.add_argument("--check-browser", action="store_true",
+                        help="Open the headless browser JFI uses (check_page, screenshots) on a test page and exit.")
     # Internal only -- not meant to be typed by a person. This is how
     # _launch_web_dashboard re-invokes a frozen standalone binary to serve
     # the dashboard itself when no separate `jfi-web` is on PATH (see
@@ -761,6 +816,12 @@ def main():
     if args.version:
         print(f"JFI {_version()}")
         return
+
+    if args.check_browser:
+        from JFI.tool.browser_tools import browser_check
+        message = browser_check()
+        print(message)
+        raise SystemExit(1 if message.startswith("Error") else 0)
 
     if args.internal_web_dashboard:
         from JFI.web.launcher import main as run_web_dashboard

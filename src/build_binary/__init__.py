@@ -1,8 +1,10 @@
 """Builds a standalone `jfi` binary with PyInstaller — no Python or uv
 needed on the machine that runs it.
 
-Every binary carries the core agent, websockets (the fleet dashboard) and the
-`web` extra (Streamlit, for the dashboard). Each other extra goes in only when
+Every binary carries the core agent, websockets (the fleet dashboard), the
+`web` extra (Streamlit, for the dashboard) and Playwright's headless Chromium
+(check_page, the browser tool, and the screenshot evidence of docs/old_new.md),
+so nothing else is installed on the machine that runs it. Each other extra goes in only when
 asked for, so a binary without Laya isn't several GB of torch:
 
     uv run build                       # core + web
@@ -25,6 +27,8 @@ dist/jfi/. The user chose the single file on every platform.
 """
 
 import argparse
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -56,16 +60,20 @@ EXTRA_HELP = {
 LAYA_MODEL_PACKAGES = ("transformers.models.modernbert",)
 
 
-def parse_args(argv: list[str] | None = None) -> list[str]:
-    """The extras to bundle, in EXTRAS order: ALWAYS plus the ones asked for."""
+def parse_args(argv: list[str] | None = None) -> tuple[list[str], bool]:
+    """(the extras to bundle, in EXTRAS order: ALWAYS plus the ones asked for;
+    whether to bundle the headless browser)."""
     # allow_abbrev=False: `--lay` must be refused, not silently read as --laya.
     parser = argparse.ArgumentParser(prog="uv run build", allow_abbrev=False,
                                      description="Build the standalone jfi binary (the web dashboard is always in).")
     for extra, help_text in EXTRA_HELP.items():
         parser.add_argument(f"--{extra}", action="store_true", help=f"bundle {help_text}")
     parser.add_argument("--all", action="store_true", help="bundle every extra above")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="leave out Playwright's headless Chromium (~120 MB; the binary then needs "
+                             "`playwright install chromium` where it runs for page checks and screenshots)")
     args = parser.parse_args(argv)
-    return [extra for extra in EXTRAS if extra in ALWAYS or args.all or getattr(args, extra)]
+    return [extra for extra in EXTRAS if extra in ALWAYS or args.all or getattr(args, extra)], not args.no_browser
 
 
 def _missing_extras(extras: list[str]) -> list[str]:
@@ -114,8 +122,28 @@ def remove_stale_build(dist: Path) -> None:
             old.unlink()
 
 
+# Downloaded once by `playwright install` and reused by later builds.
+BROWSERS_DIR = PROJECT_ROOT / "build" / "ms-playwright"
+#: Where the binary finds them (JFI.tool.browser_tools._bundled_browsers).
+BUNDLED_BROWSERS = "ms-playwright"
+
+
+def install_browser(run=subprocess.run) -> str:
+    """Playwright's headless Chromium, installed by the venv's own playwright
+    so it's the exact build that playwright drives. Every browser JFI opens
+    is headless, so the headless shell (~320 MB unpacked) is enough, not full
+    Chromium (~600 MB). Returns "" or an error."""
+    env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(BROWSERS_DIR)}
+    proc = run([sys.executable, "-m", "playwright", "install", "--only-shell", "chromium"], env=env)
+    if proc.returncode != 0:
+        return (f"Downloading Playwright's Chromium into {BROWSERS_DIR} failed (exit {proc.returncode}). The "
+                "binary bundles it so no install is needed where it runs; check the network (it comes from "
+                "cdn.playwright.dev) and build again.")
+    return ""
+
+
 def main(argv: list[str] | None = None) -> None:
-    extras = parse_args(argv)
+    extras, with_browser = parse_args(argv)
     try:
         import PyInstaller.__main__
     except ImportError:
@@ -140,6 +168,11 @@ def main(argv: list[str] | None = None) -> None:
             "about), then build again.",
             file=sys.stderr,
         )
+        raise SystemExit(1)
+
+    problem = install_browser() if with_browser else ""
+    if problem:
+        print(problem, file=sys.stderr)
         raise SystemExit(1)
 
     build_dir = PROJECT_ROOT / "build" / "pyinstaller"
@@ -170,6 +203,7 @@ def main(argv: list[str] | None = None) -> None:
         "--collect-all", "playwright",
         # Imported lazily inside the fleet reporter's thread.
         "--collect-all", "websockets",
+        *(["--add-data", f"{BROWSERS_DIR}{os.pathsep}{BUNDLED_BROWSERS}"] if with_browser else []),
         *extra_args(extras),
 
         "--distpath", str(PROJECT_ROOT / "dist"),
@@ -193,7 +227,8 @@ def main(argv: list[str] | None = None) -> None:
         import subprocess
         subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(output_path)], check=True)
 
-    print(f"\nBuilt {output_path} with {', '.join(extras) if extras else 'no optional extras'}")
+    print(f"\nBuilt {output_path} with {', '.join(extras) if extras else 'no optional extras'}"
+          + (" and the headless browser" if with_browser else ", without the browser"))
 
 
 if __name__ == "__main__":

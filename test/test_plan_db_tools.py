@@ -61,7 +61,7 @@ class TestGetPlan:
         add_leaf(engine, session_id, "imp", "Add evaluate()", parent_id=root.id)
 
         text = get_plan(engine, session_id)
-        assert f"[id={root.id}] 1. Core arithmetic" in text
+        assert f"[id={root.id}] [ ] 1 Core arithmetic" in text  # a parent has a checkbox too
         assert "1.1 Add evaluate()" in text
         assert "## imp" in text
 
@@ -124,7 +124,8 @@ class TestRenderPlanMarkdown:
 
         md = render_plan_markdown(engine, session_id)
 
-        assert md == "## Implementation\n- 1. Core arithmetic\n  - [x] 1.1 Add evaluate()\n"
+        # Every node is a checkbox: Dev finishes the parent after its children.
+        assert md == "## Implementation\n- [ ] 1 Core arithmetic\n  - [x] 1.1 Add evaluate()\n"
 
     def test_no_id_tags_anywhere_in_output(self, engine_and_session):
         """The whole point of this renderer -- [id=N] tags are for the
@@ -224,7 +225,7 @@ class TestPlanJudgeRows:
         assert (rows[0]["Judge"], rows[0]["Laya"], rows[0]["LLM"], rows[0]["Final"], rows[0]["Decided by"]) == \
             ("BREAKDOWN", "GOOD (0.95)", "BREAKDOWN", "BREAKDOWN", "llm")
         assert rows[1]["Task"] == "· setRange()" and rows[1]["Decided by"] == "agree"
-        assert rows[1]["Status"] == "todo" and rows[0]["Status"] == ""
+        assert rows[1]["Status"] == "todo" and rows[0]["Status"] == "todo"
         assert (rows[2]["Laya"], rows[2]["Decided by"]) == ("GOOD (0.64)", "rule")
         assert rows[1]["Notes"] == "clamp to the data's range"
         assert rows[1]["References"] == "contract:range, app.js L10-40"

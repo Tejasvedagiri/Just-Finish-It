@@ -11,11 +11,9 @@ regex, no hand-maintained numbering.
 
 A "leaf" and a "parent" are the same table row shape -- exactly like
 plan.md, where the distinction is structural (does anything else point at
-this row as its parent?) rather than a stored flag. Only rows with no
-children are meant to carry a real `status`/timing; a caller updating a
-parent-with-children row's status is a bug the same way ticking a plan.md
-parent bullet's checkbox was: it handed the implementer a fake duplicate
-task alongside the parent's own real children.
+this row as its parent?) rather than a stored flag. Every row carries a
+real `status`/timing: Dev finishes the leaves first and then each parent
+above them (JFI.imp.queue), checking the part as a whole.
 """
 
 from datetime import datetime
@@ -77,7 +75,7 @@ class Leaf(SQLModel, table=True):
     # breaks it down (next layer) and who redoes it (the same role).
     level: Optional[str] = Field(default=None, index=True)
     # component: "component"/"project"; file: "code"/"artifact"/"section";
-    # leaf: "implement"/"modify"/"delete"/"fill"/"passage".
+    # leaf: "implement"/"modify"/"delete"/"fill"/"passage"/"compare".
     kind: Optional[str] = None
     # The planning status Laya (or its fallback) sets: NULL = unjudged,
     # "GOOD" / "BREAKDOWN" / "REDO". Separate from `status` (Dev's progress).
@@ -110,6 +108,14 @@ class Leaf(SQLModel, table=True):
     reopened_count: int = Field(default=0)
     # The git checkpoint taken when the leaf passed (JFI.tool.checkpoint_tools).
     checkpoint: Optional[str] = None
+    # Ground-truth cases (docs/old_new.md): this node's own, compared with the
+    # new code when Dev finishes the node (a legacy compare leaf: the cases it
+    # checks). Each case has its evidence in
+    # .jfi/evidence/<session_id>/<task number>_<case>.*.
+    cases: Optional[list[str]] = Field(default=None, sa_column=Column(JSON))
+    # The cases' evidence fingerprint when the node matched it: if the evidence
+    # is edited or re-captured afterwards, the node is compared again.
+    evidence_hash: Optional[str] = None
 
     created_at: datetime = Field(default_factory=utcnow)
 

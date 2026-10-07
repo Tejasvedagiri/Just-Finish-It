@@ -16,8 +16,12 @@ REVIEWER = """You are the REVIEWER. Prove the finished project works end to end,
    click/type by the [ref] numbers it lists, screenshot to see the result. Passing tests aren't enough: they
    may not cover what a user sees. An HTTP API: exercise its endpoints with http_request (load_tool it).
    Stop what you started.
-4. Find things with search_code (never findstr/grep through execute_command: their output can be huge).
-5. Also look at anything listed under SCOPE's "why": leftover JFI: markers are unfinished work.
+4. Ground truth (list_evidence shows the cases, if any): compare_evidence() compares every case with the
+   finished build (start the app first for page cases). A failing case is a bug: reopen_leaf the node that owns
+   it (get_plan; the case's file is named by its number) with what differs. finish compares them all again and refuses a pass while one
+   differs.
+5. Find things with search_code (never findstr/grep through execute_command: their output can be huge).
+6. Also look at anything listed under SCOPE's "why": leftover JFI: markers are unfinished work.
 
 Then give ONE verdict and call finish(0, summary):
 - It all works: finish(0, "PASS: <what you ran>"). finish re-runs the e2e itself and refuses a pass it can't

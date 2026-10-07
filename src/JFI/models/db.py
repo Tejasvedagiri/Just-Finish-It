@@ -126,6 +126,9 @@ ADDED_COLUMNS = {
         "fix_note": "TEXT",
         "reopened_count": "INTEGER DEFAULT 0",
         "checkpoint": "TEXT",
+        # Ground-truth evidence (docs/old_new.md)
+        "cases": "JSON",
+        "evidence_hash": "TEXT",
     },
     "sessionrecord": {
         "pipeline_version": "VARCHAR(8) DEFAULT 'v1'",

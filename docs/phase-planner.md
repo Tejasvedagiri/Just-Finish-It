@@ -178,7 +178,56 @@ Every verdict is stored as a `PlannerVerdict` row.
 - Descriptions are capped at `PLANNER_ITEM_MAX_CHARS` (200): the judge reads them.
 - `depends_on` must name existing nodes and stay acyclic.
 - Depth is capped at `MAX_LEAF_DEPTH` (5); a function that already exists in the
-  plan, or a file another component owns, is refused as a duplicate.
+  plan, or a file another component owns, is refused as a duplicate. So is a
+  top-level component sharing 60% or more of its words with another
+  (`_same_component`): on the portfolio-dashboard run the Architect re-added
+  "Scaffold Next.js app ..." word for word, and "Extract all ... data into CSV
+  files under data/" in other words (0.67); distinct pages shared at most 0.35.
+
+- Ground truth ([`old_new.md`](old_new.md)): a case sits on one node only,
+  at any level. `compare` is no longer a kind the planner can give (each node
+  compares itself when Dev finishes it).
+- A node added under a finished parent, or a finished parent rewritten, sends
+  that parent and the parents above it back to Dev's queue
+  (`reopen_with_ancestors`): a parent is checked after everything under it.
+
+## Ground truth (`reference` and every node's evidence)
+
+When the goal comes with something the build must match (a command like `bc`,
+a page, a mockup, an input with its expected output, API docs, an old program
+or database), each layer adds its part, checked by its `finish`
+([`old_new.md`](old_new.md) has the whole design):
+
+- **Architect** finds and probes it (`execute_command` is in its core set for
+  that), records `design_set("reference", key, "visual: ..." / "behavioural:
+  ...")` with what must match and what may differ, has each component that
+  rebuilds part of it cite `reference:<key>`, and for a behavioural one sets
+  the runbook's `evidence_one` (the ground truth on one input) and
+  `compare_one` (the new code on one input), with `{input}` or `{input_file}`.
+  `finish` refuses without them when `ground_truth_hint` (`planner/loop.py`)
+  sees one in the goal ("compare it with", "turn X.html into", "migrate the
+  database", a mockup file the goal names, ...), unless the Architect records
+  `assumption:no_ground_truth`. None of the benchmark goals trips it.
+  Once the design has a reference, every component gets its own case(s) with
+  evidence (the original screen of its view, a few rows of data taken from
+  the original, or a probe's answers), whether it cites the reference or not;
+  `finish` refuses without them.
+- **Lead** gives every file node its own cases and `capture_evidence`s each
+  into `.jfi/evidence/<session>/`.
+- **Task** gives every leaf its own case and captures it (`capture_evidence`
+  is in its core set): the original's answer for that one piece, with
+  `new_command` when the runbook's `compare_one` runs the whole program. No
+  separate compare leaves: the user asked for every node to be compared with
+  its own evidence when it's done, "There need not be a sub point to validate
+  against evidence."
+
+When the design has a reference (anywhere in the plan, not only under a
+component citing it: on the portfolio-dashboard run the Architect cited it on
+the view components only, so the scaffold and the CSV data component got no
+evidence), the Lead's and Task's `finish` (and Task's split) refuse while a new node has no case (a `delete` needs none), a
+case has no evidence, or evidence sits on no node -- on the first real run a
+`load_holdings.txt` was captured, never put on a node, and so never compared.
+The Architect's `finish` checks the same for its components.
 
 ## Guards
 

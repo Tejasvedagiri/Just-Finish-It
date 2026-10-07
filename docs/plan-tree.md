@@ -2,7 +2,7 @@
 
 The plan is a tree of `Leaf` rows (`src/JFI/models/leaf.py`) in `.jfi/JFI.db`.
 The planner writes it through its node tools (`src/JFI/planner/nodes.py`, see
-[phase-planner.md](phase-planner.md)); Dev finishes leaves through its gated
+[phase-planner.md](phase-planner.md)); Dev finishes nodes through its gated
 `mark_leaf_done` (`src/JFI/imp/dev.py`, see [phase-imp.md](phase-imp.md)). No
 phase ever edits a plan file: `plan.md` survives only as the checklist
 markdown `render_plan_markdown` renders for the dashboards.
@@ -10,8 +10,10 @@ markdown `render_plan_markdown` renders for the dashboards.
 ## Shape
 
 - **Parent vs leaf is structural.** A row with children is a parent; a row
-  without is a leaf. There's no flag. Only leaves carry `status`,
-  `started_at`/`ended_at` and `tokens`.
+  without is a leaf. There's no flag. Every node carries `status`,
+  `started_at`/`ended_at` and `tokens`: Dev finishes the leaves first and then
+  each parent above them, bottom-up (1.1.1, 1.1.2, 1.1, 1), checking the part
+  as a whole ([phase-imp.md](phase-imp.md)).
 - **`phase`** (`models/enums.Phase`) is `imp` for every node the planner
   writes. Rows with `testing` (or Program Manager review fields) come from
   sessions of the removed v1 pipeline and are only read by `export-db`.
@@ -31,6 +33,14 @@ markdown `render_plan_markdown` renders for the dashboards.
   The judge reads the description only.
 - **`checkpoint`**: the git commit taken when the leaf passed
   (`tool/checkpoint_tools.py`).
+- **`cases`** ([`old_new.md`](old_new.md)): the node's own ground-truth
+  cases -- on an Architect component, a Lead file node or a Task leaf -- which
+  Dev compares the node with when it finishes it (evidence in
+  `.jfi/evidence/<session_id>/<task number>_<case>.*`, renamed when the plan
+  renumbers: `sync_evidence_names`). A case belongs to one node. Sessions
+  planned before that have `compare` leaves, whose cases are the ones they
+  check. **`evidence_hash`**: the evidence a node matched, so an edit or
+  re-capture re-queues it (and the parents above it).
 - **Order:** siblings sort by a gap-numbered `sort_key` (10, 20, 30…).
 - **Numbers like `1.2.3` are computed** (`display_number`) and never
   stored. Nothing ever renumbers anything.
@@ -42,12 +52,13 @@ markdown `render_plan_markdown` renders for the dashboards.
 
 ```
 ## imp
-[id=1] 1. Data model
-  [id=4] [ ] 1.1 add Leaf table to models/leaf.py
-  [id=5] [x] 1.2 ...
+[id=1] [ ] 1 Data model
+  [id=4] [x] 1.1 add Leaf table to models/leaf.py
+  [id=5] [ ] 1.2 ...
 ```
 
-A parent has no checkbox. `[x]` = done, `[o]` = skipped, `[ ]` = todo.
+Every node has a checkbox, parents too. `[x]` = done, `[o]` = skipped, `[ ]` = todo.
+The progress counts (`plan_progress_db`) count every node.
 
 `render_plan_markdown` renders the older `- [ ] N.M` markdown for the status
 bar, the fleet dashboard and `export-db`. It's display only.

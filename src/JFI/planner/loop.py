@@ -43,12 +43,13 @@ from JFI.llm.parallel import effective_parallel
 from JFI.models import DesignEntry, Leaf, PlanEvent, PlannerVerdict, RunbookEntry, get_session
 from JFI.planner.judge import CHECKPOINT, JudgeNode
 from JFI.planner.nodes import (
-    BREAKDOWN, GOOD, MAX_LEAF_DEPTH, REDO, repo_path, children_of, depth_of, load_nodes, make_node_tools,
-    path_of,
+    BREAKDOWN, GOOD, MAX_LEAF_DEPTH, NO_CASE_KINDS, REDO, repo_path, children_of, depth_of, load_nodes,
+    make_node_tools, path_of,
 )
 from JFI.planner.prompts import ROLE_PROMPTS
 from JFI.tool.code_tools import make_code_tools
 from JFI.tool.design_tools import design_index, make_design_tools, references_text
+from JFI.tool.evidence_tools import list_cases, make_evidence_tools, read_evidence, sync_evidence_names
 from JFI.tool.note_tools import add_reviewer_note
 from JFI.tool.plan_db_tools import plan_status_fields
 from JFI.tool.runbook_tools import make_runbook_tools, runbook_index
@@ -71,8 +72,32 @@ ARCHITECT_CONTINUATIONS = 2
 REQUIRED_RUNBOOK = ("setup", "run", "test", "test_one", "build", "e2e", "script", "entry", "src_dir", "test_dir",
                     "test_naming")
 _PATH = re.compile(r"[\w./\\-]+\.\w+")
+# What says a goal comes with a ground truth to match (docs/old_new.md). The
+# Architect's finish then wants a reference entry -- or an assumption saying
+# there is none, so a false hit costs one line, not a stuck plan.
+_THING = r"(https?://\S+|[\w./-]+\.(html?|png|jpe?g|svg|pdf|csv|json|sh|py|js|sql)\b|the (old|original|existing|legacy|current)\b|database\b)"
+# Each phrase only counts when it points at something concrete: the benchmark
+# goals' own prose ("make it look like a real pricing page", "the expected
+# values" of a return dict) must not read as a ground truth.
+_GROUND_TRUTH_WORDS = re.compile(
+    r"\b(compare|check|verify|validate|test)\b[^.\n]{0,40}\b(with|against)\b|\bground[- ]truth\b|\bgolden\b|"
+    r"\bpixel[- ]perfect\b|figma\.com/|\b(looks?|match(es)?|same as)\b[^\n]{0,20}?" + _THING + "|"
+    r"\b(convert|turn|rebuild|migrate|rewrite|reimplement|re-implement|port)\b[^\n]{0,60}?" + _THING, re.I)
+_REFERENCE_FILE = re.compile(r"\.(png|jpe?g|svg|pdf|webp|gif)$|expected|golden", re.I)
 GOAL_MAX_CHARS = 16_000  # ~4k tokens, a small share of an episode on a 32k window
 FEEDBACK_MAX_CHARS = 12_000
+
+
+def ground_truth_hint(goal: str, root: Path) -> Optional[str]:
+    """Why the goal looks like it names something the build must match, or None."""
+    match = _GROUND_TRUTH_WORDS.search(goal or "")
+    if match:
+        return f'the goal says "{match.group(0).strip()}"'
+    for path in _PATH.findall(goal or ""):
+        rel = repo_path(path)
+        if _REFERENCE_FILE.search(rel) and (Path(root) / rel).is_file():
+            return f"the goal names {rel}"
+    return None
 
 
 def redo_cap() -> int:
@@ -386,24 +411,30 @@ class Planner:
                                  files=node.files or [], path=path_of(by_id, node),
                                  finish=f"{ROLE_FINISH_TOOL[role]}({node.id}, summary)", reason=reason,
                                  notes=node.notes or "",
-                                 references=references_text(self.engine, self.session_id, node.references))
+                                 references=references_text(self.engine, self.session_id, node.references),
+                                 cases=node.cases or [])
         scope_id = node.id if node is not None else None
         impl = {**self.pool_tools(role),
-                **self._locked(make_node_tools(self.engine, self.session_id, role, scope_id)),
+                **self._locked(make_node_tools(self.engine, self.session_id, role, scope_id, self.root)),
                 **self._locked(make_runbook_tools(self.engine, self.session_id, role)),
                 **self._locked(make_design_tools(self.engine, self.session_id, role)),
                 **make_code_tools(self.root),
-                "finish": self._architect_finish(anchor) if role == "architect" and node is None
-                else make_finish(anchor)}
+                **make_evidence_tools(self.engine, self.session_id, self.root, role),
+                "finish": self._finish(anchor, role, mode, node)}
         system = build_system_message(anchor, ROLE_PROMPTS[(role, mode)],
                                       [runbook_index(self.engine, self.session_id),
                                        design_index(self.engine, self.session_id)])
         console.set_status(stage=role.capitalize(), task=anchor.node[:140])
         console.display_rule(f"PLANNER · {role.upper()} {mode}" + (f" — node {node.id}" if node is not None else ""))
-        return run_episode(self.llm_for_role(role), console, self.engine, self.session_id,
-                           role=role, mode=mode, anchor=anchor, system_message=system,
-                           tools=EpisodeTools(role, impl),
-                           budget=episode_token_budget(ROLE_ENV_PREFIXES[role]))
+        result = run_episode(self.llm_for_role(role), console, self.engine, self.session_id,
+                             role=role, mode=mode, anchor=anchor, system_message=system,
+                             tools=EpisodeTools(role, impl),
+                             budget=episode_token_budget(ROLE_ENV_PREFIXES[role]))
+        # Evidence files are named by task number, which this episode's nodes
+        # may have just set or shifted.
+        with self._write_lock:
+            sync_evidence_names(self.engine, self.session_id, self.root)
+        return result
 
     def _locked(self, tools: dict) -> dict:
         def guard(fn):
@@ -412,6 +443,94 @@ class Planner:
                     return fn(*args, **kwargs)
             return call
         return {name: guard(fn) for name, fn in tools.items()}
+
+    def _finish(self, anchor: ScopeAnchor, role: str, mode: str, node: Optional[Leaf]):
+        if role == "architect" and node is None:
+            return self._architect_finish(anchor)
+        if mode in ("breakdown", "split") and role in ("lead", "task") and self._has_ground_truth():
+            return self._cases_finish(anchor, node)
+        return make_finish(anchor)
+
+    def _has_ground_truth(self) -> bool:
+        """The design has a reference: then every node has its own evidence,
+        not only those under a component citing it. Observed on the
+        portfolio-dashboard run: the Architect cited the reference on the
+        view components only, so the scaffold and the CSV data extracted
+        from the original (component 2 and its files) got no evidence."""
+        with get_session(self.engine) as db:
+            return db.exec(select(DesignEntry).where(DesignEntry.session_id == self.session_id,
+                                                     DesignEntry.kind == "reference")).first() is not None
+
+    def _case_problems(self, nodes: List[Leaf]) -> List[str]:
+        """Every node of a session with a ground truth has its own case(s)
+        with evidence captured: Dev compares each node with them when it's
+        done (docs/old_new.md). A deletion has nothing to compare."""
+        problems = []
+        bare = [n for n in nodes if not n.cases and n.kind not in NO_CASE_KINDS]
+        if bare:
+            problems.append("a case on node(s) " + ", ".join(str(n.id) for n in bare) + " (cases=[...] with "
+                            "update_node, each captured with capture_evidence): every node is compared with its "
+                            "own evidence when it's done")
+        missing = [c for n in nodes for c in (n.cases or []) if read_evidence(self.root, self.session_id, c) is None]
+        if missing:
+            problems.append(f"evidence for {', '.join(missing)} (capture_evidence each one; it runs the ground "
+                            f"truth for you)")
+        return problems
+
+    def _unowned_cases(self) -> List[str]:
+        """Evidence captured but on no node: it would never be compared.
+        Observed on the first real run: load_holdings.txt sat in the evidence
+        folder with no task number."""
+        owned = {c for n in load_nodes(self.engine, self.session_id) for c in (n.cases or [])}
+        stray = [c for c in list_cases(self.root, self.session_id) if c not in owned]
+        if not stray:
+            return []
+        return [f"a node for the evidence of {', '.join(stray)} (update_node cases=[...] on the node it checks)"]
+
+    def _cases_finish(self, anchor: ScopeAnchor, parent: Leaf):
+        """A breakdown in a session with a ground truth leaves every new node
+        with its own evidence."""
+        plain = make_finish(anchor)
+
+        def finish(node_id: int = 0, summary: str = "") -> str:
+            parts = children_of(load_nodes(self.engine, self.session_id), parent.id)
+            missing = self._case_problems(parts) + self._unowned_cases()
+            if missing:
+                return "Error: not finished yet. Still missing: " + "; ".join(missing) + "."
+            return plain(node_id, summary)
+        return finish
+
+    def _reference_problems(self, nodes: List[Leaf], runbook: dict) -> List[str]:
+        """The Architect's part of the ground truth (docs/old_new.md)."""
+        with get_session(self.engine) as db:
+            design = list(db.exec(select(DesignEntry).where(DesignEntry.session_id == self.session_id,
+                                                            DesignEntry.kind.in_(("reference", "assumption")))))
+        references = [d for d in design if d.kind == "reference"]
+        hint = ground_truth_hint(self.goal, self.root)
+        if hint and not references and not any(d.key == "no_ground_truth" for d in design):
+            return [f'the ground truth ({hint}): design_set("reference", "<key>", "visual: <the page, mockup or '
+                    f'image>; must match / may differ" or "behavioural: <the command, docs, expected output or old '
+                    f'program>; must match / may differ"), or, if the goal has none, design_set("assumption", '
+                    f'"no_ground_truth", "<why>")']
+        missing = []
+        cited = {str(r) for n in nodes if n.level == "architect" for r in (n.references or [])}
+        if references:
+            missing += self._case_problems([n for n in nodes if n.level == "architect" and n.parent_id is None])
+            missing += self._unowned_cases()
+        for ref in references:
+            if not re.match(r"\s*(visual|behaviou?ral)\b", ref.text, re.I):
+                missing.append(f'reference {ref.key}\'s text to start with "visual:" or "behavioural:"')
+            if f"reference:{ref.key}" not in cited:
+                missing.append(f"a component citing reference:{ref.key} in its references (and saying in its notes "
+                               f"which part of it that component rebuilds)")
+        if any(re.match(r"\s*behaviou?ral\b", r.text, re.I) for r in references):
+            for name, what in (("evidence_one", "how to get the ground truth's answer for one input"),
+                               ("compare_one", "how to run the NEW code on one input")):
+                if name not in runbook:
+                    missing.append(f"runbook entry {name}: {what}, with {{input}} or {{input_file}}")
+                elif "{input" not in runbook[name]:
+                    missing.append(f"an {{input}} or {{input_file}} placeholder in {name}'s command")
+        return missing
 
     def _architect_finish(self, anchor: ScopeAnchor):
         """The Architect's finish refuses until the base it owns is complete:
@@ -455,6 +574,7 @@ class Planner:
             nodes = load_nodes(self.engine, self.session_id)
             if "entry" in runbook:
                 missing += self._entry_problems(runbook["entry"], nodes)
+            missing += self._reference_problems(nodes, runbook)
             top_level = [n for n in nodes if n.parent_id is None]
             if len(top_level) >= 3 and not contracts:
                 # Observed on the stui run: 16 components and no contract, so

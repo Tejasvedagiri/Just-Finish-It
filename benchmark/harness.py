@@ -66,6 +66,11 @@ AUTO_PROMPTS = [
         "LLM request failed -- auto-selecting Retry now",
     ),
     (
+        "accept it and start building?",
+        ["Enter"],  # "Accept -- start building" (only asked with EVIDENCE_REVIEW=1)
+        "evidence review requested -- auto-accepting",
+    ),
+    (
         "Run this command?",
         ["Right", "Right", "Enter"],  # -> "Yes, for the rest of this session"
         "command approval requested -- auto-approving for the rest of this session",

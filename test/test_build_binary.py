@@ -26,6 +26,8 @@ def _capture_build(monkeypatch, missing=()):
     monkeypatch.setattr(sys, "platform", "linux")  # skip the macOS codesign step
     monkeypatch.setattr(build_binary, "_missing_extras", lambda extras: [e for e in extras if e in missing])
     monkeypatch.setattr(build_binary, "remove_stale_build", lambda dist: None)
+    # Never download a browser in tests; record that the build asked for one.
+    monkeypatch.setattr(build_binary, "install_browser", lambda: captured.setdefault("browser", True) and "")
     return captured
 
 
@@ -124,3 +126,36 @@ def test_an_old_build_of_either_kind_is_removed_before_building(tmp_path):
     (tmp_path / "jfi").write_bytes(b"old posix onefile")
     build_binary.remove_stale_build(tmp_path)
     assert not (tmp_path / "jfi").exists()
+
+
+def test_the_headless_browser_is_bundled_unless_left_out(monkeypatch):
+    """The user only runs the binary: "uv run playwright ... should be part of
+    uv run build". The browser is downloaded at build time and packed in."""
+    captured = _capture_build(monkeypatch)
+    build_binary.main([])
+    data = _flag_values(captured["args"], "--add-data")
+    assert captured["browser"] and any(d.endswith("ms-playwright") and "build" in d for d in data)
+
+    captured = _capture_build(monkeypatch)
+    build_binary.main(["--no-browser"])
+    assert "browser" not in captured
+    assert not any(d.endswith("ms-playwright") for d in _flag_values(captured["args"], "--add-data"))
+
+
+def test_a_failed_browser_download_stops_the_build(monkeypatch, capsys):
+    captured = _capture_build(monkeypatch)
+    monkeypatch.setattr(build_binary, "install_browser", lambda: "Downloading Playwright's Chromium failed")
+    with pytest.raises(SystemExit):
+        build_binary.main([])
+    assert "args" not in captured and "Chromium failed" in capsys.readouterr().err
+
+
+def test_the_browser_is_installed_by_the_venvs_own_playwright(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(build_binary, "BROWSERS_DIR", tmp_path / "ms-playwright")
+    ok = build_binary.install_browser(lambda cmd, env: calls.append((cmd, env)) or types.SimpleNamespace(returncode=0))
+    (cmd, env), = calls
+    assert ok == "" and cmd[1:] == ["-m", "playwright", "install", "--only-shell", "chromium"]
+    assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(tmp_path / "ms-playwright")
+    failed = build_binary.install_browser(lambda cmd, env: types.SimpleNamespace(returncode=1))
+    assert "cdn.playwright.dev" in failed

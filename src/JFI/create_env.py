@@ -379,6 +379,16 @@ def _measure_speed(url: str, key: str, model: str) -> "detect.Speed":
     return detect.measure_speed(url, key, model)
 
 
+def _measure_replies(url: str, key: str, model: str, limit: int) -> list:
+    print(f"\nMeasuring how long {model}'s replies are on {len(detect.REPLY_PROBES)} short JFI-like tasks, to set "
+          f"the reply caps (up to {limit:,} tokens each)...")
+    replies = detect.measure_replies(url, key, model, limit, progress=lambda name: print(f"   {name}...", flush=True))
+    for r in replies:
+        print(f"   {r.name}: {r.reasoning_tokens:,} thinking + {r.answer_tokens:,} answer"
+              + ("" if r.finished else "  (still going at the limit)"))
+    return replies
+
+
 def _laya_installed() -> bool:
     return importlib.util.find_spec("laya") is not None
 
@@ -405,7 +415,10 @@ def _ask(values: dict, updates: dict, suggestion: "detect.Suggestion", key: str 
     key = key or suggestion.name
     current = (values.get(key) or "").strip()
     note = f" (currently {current} in .env)" if current and current != suggestion.value else ""
-    print(f"   why: {suggestion.reason}{note}")
+    # Observed in the wizard: "why:" lines printed right under the previous
+    # answer read as if they explained that one. A blank line groups each with
+    # the prompt below it.
+    print(f"\n   why: {suggestion.reason}{note}")
     updates[key] = _prompt_text(key, suggestion.value)
     return updates[key]
 
@@ -493,8 +506,13 @@ def _configure_llm(values: dict, updates: dict, prefix: str = "",
             print(f"{CROSS} {model} answered without calling the tool -- JFI needs a model that can call tools.")
         elif speed.note:
             print(f"{WARN}{speed.note}")
-    found = detect.Detected(system=system, model=detect.find_model(models, model), speed=speed, hosted=hosted,
-                            laya_installed=_laya_installed())
+    server_model = detect.find_model(models, model)
+    window = (server_model.loaded_context if server_model and server_model.loaded_context
+              else guess_context_size(backend, model))
+    limit = max(2_000, min(16_000, window // 2))
+    replies = _measure_replies(openai_url, api_key, model, limit) if speed and speed.tool_calls_work else []
+    found = detect.Detected(system=system, model=server_model, speed=speed, hosted=hosted,
+                            laya_installed=_laya_installed(), replies=replies, probe_limit=limit)
     suggestions = {s.name: s for s in detect.compute(model, found, lambda m: guess_context_size(backend, m))}
     for warning in found.warnings:
         print(f"{WARN}{warning}")
@@ -542,6 +560,8 @@ _FLAGS = [
     ("REVIEW_LOOP_APPROVAL", "Ask before each fix iteration after a failed review (REVIEW_LOOP_APPROVAL)?"),
     ("LOG_LLM_CALL_DEBUG", "Log every LLM request/response to .jfi/llm_debug.jsonl (LOG_LLM_CALL_DEBUG)?"),
     ("SHOW_STREAM_PROMPTS", "Print every prompt sent to the LLM (SHOW_STREAM_PROMPTS)?"),
+    ("EVIDENCE_REVIEW", "Wait for you to accept the ground-truth evidence (.jfi/evidence/<session>/) before building "
+                        "(EVIDENCE_REVIEW)?"),
 ]
 
 
@@ -674,23 +694,30 @@ def run_setup_wizard(values: dict, write_target: Path | None = None) -> dict:
     if theme:
         updates["THEME"] = theme
 
+    # Both dashboards default to yes (the user's call): a "no" is written
+    # down (JFI_WEB_BRIDGE=0, an empty MASTER_WS_URL) so the next run's
+    # default remembers it instead of asking yes again.
     print("\n--- Web dashboard bridge ---")
     if _prompt_yes_no(
         "Enable JFI_WEB_BRIDGE (mirror live status to a browser dashboard via jfi-web)?",
-        default=values.get("JFI_WEB_BRIDGE", "").strip().lower() in ("1", "true", "yes", "on"),
+        default=values.get("JFI_WEB_BRIDGE", "1").strip().lower() in ("1", "true", "yes", "on"),
     ):
         updates["JFI_WEB_BRIDGE"] = "1"
         updates["JFI_WEB_PORT"] = _prompt_text("JFI_WEB_PORT", values.get("JFI_WEB_PORT", "7777"))
+    else:
+        updates["JFI_WEB_BRIDGE"] = "0"
 
     print("\n--- Fleet dashboard (jfi-master) ---")
     if _prompt_yes_no(
         "Report this session to a fleet dashboard (MASTER_WS_URL, e.g. jfi-master running elsewhere)?",
-        default=bool(values.get("MASTER_WS_URL", "").strip()),
+        default="MASTER_WS_URL" not in values or bool(values["MASTER_WS_URL"].strip()),
     ):
         updates["MASTER_WS_URL"] = _master_ws_url(_prompt_text(
             "MASTER_WS_URL (a URL, host:port or just the port)",
             values.get("MASTER_WS_URL", "") or "ws://127.0.0.1:8765/report",
         ))
+    else:
+        updates["MASTER_WS_URL"] = ""
 
     _configure_pipeline(values, updates, sizing)
 

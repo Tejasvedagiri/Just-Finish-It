@@ -17,15 +17,18 @@ ROLE_LABEL = {
     "architect": "Architect (base and design)",
     "lead": "Lead (folders, files and stubs for one component)",
     "task": "Task (implement / integrate tickets for one file)",
-    "dev": "Dev (implement one leaf and its unit test)",
+    "dev": "Dev (implement one leaf and its unit test, or check one finished part)",
     "reviewer": "Reviewer (run the end-to-end test)",
     "cleanup": "Cleanup (tidy the working directory)",
 }
 
 ROLE_MAY = {
-    "architect": "read the repo; add or change top-level plan items; write the design and the runbook",
-    "lead": "create this component's folders and files with stubs; add file nodes under this node",
-    "task": "add implement/integrate leaves under this node; add helper stubs to this node's file",
+    "architect": "read the repo; probe the ground truth with read-only commands and capture each component's "
+                 "evidence of it; add or change top-level plan items; write the design and the runbook",
+    "lead": "create this component's folders and files with stubs; add file nodes under this node; capture the "
+            "ground truth's evidence for each file's cases",
+    "task": "add implement/integrate leaves under this node (each with its own evidence under a ground truth); "
+            "add helper stubs to this node's file",
     "dev": "edit the files listed above; write one unit test; run commands from the runbook",
     "reviewer": "run the app and the e2e scenario from the runbook; read files; report",
     "cleanup": "move or delete stray files outside the deliverable",
@@ -35,7 +38,7 @@ ROLE_MUST_NOT = {
     "architect": "write code or files; add operational steps (run/stop/test commands) as plan items",
     "lead": "write function bodies; touch other components or other nodes; change the design",
     "task": "write function bodies; touch other files or other nodes; change the design",
-    "dev": "change other files' behaviour, other plan nodes, the design or the plan",
+    "dev": "change other files' behaviour, other plan nodes, the design or the plan, or the evidence",
     "reviewer": "fix code yourself; change the plan",
     "cleanup": "touch .git, .jfi/, the deliverable's source/tests/docs, or anything you're unsure about",
 }
@@ -53,6 +56,7 @@ class ScopeAnchor:
     reason: str = ""  # a redo's Laya reason, or the node an escalation came from
     notes: str = ""
     references: Sequence[str] = field(default_factory=tuple)  # already resolved (design entries inlined)
+    cases: Sequence[str] = field(default_factory=tuple)  # ground-truth cases (evidence in .jfi/evidence/<session>/)
 
     def render(self) -> str:
         lines = ["SCOPE (fixed for this whole conversation)",
@@ -65,6 +69,8 @@ class ScopeAnchor:
             lines.append(f"  files:     {', '.join(self.files)}")
         if self.notes:
             lines.append(f"  notes:     {self.notes}")
+        if self.cases:
+            lines.append(f"  cases:     {', '.join(self.cases)} (compare_evidence <case> shows its evidence)")
         if self.references:
             lines.append("  read first:")
             lines.extend(f"    - {ref}" for ref in self.references)

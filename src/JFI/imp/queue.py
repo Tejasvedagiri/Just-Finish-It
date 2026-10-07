@@ -1,11 +1,15 @@
 """Dev's work queue (laya_plan.md §6, G6).
 
-The queue is every real leaf (no children) the planner settled as GOOD, in
-tree order, and a leaf waits for its blockers:
+The queue is every node the planner settled as GOOD -- leaves AND the
+parents above them -- children first: 1.1.1, 1.1.2, 1.1.3, then 1.1, then 1.
+A parent's turn is Dev checking the part as a whole (its done_when, its
+ground-truth cases) once everything under it is done. A node waits for its
+blockers:
 
+- everything under it (a parent comes after its children);
 - its own `depends_on` (Task orders leaves inside one file);
 - the `depends_on` of every ancestor (Lead orders files, Architect orders
-  components): a leaf waits for every leaf under any node its ancestors
+  components): a node waits for every node under any node its ancestors
   depend on.
 
 Task sees only one file, so without the ancestor rule Dev could implement
@@ -32,43 +36,66 @@ def tree_order(nodes: Sequence[Leaf]) -> List[Leaf]:
     return out
 
 
-def dev_leaves(nodes: Sequence[Leaf]) -> List[Leaf]:
-    """Every leaf Dev owns, finished or not, in tree order."""
-    parents = {n.parent_id for n in nodes}
-    return [n for n in tree_order(nodes) if n.id not in parents and not n.paused and n.plan_status == GOOD]
+def post_order(nodes: Sequence[Leaf]) -> List[Leaf]:
+    """Children before their parent: 1.1.1, 1.1.2, 1.1, 1.2.1, 1.2, 1."""
+    out: List[Leaf] = []
+    stack = [(node, False) for node in reversed(children_of(nodes, None))]
+    while stack:
+        node, expanded = stack.pop()
+        if expanded:
+            out.append(node)
+            continue
+        stack.append((node, True))
+        stack.extend((child, False) for child in reversed(children_of(nodes, node.id)))
+    return out
 
 
-def _leaves_under(nodes: Sequence[Leaf], node_id: int) -> Iterable[int]:
-    parents = {n.parent_id for n in nodes}
+def dev_nodes(nodes: Sequence[Leaf]) -> List[Leaf]:
+    """Every node Dev finishes, finished or not, children first."""
+    return [n for n in post_order(nodes) if not n.paused and n.plan_status == GOOD]
+
+
+def _nodes_under(nodes: Sequence[Leaf], node_id: int) -> Iterable[int]:
+    """The node and everything below it."""
     frontier = [node_id]
     while frontier:
         current = frontier.pop()
-        if current not in parents:
-            yield current
+        yield current
         frontier.extend(c.id for c in children_of(nodes, current))
 
 
-def blockers(nodes: Sequence[Leaf], leaf: Leaf) -> Set[int]:
-    by_id = {n.id: n for n in nodes}
-    wanted: Set[int] = set(leaf.depends_on or [])
-    parent = by_id.get(leaf.parent_id) if leaf.parent_id is not None else None
+def _ancestors(by_id: Dict[int, Leaf], node: Leaf) -> List[Leaf]:
+    out = []
+    parent = by_id.get(node.parent_id) if node.parent_id is not None else None
     while parent is not None:
-        wanted |= set(parent.depends_on or [])
+        out.append(parent)
         parent = by_id.get(parent.parent_id) if parent.parent_id is not None else None
-    out: Set[int] = set()
+    return out
+
+
+def blockers(nodes: Sequence[Leaf], node: Leaf) -> Set[int]:
+    by_id = {n.id: n for n in nodes}
+    ancestors = _ancestors(by_id, node)
+    wanted: Set[int] = set(node.depends_on or [])
+    for parent in ancestors:
+        wanted |= set(parent.depends_on or [])
+    out: Set[int] = set(_nodes_under(nodes, node.id))
     for node_id in wanted:
         if node_id in by_id:
-            out.update(_leaves_under(nodes, node_id))
-    out.discard(leaf.id)
+            out.update(_nodes_under(nodes, node_id))
+    # A node that depends on its own ancestor would otherwise wait for that
+    # ancestor, which waits for it.
+    out -= {a.id for a in ancestors}
+    out.discard(node.id)
     return out
 
 
 def next_leaf(nodes: Sequence[Leaf], deferred: Dict[int, int]) -> Optional[Leaf]:
-    """The first unfinished leaf whose blockers are all finished. `deferred`
-    maps a leaf to the leaf it must wait for (a missing dependency found at
+    """The first unfinished node whose blockers are all finished. `deferred`
+    maps a node to the node it must wait for (a missing dependency found at
     test time). A dependency cycle across levels would otherwise stall the
-    queue, so the first unfinished leaf is returned then."""
-    todo = [n for n in dev_leaves(nodes) if n.status not in FINISHED]
+    queue, so the first unfinished node is returned then."""
+    todo = [n for n in dev_nodes(nodes) if n.status not in FINISHED]
     if not todo:
         return None
     todo_ids = {n.id for n in todo}

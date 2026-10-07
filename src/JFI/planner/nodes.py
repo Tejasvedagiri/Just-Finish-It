@@ -14,12 +14,14 @@ Rules enforced here, in code, not just in prompts:
 import html
 import os
 import re
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
 from sqlmodel import select
 
 from JFI.models import Leaf, Phase, PlanEvent, RunbookEntry, get_session
 from JFI.models.enums import LeafStatus
+from JFI.tool.evidence_tools import case_problem
 from JFI.tool.result_cap import cap_result
 
 GOOD, BREAKDOWN, REDO = "GOOD", "BREAKDOWN", "REDO"
@@ -117,6 +119,8 @@ def render_node(node: Leaf) -> str:
         bits.append(f"files: {', '.join(node.files)}")
     if node.depends_on:
         bits.append(f"depends_on: {node.depends_on}")
+    if node.cases:
+        bits.append(f"cases: {', '.join(node.cases)}")
     bits.append(f"status: {node.plan_status or 'unjudged'}" + (f" ({node.redo_reason})" if node.redo_reason else ""))
     return "\n  ".join(bits)
 
@@ -148,6 +152,27 @@ def _duplicate_of(nodes: Sequence[Leaf], description: str, files: Sequence[str])
                  and target_symbol(n.description) == symbol and set(n.files or []) & set(files)), None)
 
 
+def _words(text: str) -> set:
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _same_component(nodes: Sequence[Leaf], description: str) -> Optional[Leaf]:
+    """A top-level component that already says (almost) the same: most of
+    their words shared. Observed on the portfolio-dashboard run: the
+    Architect's later episodes added "Scaffold Next.js app ..." again word for
+    word as component 15, and "Extract all dashboard data into CSV files under
+    data/ ..." as 16 beside 2's "Extract all embedded JS data into CSV files
+    under data/ ..." (0.67 of their words shared). The genuinely different
+    pages of that plan shared at most 0.35."""
+    wanted = _words(description)
+    for node in nodes:
+        if node.parent_id is None and node.level == "architect":
+            theirs = _words(node.description)
+            if wanted and len(wanted & theirs) / len(wanted | theirs) >= 0.6:
+                return node
+    return None
+
+
 def _sources(files: Sequence[str]) -> set:
     return {f for f in files if "test" not in f.lower()}
 
@@ -161,14 +186,18 @@ def _file_owner(nodes: Sequence[Leaf], files: Sequence[str]) -> Optional[Leaf]:
     wanted = _sources(files)
     if not wanted:
         return None
-    return next((n for n in nodes if n.level == "lead" and n.status != LeafStatus.DONE
-                 and _sources(n.files or []) & wanted), None)
+    return next((n for n in nodes if n.level == "lead" and _sources(n.files or []) & wanted), None)
 
 
 # ------------------------------------------------------------------ writes
 
 KINDS = ("project", "component", "code", "artifact", "section", "implement", "integrate", "modify", "delete",
          "fill", "passage")
+# Kinds whose node needs no ground-truth case of its own: a deletion has no
+# output to compare. (`compare` leaves, one per case, were the old way of
+# checking evidence: sessions planned before every node compared itself still
+# have them, and Dev still runs them.)
+NO_CASE_KINDS = ("delete", "compare")
 
 
 def _normalise_kind(kind: Optional[str]) -> Optional[str]:
@@ -268,10 +297,52 @@ def _test_path_problem(engine, session_id: str, files: Sequence[str]) -> Optiona
             f"runbook's test_dir and test_naming give.")
 
 
+def _normalise_cases(cases: Sequence[str]) -> tuple[list, Optional[str]]:
+    names = [str(c).strip().lower() for c in (cases or []) if str(c).strip()]
+    for name in names:
+        problem = case_problem(name)
+        if problem:
+            return [], problem
+    return list(dict.fromkeys(names)), None
+
+
+def _cases_problem(nodes: Sequence[Leaf], node_id: Optional[int], cases: Sequence[str]) -> Optional[str]:
+    """A case (and so its evidence file's task number) belongs to one node:
+    checked here rather than trusted to the prompt."""
+    taken = {c: n.id for n in nodes if n.kind != "compare" and n.id != node_id for c in (n.cases or [])}
+    clash = [c for c in cases if c in taken]
+    if clash:
+        return (f"Error: case {clash[0]} is already on node {taken[clash[0]]}. A case belongs to one node: give "
+                f"this one its own case (capture_evidence a new name).")
+    return None
+
+
+def reopen_with_ancestors(engine, session_id: str, node_id: int) -> List[int]:
+    """Sets every finished ancestor of a node back to to-do: a parent is
+    checked after everything under it, so a reopened or new child means the
+    parent has to be checked again. Returns the ids reopened."""
+    reopened = []
+    with get_session(engine) as db:
+        row = db.get(Leaf, node_id)
+        parent_id = row.parent_id if row is not None else None
+        while parent_id is not None:
+            parent = db.get(Leaf, parent_id)
+            if parent is None:
+                break
+            if parent.status in (LeafStatus.DONE, LeafStatus.SKIPPED):
+                parent.status, parent.started_at, parent.ended_at, parent.attempt_count = \
+                    LeafStatus.TODO, None, None, 0
+                db.add(parent)
+                reopened.append(parent.id)
+            parent_id = parent.parent_id
+        db.commit()
+    return reopened
+
+
 def add_node(engine, session_id: str, role: str, scope_id: Optional[int], description: str,
              done_when: str = "", files: Sequence[str] = (), depends_on: Sequence[int] = (),
              kind: Optional[str] = None, parent_id: Optional[int] = None, notes: str = "",
-             references: Sequence[str] = ()) -> str:
+             references: Sequence[str] = (), cases: Sequence[str] = (), root: Optional[Path] = None) -> str:
     description, done_when, notes = _plain(description), _plain(done_when), _plain(notes)
     if not description:
         return "Error: a node needs a description."
@@ -295,7 +366,7 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
         parent = by_id.get(parent_id)
         if parent is None:
             return f"Error: no node {parent_id}."
-        if parent.status == LeafStatus.DONE:
+        if parent.status == LeafStatus.DONE and not children_of(nodes, parent_id):
             return f"Error: node {parent_id} is already done; add a new top-level node instead."
         if depth_of(by_id, parent) + 1 > MAX_LEAF_DEPTH:
             return (f"Error: that would be depth {depth_of(by_id, parent) + 1} (max {MAX_LEAF_DEPTH}). "
@@ -303,9 +374,18 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
     missing = [d for d in depends_on if d not in by_id]
     if missing:
         return _unknown_ids(nodes, parent_id, missing)
+    cases, problem = _normalise_cases(cases)
+    problem = problem or _cases_problem(nodes, None, cases)
+    if problem:
+        return problem
     test_problem = _test_path_problem(engine, session_id, files)
     if test_problem:
         return test_problem
+    if role == "architect" and parent_id is None:
+        twin = _same_component(nodes, description)
+        if twin is not None:
+            return (f"Error: component {twin.id} already covers this ({twin.description!r}). Don't add it "
+                    f"again: update_node({twin.id}, ...) if it needs more, or add only what's missing.")
     duplicate = _duplicate_of([n for n in nodes if n.id != parent_id], description, files)
     if duplicate is not None:
         return (f"Error: node {duplicate.id} already covers {target_symbol(description)}() in "
@@ -322,17 +402,21 @@ def add_node(engine, session_id: str, role: str, scope_id: Optional[int], descri
         node = Leaf(session_id=session_id, parent_id=parent_id, phase=Phase.IMP, sort_key=sort_key,
                     description=description, level=role, kind=kind, done_when=done_when or None,
                     notes=notes or None, references=list(references) or None,
-                    files=list(files) or None, depends_on=list(depends_on) or None)
+                    files=list(files) or None, depends_on=list(depends_on) or None, cases=cases or None)
         db.add(node)
         db.commit()
         db.refresh(node)
-        return f"Added node id={node.id}" + (f" under {parent_id}" if parent_id else " (top level)") + "."
+        new_id = node.id
+    # A new part under a finished parent: the parent is checked again after it.
+    reopen_with_ancestors(engine, session_id, new_id)
+    return f"Added node id={new_id}" + (f" under {parent_id}" if parent_id else " (top level)") + "."
 
 
 def update_node(engine, session_id: str, role: str, node_id: int, description: Optional[str] = None,
                 done_when: Optional[str] = None, files: Optional[Sequence[str]] = None,
                 depends_on: Optional[Sequence[int]] = None, kind: Optional[str] = None,
-                notes: Optional[str] = None, references: Optional[Sequence[str]] = None) -> str:
+                notes: Optional[str] = None, references: Optional[Sequence[str]] = None,
+                cases: Optional[Sequence[str]] = None, root: Optional[Path] = None) -> str:
     nodes = load_nodes(engine, session_id)
     by_id = {n.id: n for n in nodes}
     node = by_id.get(node_id)
@@ -340,7 +424,7 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
         return f"Error: no node {node_id}."
     if node.level != role:
         return f"Error: node {node_id} was written by the {node.level}; only the {node.level} can change it."
-    if node.status == LeafStatus.DONE:
+    if node.status == LeafStatus.DONE and not children_of(nodes, node_id):
         return f"Error: node {node_id} is done; it can't be rewritten."
     if notes is not None:
         notes = _plain(notes)
@@ -360,6 +444,11 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
         test_problem = _test_path_problem(engine, session_id, files)
         if test_problem:
             return test_problem
+    if cases is not None:
+        cases, problem = _normalise_cases(cases)
+        problem = problem or _cases_problem(nodes, node_id, cases)
+        if problem:
+            return problem
     with get_session(engine) as db:
         row = db.get(Leaf, node_id)
         if description is not None:
@@ -374,11 +463,17 @@ def update_node(engine, session_id: str, role: str, node_id: int, description: O
             row.files = list(files) or None
         if depends_on is not None:
             row.depends_on = list(depends_on) or None
+        if cases is not None:
+            row.cases = list(cases) or None
         if _normalise_kind(kind) is not None:
             row.kind = _normalise_kind(kind)
         row.plan_status = None  # rewritten -> re-judged
+        if row.status != LeafStatus.TODO:
+            # A finished parent that was rewritten is checked again.
+            row.status, row.started_at, row.ended_at, row.attempt_count = LeafStatus.TODO, None, None, 0
         db.add(row)
         db.commit()
+    reopen_with_ancestors(engine, session_id, node_id)
     return f"Updated node {node_id}; it will be judged again."
 
 
@@ -475,14 +570,16 @@ def render_plan(engine, session_id: str) -> str:
 
 # ------------------------------------------------------------------ tool binding + schemas
 
-def make_node_tools(engine, session_id: str, role: str, scope_id: Optional[int]) -> Dict[str, Callable]:
+def make_node_tools(engine, session_id: str, role: str, scope_id: Optional[int],
+                    root: Optional[Path] = None) -> Dict[str, Callable]:
     return {
         "add_node": lambda description, done_when="", files=(), depends_on=(), kind=None, parent_id=None,
-        notes="", references=(): add_node(engine, session_id, role, scope_id, description, done_when, files,
-                                          depends_on, kind, parent_id, notes, references),
+        notes="", references=(), cases=(): add_node(engine, session_id, role, scope_id, description, done_when, files,
+                                                    depends_on, kind, parent_id, notes, references, cases, root),
         "update_node": lambda node_id, description=None, done_when=None, files=None, depends_on=None, kind=None,
-        notes=None, references=None: update_node(engine, session_id, role, node_id, description, done_when, files,
-                                                 depends_on, kind, notes, references),
+        notes=None, references=None, cases=None: update_node(engine, session_id, role, node_id, description,
+                                                             done_when, files, depends_on, kind, notes, references,
+                                                             cases, root),
         "delete_node": lambda node_id: delete_node(engine, session_id, role, node_id),
         "get_node": lambda node_id: get_node(engine, session_id, node_id),
         "list_nodes": lambda parent_id=None: list_nodes(engine, session_id, parent_id),
@@ -511,6 +608,9 @@ _FIELDS = {
     "depends_on": {"type": "array", "items": {"type": "integer"}, "description": "node ids that must be done first"},
     "kind": {"type": "string", "description": "ONE word. Architect: component or project. Lead: code or artifact. "
                                               "Task: implement, integrate, modify, delete or fill."},
+    "cases": {"type": "array", "items": {"type": "string"},
+              "description": "this node's own ground-truth cases (capture_evidence each); Dev compares the node "
+                             "with them when it's done"},
 }
 NODE_TOOL_SCHEMAS = [
     _fn("add_node", "Add a plan node. Architect adds top-level nodes; Lead and Task add nodes under the node "
